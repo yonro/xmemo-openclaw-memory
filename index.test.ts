@@ -33,7 +33,8 @@ describe("xmemo-memory plugin entry", () => {
       runtime: { config: { current: () => ({ plugins: {} }) } },
     };
 
-    plugin.register(mockApi as never);
+    expect(plugin.register).toBeDefined();
+    plugin.register!(mockApi as never);
 
     expect(registered.memoryCapability).toBeDefined();
     expect(registered.tools).toContain("memory_search");

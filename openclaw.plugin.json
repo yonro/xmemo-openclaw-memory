@@ -117,7 +117,7 @@
             "type": "object",
             "additionalProperties": false,
             "properties": {
-              "source": { "type": "string", "enum": ["env", "file", "exec"] },
+              "source": { "type": "string", "enum": ["env"] },
               "provider": { "type": "string" },
               "id": { "type": "string" }
             },
@@ -132,7 +132,7 @@
             "type": "object",
             "additionalProperties": false,
             "properties": {
-              "source": { "type": "string", "enum": ["env", "file", "exec"] },
+              "source": { "type": "string", "enum": ["env"] },
               "provider": { "type": "string" },
               "id": { "type": "string" }
             },

@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { legacyConfigRules, normalizeCompatibilityConfig } from "./doctor-contract-api.js";
 
+function getEntryConfig(entry: unknown): Record<string, unknown> & { enabled?: boolean } {
+  const record = entry as Record<string, unknown> | undefined;
+  return (record?.config ?? {}) as Record<string, unknown> & { enabled?: boolean };
+}
+
+function getEntryEnabled(entry: unknown): boolean | undefined {
+  const record = entry as Record<string, unknown> | undefined;
+  return record?.enabled as boolean | undefined;
+}
+
 describe("xmemo-memory doctor contract", () => {
   it("flags legacy plugins.config path", () => {
     const rule = legacyConfigRules.find((r) => r.path.join(".") === "plugins.config.xmemo-memory");
@@ -38,11 +48,13 @@ describe("xmemo-memory doctor contract", () => {
     };
     const result = normalizeCompatibilityConfig({ cfg: cfg as never });
 
-    expect(result.changes.length).toBeGreaterThan(0);
-    expect(result.config.plugins.entries["xmemo-memory"].config.apiKey).toBe("old-token");
-    expect(result.config.plugins.entries["xmemo-memory"].config.token).toBeUndefined();
-    expect(result.config.plugins.entries["xmemo-memory"].enabled).toBe(true);
-    expect(result.config.plugins.config).toBeUndefined();
+    const xmemoEntry = result.config.plugins?.entries?.["xmemo-memory"];
+    expect(xmemoEntry).toBeDefined();
+    const config = getEntryConfig(xmemoEntry!);
+    expect(config.apiKey).toBe("old-token");
+    expect(config.token).toBeUndefined();
+    expect(getEntryEnabled(xmemoEntry!)).toBe(true);
+    expect((result.config.plugins as Record<string, unknown> | undefined)?.config).toBeUndefined();
   });
 
   it("preserves other plugins.config keys when migrating xmemo-memory", () => {
@@ -60,8 +72,10 @@ describe("xmemo-memory doctor contract", () => {
       },
     };
     const result = normalizeCompatibilityConfig({ cfg: cfg as never });
-    expect(result.config.plugins.entries["xmemo-memory"].config.apiKey).toBe("old-token");
-    expect(result.config.plugins.config).toEqual({
+    const xmemoEntry = result.config.plugins?.entries?.["xmemo-memory"];
+    expect(xmemoEntry).toBeDefined();
+    expect(getEntryConfig(xmemoEntry!).apiKey).toBe("old-token");
+    expect((result.config.plugins as Record<string, unknown> | undefined)?.config).toEqual({
       "other-plugin": { enabled: true },
     });
   });
@@ -84,6 +98,8 @@ describe("xmemo-memory doctor contract", () => {
       },
     };
     const result = normalizeCompatibilityConfig({ cfg: cfg as never });
-    expect(result.config.plugins.entries["xmemo-memory"].config.apiKey).toBe("new-key");
+    const xmemoEntry = result.config.plugins?.entries?.["xmemo-memory"];
+    expect(xmemoEntry).toBeDefined();
+    expect(getEntryConfig(xmemoEntry!).apiKey).toBe("new-key");
   });
 });

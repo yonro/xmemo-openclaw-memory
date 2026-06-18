@@ -79,6 +79,11 @@ export function registerXMemoCli(api: OpenClawPluginApi): void {
           }
         });
     },
-    { parentPath: ["memory"], commands: ["xmemo"] },
+    {
+      commands: ["xmemo"],
+      descriptors: [
+        { name: "xmemo", description: "XMemo cloud memory commands", hasSubcommands: true },
+      ],
+    },
   );
 }

@@ -69,6 +69,30 @@ describe("resolveXMemoMemoryConfig", () => {
     expect(cfg.agentId).toBe("env-agent");
   });
 
+  it("resolves an env SecretRef object for apiKey", () => {
+    const cfg = resolveXMemoMemoryConfig(
+      pluginConfig({ apiKey: { source: "env", provider: "default", id: "XMEMO_KEY" } }),
+      { XMEMO_KEY: "env-ref-key" },
+    );
+    expect(cfg.apiKey).toBe("env-ref-key");
+  });
+
+  it("resolves an env SecretRef object for the deprecated token alias", () => {
+    const cfg = resolveXMemoMemoryConfig(
+      pluginConfig({ token: { source: "env", provider: "default", id: "MEMORY_OS_API_KEY" } }),
+      { MEMORY_OS_API_KEY: "token-env-ref-key" },
+    );
+    expect(cfg.apiKey).toBe("token-env-ref-key");
+  });
+
+  it("falls back to env vars when env SecretRef id is not set", () => {
+    const cfg = resolveXMemoMemoryConfig(
+      pluginConfig({ apiKey: { source: "env", provider: "default", id: "UNSET_VAR" } }),
+      { XMEMO_KEY: "fallback-key" },
+    );
+    expect(cfg.apiKey).toBe("fallback-key");
+  });
+
   it("prefers apiKey over deprecated token", () => {
     const cfg = resolveXMemoMemoryConfig(pluginConfig({ apiKey: "new", token: "old" }), {});
     expect(cfg.apiKey).toBe("new");

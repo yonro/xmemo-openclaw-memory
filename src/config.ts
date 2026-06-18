@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { resolvePluginConfigObject } from "openclaw/plugin-sdk/plugin-config-runtime";
-import { normalizeSecretInputString } from "openclaw/plugin-sdk/secret-input";
+import { coerceSecretRef, normalizeSecretInputString } from "openclaw/plugin-sdk/secret-input";
 
 export type XMemoAuthMode = "api-key" | "bearer" | "both";
 
@@ -68,17 +68,36 @@ function normalizeAuthMode(input: string | undefined): XMemoAuthMode {
   return DEFAULT_AUTH_MODE;
 }
 
+function resolveEnvSecretRef(value: unknown, env: NodeJS.ProcessEnv): string | undefined {
+  const ref = coerceSecretRef(value);
+  if (ref && ref.source === "env") {
+    return firstEnv(env, [ref.id]);
+  }
+  return undefined;
+}
+
 function resolveApiKey(
   pluginConfig: Record<string, unknown>,
   env: NodeJS.ProcessEnv,
 ): string | undefined {
-  // Prefer the modern `apiKey` config key; fall back to deprecated `token` or env vars.
-  const fromConfig =
+  // Prefer the modern `apiKey` config key; fall back to deprecated `token`.
+  const fromConfigString =
     normalizeSecretInputString(pluginConfig.apiKey) ??
     normalizeSecretInputString(pluginConfig.token);
-  if (fromConfig) {
-    return fromConfig;
+  if (fromConfigString) {
+    return fromConfigString;
   }
+
+  // Support canonical env SecretRef: { source: "env", provider: "default", id: "XMEMO_KEY" }.
+  // We only resolve env refs here; file/exec must not be silently ignored or falsely promised.
+  const fromEnvRef =
+    resolveEnvSecretRef(pluginConfig.apiKey, env) ??
+    resolveEnvSecretRef(pluginConfig.token, env);
+  if (fromEnvRef) {
+    return fromEnvRef;
+  }
+
+  // Final fallback to well-known env vars.
   return firstEnv(env, API_KEY_ENV_VARS);
 }
 

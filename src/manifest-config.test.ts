@@ -24,16 +24,16 @@ describe("xmemo-memory manifest config schema", () => {
     expect(result.ok).toBe(true);
   });
 
-  it("accepts a SecretRef object for apiKey", () => {
+  it("accepts an env SecretRef object for apiKey", () => {
     const result = validate({
       apiKey: { source: "env", provider: "default", id: "XMEMO_KEY" },
     });
     expect(result.ok).toBe(true);
   });
 
-  it("accepts a SecretRef object for the deprecated token alias", () => {
+  it("accepts an env SecretRef object for the deprecated token alias", () => {
     const result = validate({
-      token: { source: "file", provider: "default", id: "xmemo_token" },
+      token: { source: "env", provider: "default", id: "XMEMO_KEY" },
     });
     expect(result.ok).toBe(true);
   });
@@ -43,6 +43,18 @@ describe("xmemo-memory manifest config schema", () => {
       apiKey: { source: "env", id: "XMEMO_KEY" },
     });
     expect(result.ok).toBe(false);
+  });
+
+  it("rejects file/exec secret sources", () => {
+    const fileResult = validate({
+      apiKey: { source: "file", provider: "default", id: "xmemo_token" },
+    });
+    expect(fileResult.ok).toBe(false);
+
+    const execResult = validate({
+      apiKey: { source: "exec", provider: "vault", id: "xmemo/key" },
+    });
+    expect(execResult.ok).toBe(false);
   });
 
   it("rejects unsupported secret sources", () => {

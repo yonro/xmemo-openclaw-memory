@@ -1,10 +1,13 @@
+import type { AgentToolResult } from "openclaw/plugin-sdk/agent-core";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { escapeMemoryForPrompt } from "./memory-text.js";
 import { registerXMemoTools } from "./tools.js";
 
+type ToolResult = AgentToolResult<unknown>;
+
 function createApi(config: Record<string, unknown> = {}) {
-  const tools = new Map<string, { execute: (...args: unknown[]) => unknown }>();
+  const tools = new Map<string, { execute: (...args: unknown[]) => Promise<ToolResult> }>();
   const api = {
     config: {
       plugins: {
@@ -16,7 +19,7 @@ function createApi(config: Record<string, unknown> = {}) {
         },
       },
     } as OpenClawConfig,
-    registerTool: (tool: { name: string; execute: (...args: unknown[]) => unknown }) => {
+    registerTool: (tool: { name: string; execute: (...args: unknown[]) => Promise<ToolResult> }) => {
       tools.set(tool.name, tool);
     },
     registerMemoryCapability: () => {},
@@ -27,6 +30,14 @@ function createApi(config: Record<string, unknown> = {}) {
   };
   registerXMemoTools(api as never);
   return { api, tools };
+}
+
+function textContent(result: ToolResult): string {
+  const first = result.content[0];
+  if (first && typeof first === "object" && "text" in first && typeof first.text === "string") {
+    return first.text;
+  }
+  return "";
 }
 
 function mockResponse(body: unknown, status = 200): Response {
@@ -71,7 +82,7 @@ describe("memory_search failure-open", () => {
     const result = await tools.get("memory_search")!.execute("tc-1", { query: "hello" });
 
     expect(result.details).toMatchObject({ unavailable: true, errorType: "not_configured" });
-    expect(result.content[0]!.text).toContain("not configured");
+    expect(textContent(result)).toContain("not configured");
   });
 
   it("returns structured auth failure on 401 without throwing", async () => {
@@ -85,7 +96,7 @@ describe("memory_search failure-open", () => {
     const result = await tools.get("memory_search")!.execute("tc-1", { query: "hello" });
 
     expect(result.details).toMatchObject({ unavailable: true, errorType: "auth", status: 401 });
-    expect(result.content[0]!.text).toContain("unavailable (auth 401)");
+    expect(textContent(result)).toContain("unavailable (auth 401)");
   });
 
   it("returns structured auth failure on 403 without throwing", async () => {
@@ -107,7 +118,7 @@ describe("memory_search failure-open", () => {
     const result = await tools.get("memory_search")!.execute("tc-1", { query: "hello" });
 
     expect(result.details).toMatchObject({ unavailable: true, errorType: "network" });
-    expect(result.content[0]!.text).toContain("unavailable (network)");
+    expect(textContent(result)).toContain("unavailable (network)");
   });
 
   it("returns structured timeout failure on AbortError", async () => {
@@ -171,7 +182,7 @@ describe("memory_forget id/path validation", () => {
     const result = await tools.get("memory_forget")!.execute("tc-1", { path: "mem-123" });
 
     expect(result.details).toMatchObject({ error: "invalid memory id" });
-    expect(result.content[0]!.text).toContain("bucket/id segment");
+    expect(textContent(result)).toContain("bucket/id segment");
   });
 
   it("rejects natural-language descriptions", async () => {
@@ -190,7 +201,7 @@ describe("memory_forget id/path validation", () => {
     });
 
     expect(result.details).toMatchObject({ error: "invalid memory id" });
-    expect(result.content[0]!.text).toContain("cannot contain spaces");
+    expect(textContent(result)).toContain("cannot contain spaces");
   });
 
   it("rejects trailing slash that would misidentify bucket as id", async () => {

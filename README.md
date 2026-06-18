@@ -1,9 +1,9 @@
 # XMemo Cloud Memory plugin for OpenClaw
 
-This is an **external** official OpenClaw plugin. It is distributed through npm
+This is an **external** OpenClaw plugin. It is distributed through npm
 and ClawHub; it is **not** bundled in the default OpenClaw release. Source lives
-in the OpenClaw repo under `extensions/xmemo-memory`, following the same pattern
-as `memory-lancedb`, `slack`, `discord`, `qqbot`, and `synology-chat`.
+in the standalone repository `xmemo-openclaw-memory`, following the same external
+plugin pattern as `memory-lancedb`, `slack`, `discord`, `qqbot`, and `synology-chat`.
 
 The plugin uses [XMemo](https://xmemo.dev) as the active long-term memory
 backend. It competes for the `plugins.slots.memory` slot and replaces local
@@ -31,9 +31,9 @@ occupy the OpenClaw memory slot or replace `active-memory` recall.
 Install the plugin from npm or ClawHub:
 
 ```bash
-openclaw plugin install @openclaw/xmemo-memory
+openclaw plugins install @xmemo/openclaw-memory
 # or
-openclaw plugin install clawhub:@openclaw/xmemo-memory
+openclaw plugins install clawhub:@xmemo/openclaw-memory
 ```
 
 Then set the memory slot to `xmemo-memory` and enable the entry as shown below.
@@ -51,7 +51,7 @@ Activate the plugin by setting the memory slot:
     "entries": {
       "xmemo-memory": {
         "enabled": true,
-        "package": "@openclaw/xmemo-memory",
+        "package": "@xmemo/openclaw-memory",
         "config": {
           "baseUrl": "https://xmemo.dev",
           "apiKey": { "source": "env", "provider": "default", "id": "XMEMO_KEY" },
@@ -85,6 +85,17 @@ The key can also be configured with `apiKey` (preferred) or the deprecated
 secret manager and omit the `apiKey` field from `openclaw.json`; the plugin
 will read `XMEMO_KEY` directly.
 
+### SecretRef support
+
+The plugin resolves `apiKey`/`token` in this order:
+
+1. A literal string.
+2. An env SecretRef object: `{ "source": "env", "provider": "default", "id": "XMEMO_KEY" }`.
+3. The environment variables `XMEMO_KEY`, `MEMORY_OS_API_KEY`, or `MEMORY_OS_MCP_TOKEN`.
+
+Only `env` SecretRefs are supported. `file` and `exec` sources are not
+implemented and are rejected by the manifest config schema.
+
 ## Required environment variables
 
 - `XMEMO_KEY` — XMemo API key (preferred)
@@ -116,14 +127,31 @@ plugin does not write JSON sidecars to disk.
 ## CLI
 
 ```bash
-openclaw memory xmemo status
-openclaw memory xmemo status --json
+openclaw xmemo status
+openclaw xmemo status --json
 ```
 
 ## Auto-capture
 
 When `autoCapture: true`, the plugin listens for `agent_end` and stores
-high-signal user messages (preferences, decisions, facts) to XMemo. It skips:
+high-signal user messages (preferences, decisions, facts) to XMemo.
+
+> **External plugin permission required:** OpenClaw external plugins do not
+> receive conversation access by default. To enable auto-capture, add this to
+> your `openclaw.json`:
+>
+> ```json
+> {
+>   "hooks": {
+>     "allowConversationAccess": ["xmemo-memory"]
+>   }
+> }
+> ```
+>
+> Without this, the `agent_end` hook is silently skipped and no messages are
+> captured.
+
+It skips:
 
 - envelope/transport metadata
 - injected context blocks
@@ -145,17 +173,20 @@ After installing and configuring the plugin:
 
 ```bash
 export XMEMO_KEY="your-xmemo-api-key"
-openclaw memory xmemo status
-openclaw tool memory_search '{"query": "project conventions"}'
-openclaw tool memory_store '{"content": "OpenClaw uses pnpm and oxfmt."}'
+openclaw xmemo status
+openclaw xmemo status --json
 ```
 
 Expected results:
 
 - `status` shows `configured: true` and `connected: true` (or a clear
   `not connected` error if the key/network is wrong).
-- `memory_search` returns results or `No relevant XMemo memories found.`
-- `memory_store` returns a created memory id.
+- `openclaw plugins inspect xmemo-memory --runtime --json` lists the registered
+  tools (`memory_search`, `memory_get`, `memory_store`, `memory_forget`, plus
+  the `xmemo_*` workflow tools).
+
+The `memory_*` tools are invoked by the OpenClaw agent during a turn, not as
+standalone CLI commands.
 
 ## Migration from memory-core or memory-lancedb
 
