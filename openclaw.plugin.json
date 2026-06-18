@@ -1,0 +1,196 @@
+{
+  "id": "xmemo-memory",
+  "name": "XMemo Cloud Memory",
+  "description": "Use XMemo (xmemo.dev) as the active long-term memory backend for OpenClaw.",
+  "kind": "memory",
+  "activation": {
+    "onStartup": false,
+    "onCommands": ["memory"]
+  },
+  "contracts": {
+    "tools": [
+      "memory_search",
+      "memory_get",
+      "memory_store",
+      "memory_forget",
+      "xmemo_todo_create",
+      "xmemo_todo_list",
+      "xmemo_todo_complete",
+      "xmemo_record_event"
+    ]
+  },
+  "uiHints": {
+    "baseUrl": {
+      "label": "XMemo Service URL",
+      "placeholder": "https://xmemo.dev",
+      "help": "Base URL of the XMemo instance. Use a private/self-hosted URL if not using the hosted service.",
+      "advanced": true
+    },
+    "apiKey": {
+      "label": "XMemo API Key",
+      "placeholder": "xmemo_...",
+      "help": "Create a scoped API key in XMemo Memory Console -> API Keys -> Create API key. Prefer setting XMEMO_KEY instead of storing the key here.",
+      "sensitive": true
+    },
+    "token": {
+      "label": "XMemo Token (deprecated)",
+      "placeholder": "xmemo_...",
+      "help": "Deprecated alias for apiKey. Prefer apiKey or the XMEMO_KEY environment variable.",
+      "sensitive": true,
+      "advanced": true
+    },
+    "authMode": {
+      "label": "Auth Mode",
+      "placeholder": "api-key",
+      "help": "How to send the credential: api-key (X-API-Key header), bearer (Authorization: Bearer), or both.",
+      "advanced": true
+    },
+    "bucket": {
+      "label": "Default Bucket",
+      "placeholder": "openclaw",
+      "help": "Default bucket for memories created by OpenClaw."
+    },
+    "scope": {
+      "label": "Default Scope",
+      "placeholder": "openclaw",
+      "help": "Optional scope for isolating this workspace/agent.",
+      "advanced": true
+    },
+    "teamId": {
+      "label": "Team ID",
+      "placeholder": "",
+      "help": "Optional team/organization id for enterprise XMemo deployments.",
+      "advanced": true
+    },
+    "agentId": {
+      "label": "Agent ID",
+      "placeholder": "openclaw",
+      "help": "Non-secret agent identifier sent to XMemo for attribution.",
+      "advanced": true
+    },
+    "autoCapture": {
+      "label": "Auto Capture",
+      "help": "Automatically persist high-signal decisions and fixes to XMemo."
+    },
+    "captureMaxChars": {
+      "label": "Capture Max Chars",
+      "help": "Maximum message length eligible for auto-capture.",
+      "advanced": true,
+      "placeholder": "500"
+    },
+    "customTriggers": {
+      "label": "Custom Auto-Capture Triggers",
+      "help": "Additional words or phrases that trigger auto-capture (case-insensitive).",
+      "advanced": true
+    },
+    "recallMaxChars": {
+      "label": "Recall Query Max Chars",
+      "help": "Maximum prompt/query length sent to XMemo for recall.",
+      "advanced": true,
+      "placeholder": "1000"
+    },
+    "recallMaxItems": {
+      "label": "Recall Max Items",
+      "help": "Maximum number of memories returned by XMemo recall.",
+      "advanced": true,
+      "placeholder": "8"
+    },
+    "recallMaxTokens": {
+      "label": "Recall Max Tokens",
+      "help": "Maximum token budget for the recalled context package.",
+      "advanced": true,
+      "placeholder": "1500"
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "baseUrl": {
+        "type": "string",
+        "format": "uri"
+      },
+      "apiKey": {
+        "oneOf": [
+          { "type": "string" },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "source": { "type": "string", "enum": ["env", "file", "exec"] },
+              "provider": { "type": "string" },
+              "id": { "type": "string" }
+            },
+            "required": ["source", "provider", "id"]
+          }
+        ]
+      },
+      "token": {
+        "oneOf": [
+          { "type": "string" },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "source": { "type": "string", "enum": ["env", "file", "exec"] },
+              "provider": { "type": "string" },
+              "id": { "type": "string" }
+            },
+            "required": ["source", "provider", "id"]
+          }
+        ]
+      },
+      "authMode": {
+        "type": "string",
+        "enum": ["api-key", "bearer", "both"],
+        "default": "api-key"
+      },
+      "bucket": {
+        "type": "string",
+        "default": "openclaw"
+      },
+      "scope": {
+        "type": ["string", "null"]
+      },
+      "teamId": {
+        "type": ["string", "null"]
+      },
+      "agentId": {
+        "type": "string",
+        "default": "openclaw"
+      },
+      "autoCapture": {
+        "type": "boolean",
+        "default": false
+      },
+      "captureMaxChars": {
+        "type": "number",
+        "minimum": 100,
+        "maximum": 10000,
+        "default": 500
+      },
+      "customTriggers": {
+        "type": "array",
+        "items": { "type": "string" }
+      },
+      "recallMaxChars": {
+        "type": "number",
+        "minimum": 100,
+        "maximum": 10000,
+        "default": 1000
+      },
+      "recallMaxItems": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 50,
+        "default": 8
+      },
+      "recallMaxTokens": {
+        "type": "integer",
+        "minimum": 100,
+        "maximum": 8000,
+        "default": 1500
+      }
+    }
+  }
+}
