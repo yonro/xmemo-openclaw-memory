@@ -50,6 +50,7 @@
     ],
     "install": {
       "npmSpec": "@xmemo/openclaw-memory",
+      "clawhubSpec": "clawhub:@xmemo/openclaw-memory",
       "defaultChoice": "npm",
       "minHostVersion": ">=2026.6.8"
     },
