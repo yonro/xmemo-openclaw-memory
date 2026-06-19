@@ -1,6 +1,6 @@
 {
   "name": "@xmemo/openclaw-memory",
-  "version": "2026.6.20",
+  "version": "2026.6.21",
   "description": "OpenClaw memory plugin backed by XMemo cloud memory (xmemo.dev).",
   "repository": {
     "type": "git",
