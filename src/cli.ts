@@ -80,7 +80,6 @@ export function registerXMemoCli(api: OpenClawPluginApi): void {
         });
     },
     {
-      commands: ["xmemo"],
       descriptors: [
         { name: "xmemo", description: "XMemo cloud memory commands", hasSubcommands: true },
       ],
