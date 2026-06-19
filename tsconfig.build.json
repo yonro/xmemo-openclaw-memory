@@ -12,8 +12,9 @@
     "declaration": true,
     "declarationMap": false,
     "sourceMap": false,
-    "noEmit": true,
-    "types": ["node", "vitest/globals"]
+    "outDir": "dist",
+    "types": ["node"]
   },
-  "include": ["index.ts", "index.test.ts", "doctor-contract-api.ts", "doctor-contract-api.test.ts", "src/**/*.ts", "openclaw.plugin.json"]
+  "include": ["index.ts", "doctor-contract-api.ts", "src/**/*.ts", "openclaw.plugin.json"],
+  "exclude": ["src/**/*.test.ts"]
 }

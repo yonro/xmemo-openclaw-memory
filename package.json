@@ -1,24 +1,54 @@
 {
-  "name": "@openclaw/xmemo-memory",
+  "name": "@xmemo/openclaw-memory",
   "version": "2026.6.18",
   "description": "OpenClaw memory plugin backed by XMemo cloud memory (xmemo.dev).",
   "repository": {
     "type": "git",
-    "url": "https://github.com/openclaw/openclaw"
+    "url": "https://github.com/xmemo/xmemo-openclaw-memory"
   },
   "type": "module",
+  "main": "./dist/index.js",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist/**",
+    "openclaw.plugin.json",
+    "README.md",
+    "package.json",
+    "npm-shrinkwrap.json"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint .",
+    "prepack": "pnpm build"
+  },
   "dependencies": {
     "typebox": "1.1.39"
   },
   "devDependencies": {
-    "@openclaw/plugin-sdk": "workspace:*"
+    "@types/node": "25.9.1",
+    "openclaw": "2026.6.8",
+    "oxlint": "0.16.8",
+    "typescript": "6.0.3",
+    "vitest": "4.1.8"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.6.8"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
   },
   "openclaw": {
     "extensions": [
-      "./index.ts"
+      "./dist/index.js"
     ],
     "install": {
-      "npmSpec": "@openclaw/xmemo-memory",
+      "npmSpec": "@xmemo/openclaw-memory",
       "defaultChoice": "npm",
       "minHostVersion": ">=2026.6.8"
     },
