@@ -4,8 +4,8 @@
 
 This is an **external** OpenClaw plugin. It is distributed through npm
 and ClawHub; it is **not** bundled in the default OpenClaw release. Source lives
-in the standalone repository `xmemo-openclaw-memory`, following the same external
-plugin pattern as `memory-lancedb`, `slack`, `discord`, `qqbot`, and `synology-chat`.
+in the standalone repository `xmemo-openclaw-memory`, following the external
+plugin pattern.
 
 The plugin uses [XMemo](https://xmemo.dev) as the active long-term memory
 backend. It competes for the `plugins.slots.memory` slot and replaces local
