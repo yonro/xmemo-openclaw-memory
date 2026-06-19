@@ -1,9 +1,10 @@
-// XMemo Cloud Memory plugin entrypoint.
+// XMemo for OpenClaw plugin entrypoint.
 //
-// This plugin makes XMemo (xmemo.dev) the active long-term memory backend for OpenClaw.
-// It implements the OpenClaw `kind: "memory"` slot contract by registering a
-// MemoryPluginCapability with prompt building, flush planning, and a remote
-// MemorySearchManager backed by the XMemo REST API.
+// This plugin brings XMemo's identity-aware memory control plane into OpenClaw,
+// making XMemo the active long-term memory backend. It implements the OpenClaw
+// `kind: "memory"` slot contract by registering a MemoryPluginCapability with
+// prompt building, flush planning, and a remote MemorySearchManager backed by
+// the XMemo REST API.
 
 import type { OpenClawPluginDefinition } from "openclaw/plugin-sdk/plugin-entry";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
@@ -15,8 +16,8 @@ import { registerXMemoTools } from "./src/tools.js";
 
 const plugin: OpenClawPluginDefinition = definePluginEntry({
   id: "xmemo-memory",
-  name: "XMemo Cloud Memory",
-  description: "Cloud-backed long-term memory for OpenClaw via XMemo.",
+  name: "XMemo for OpenClaw",
+  description: "XMemo identity-aware memory control plane for OpenClaw.",
   kind: "memory",
   register(api) {
     api.registerMemoryCapability({

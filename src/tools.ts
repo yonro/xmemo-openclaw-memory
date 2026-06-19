@@ -10,6 +10,7 @@ import {
   type XMemoRememberRequest,
   type XMemoReminderRequest,
   type XMemoTimelineEventRequest,
+  type XMemoUpdateMemoryRequest,
 } from "./client.js";
 import { resolveXMemoMemoryConfig } from "./config.js";
 import { escapeMemoryForPrompt } from "./memory-text.js";
@@ -606,5 +607,374 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
       },
     },
     { names: ["xmemo_record_event"] },
+  );
+
+  api.registerTool(
+    {
+      name: "xmemo_memory_list",
+      label: "XMemo Memory List",
+      description:
+        "List XMemo memories matching a query or filter. Useful for browsing recent memories without a semantic search.",
+      parameters: Type.Object({
+        query: Type.Optional(Type.String({ description: "Search query (optional)" })),
+        maxResults: optionalPositiveInteger("Max results (default: 20)"),
+        memory_type: Type.Optional(Type.String({ description: "Filter by memory type" })),
+      }),
+      async execute(_toolCallId, params, signal) {
+        const client = buildClient(api);
+        if (!client) {
+          return {
+            content: [
+              { type: "text", text: "XMemo is not configured. Set XMEMO_KEY to enable memory list." },
+            ],
+            details: { unavailable: true },
+          };
+        }
+
+        const cfg = resolveXMemoMemoryConfig(api.config);
+        const raw = asToolParamsRecord(params);
+        const query = typeof raw.query === "string" ? raw.query.trim() : "";
+        const maxResults = typeof raw.maxResults === "number" ? raw.maxResults : 20;
+
+        try {
+          const response = await client.searchMemory(
+            {
+              query,
+              bucket: cfg.bucket,
+              scope: cfg.scope ?? null,
+              team_id: cfg.teamId ?? null,
+              max_items: maxResults,
+            },
+            signal,
+          );
+
+          if (response.results.length === 0) {
+            return {
+              content: [{ type: "text", text: "No XMemo memories found." }],
+              details: { count: 0 },
+            };
+          }
+
+          const lines = response.results.map(
+            (m, i) =>
+              `${i + 1}. ${m.id}${m.path ? ` (${m.path})` : ""}: ${escapeMemoryForPrompt(m.content.slice(0, 120))}`,
+          );
+          return {
+            content: [{ type: "text", text: `XMemo memories:\n\n${lines.join("\n")}` }],
+            details: { count: response.results.length, memories: response.results },
+          };
+        } catch (error) {
+          return buildErrorResult(error);
+        }
+      },
+    },
+    { names: ["xmemo_memory_list"] },
+  );
+
+  api.registerTool(
+    {
+      name: "xmemo_memory_update",
+      label: "XMemo Memory Update",
+      description:
+        "Update an existing XMemo memory by id. Only the provided fields are changed.",
+      parameters: Type.Object({
+        id: Type.String({ description: "Memory id (or bucket/id path)" }),
+        content: Type.Optional(Type.String({ description: "New memory content" })),
+        path: Type.Optional(Type.String({ description: "New path/category" })),
+        memory_type: Type.Optional(Type.String({ description: "New memory type" })),
+        importance: Type.Optional(
+          Type.Number({ description: "New importance 0-1", minimum: 0, maximum: 1 }),
+        ),
+        status: Type.Optional(Type.String({ description: "New status" })),
+      }),
+      async execute(_toolCallId, params, signal) {
+        const client = buildClient(api);
+        if (!client) {
+          return {
+            content: [
+              { type: "text", text: "XMemo is not configured. Set XMEMO_KEY to enable memory update." },
+            ],
+            details: { unavailable: true },
+          };
+        }
+
+        const raw = asToolParamsRecord(params);
+        const relPath = typeof raw.id === "string" ? raw.id.trim() : "";
+        const parsed = parseForgetMemoryId(relPath);
+        if (!parsed.ok) {
+          return {
+            content: [{ type: "text", text: parsed.reason }],
+            details: { error: "invalid memory id" },
+          };
+        }
+
+        const update: XMemoUpdateMemoryRequest = {};
+        if (typeof raw.content === "string") update.content = raw.content;
+        if (typeof raw.path === "string") update.path = raw.path;
+        if (typeof raw.memory_type === "string") update.memory_type = raw.memory_type;
+        if (typeof raw.importance === "number") update.importance = raw.importance;
+        if (typeof raw.status === "string") update.status = raw.status;
+
+        if (Object.keys(update).length === 0) {
+          return {
+            content: [{ type: "text", text: "At least one field to update is required." }],
+            details: { error: "no update fields" },
+          };
+        }
+
+        try {
+          const memory = await client.updateMemory(parsed.id, update, signal);
+          return {
+            content: [
+              { type: "text", text: `Updated XMemo memory ${memory.id}.` },
+            ],
+            details: { action: "updated", id: memory.id },
+          };
+        } catch (error) {
+          return buildErrorResult(error);
+        }
+      },
+    },
+    { names: ["xmemo_memory_update"] },
+  );
+
+  api.registerTool(
+    {
+      name: "xmemo_restart_snapshot_save",
+      label: "XMemo Restart Snapshot Save",
+      description:
+        "Save a restart snapshot to XMemo so the current session state can be restored later.",
+      parameters: Type.Object({
+        label: Type.Optional(Type.String({ description: "Optional snapshot label" })),
+      }),
+      async execute(_toolCallId, params, signal) {
+        const client = buildClient(api);
+        if (!client) {
+          return {
+            content: [
+              { type: "text", text: "XMemo is not configured. Set XMEMO_KEY to enable restart snapshots." },
+            ],
+            details: { unavailable: true },
+          };
+        }
+
+        const cfg = resolveXMemoMemoryConfig(api.config);
+        const raw = asToolParamsRecord(params);
+        try {
+          const snapshot = await client.saveRestartSnapshot(
+            {
+              label: typeof raw.label === "string" ? raw.label : null,
+              bucket: cfg.bucket,
+              scope: cfg.scope ?? null,
+              team_id: cfg.teamId ?? null,
+            },
+            signal,
+          );
+          return {
+            content: [{ type: "text", text: `Saved XMemo restart snapshot: ${snapshot.id}` }],
+            details: { action: "saved", id: snapshot.id },
+          };
+        } catch (error) {
+          return buildErrorResult(error);
+        }
+      },
+    },
+    { names: ["xmemo_restart_snapshot_save"] },
+  );
+
+  api.registerTool(
+    {
+      name: "xmemo_restart_snapshot_restore",
+      label: "XMemo Restart Snapshot Restore",
+      description: "Restore a previous restart snapshot from XMemo.",
+      parameters: Type.Object({
+        snapshot_id: Type.Optional(Type.String({ description: "Snapshot id to restore" })),
+      }),
+      async execute(_toolCallId, params, signal) {
+        const client = buildClient(api);
+        if (!client) {
+          return {
+            content: [
+              { type: "text", text: "XMemo is not configured. Set XMEMO_KEY to enable restart snapshots." },
+            ],
+            details: { unavailable: true },
+          };
+        }
+
+        const raw = asToolParamsRecord(params);
+        try {
+          const result = await client.restoreRestartSnapshot(
+            {
+              snapshot_id: typeof raw.snapshot_id === "string" ? raw.snapshot_id : null,
+            },
+            signal,
+          );
+          return {
+            content: [
+              {
+                type: "text",
+                text: result.restored
+                  ? `Restored XMemo restart snapshot${result.snapshot_id ? ` ${result.snapshot_id}` : ""}.`
+                  : "No XMemo restart snapshot was restored.",
+              },
+            ],
+            details: result,
+          };
+        } catch (error) {
+          return buildErrorResult(error);
+        }
+      },
+    },
+    { names: ["xmemo_restart_snapshot_restore"] },
+  );
+
+  api.registerTool(
+    {
+      name: "xmemo_ledger_monthly_summary",
+      label: "XMemo Ledger Monthly Summary",
+      description: "Fetch a monthly summary from the XMemo ledger.",
+      parameters: Type.Object({
+        month: Type.Optional(Type.Integer({ description: "Month (1-12)" })),
+        year: Type.Optional(Type.Integer({ description: "Year" })),
+        currency: Type.Optional(Type.String({ description: "Currency code (e.g. CNY)" })),
+      }),
+      async execute(_toolCallId, params, signal) {
+        const client = buildClient(api);
+        if (!client) {
+          return {
+            content: [
+              { type: "text", text: "XMemo is not configured. Set XMEMO_KEY to enable ledger summary." },
+            ],
+            details: { unavailable: true },
+          };
+        }
+
+        const raw = asToolParamsRecord(params);
+        const now = new Date();
+        try {
+          const summary = await client.getLedgerMonthlySummary(
+            {
+              month: typeof raw.month === "number" ? raw.month : now.getMonth() + 1,
+              year: typeof raw.year === "number" ? raw.year : now.getFullYear(),
+              currency: typeof raw.currency === "string" ? raw.currency : undefined,
+            },
+            signal,
+          );
+          return {
+            content: [
+              {
+                type: "text",
+                text: `XMemo ledger summary for ${summary.month}: ${summary.total} ${summary.currency} across ${summary.count} transactions.`,
+              },
+            ],
+            details: summary,
+          };
+        } catch (error) {
+          return buildErrorResult(error);
+        }
+      },
+    },
+    { names: ["xmemo_ledger_monthly_summary"] },
+  );
+
+  api.registerTool(
+    {
+      name: "xmemo_audit_events",
+      label: "XMemo Audit Events",
+      description: "Query XMemo audit events. Requires an API key with audit scope.",
+      parameters: Type.Object({
+        action: Type.Optional(Type.String({ description: "Filter by action type" })),
+        target_id: Type.Optional(Type.String({ description: "Filter by target id" })),
+        limit: optionalPositiveInteger("Max results (default: 50)"),
+        since: Type.Optional(Type.String({ description: "ISO 8601 start time" })),
+        until: Type.Optional(Type.String({ description: "ISO 8601 end time" })),
+      }),
+      async execute(_toolCallId, params, signal) {
+        const client = buildClient(api);
+        if (!client) {
+          return {
+            content: [
+              { type: "text", text: "XMemo is not configured. Set XMEMO_KEY to enable audit events." },
+            ],
+            details: { unavailable: true },
+          };
+        }
+
+        const raw = asToolParamsRecord(params);
+        try {
+          const response = await client.getAuditEvents(
+            {
+              action: typeof raw.action === "string" ? raw.action : undefined,
+              target_id: typeof raw.target_id === "string" ? raw.target_id : undefined,
+              limit: typeof raw.limit === "number" ? raw.limit : 50,
+              since: typeof raw.since === "string" ? raw.since : undefined,
+              until: typeof raw.until === "string" ? raw.until : undefined,
+            },
+            signal,
+          );
+          return {
+            content: [
+              {
+                type: "text",
+                text: response.events.length === 0
+                  ? "No XMemo audit events found."
+                  : `XMemo audit events:\n\n${response.events
+                      .map((e, i) => `${i + 1}. ${e.created_at ?? "unknown"} ${e.action}${e.target_id ? ` (${e.target_id})` : ""}`)
+                      .join("\n")}`,
+              },
+            ],
+            details: response,
+          };
+        } catch (error) {
+          return buildErrorResult(error);
+        }
+      },
+    },
+    { names: ["xmemo_audit_events"] },
+  );
+
+  api.registerTool(
+    {
+      name: "xmemo_audit_consolidation",
+      label: "XMemo Audit Consolidation",
+      description: "Fetch XMemo audit consolidation summary. Requires an API key with audit scope.",
+      parameters: Type.Object({
+        limit: optionalPositiveInteger("Max results (default: 50)"),
+        since: Type.Optional(Type.String({ description: "ISO 8601 start time" })),
+        until: Type.Optional(Type.String({ description: "ISO 8601 end time" })),
+      }),
+      async execute(_toolCallId, params, signal) {
+        const client = buildClient(api);
+        if (!client) {
+          return {
+            content: [
+              { type: "text", text: "XMemo is not configured. Set XMEMO_KEY to enable audit consolidation." },
+            ],
+            details: { unavailable: true },
+          };
+        }
+
+        const raw = asToolParamsRecord(params);
+        try {
+          const response = await client.getAuditConsolidation(
+            {
+              limit: typeof raw.limit === "number" ? raw.limit : 50,
+              since: typeof raw.since === "string" ? raw.since : undefined,
+              until: typeof raw.until === "string" ? raw.until : undefined,
+            },
+            signal,
+          );
+          return {
+            content: [
+              { type: "text", text: `XMemo audit consolidation:\n\n${JSON.stringify(response, null, 2)}` },
+            ],
+            details: response,
+          };
+        } catch (error) {
+          return buildErrorResult(error);
+        }
+      },
+    },
+    { names: ["xmemo_audit_consolidation"] },
   );
 }

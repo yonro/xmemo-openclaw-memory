@@ -161,6 +161,69 @@ export type XMemoTimelineEvent = {
   occurred_at?: string;
 };
 
+export type XMemoRestartSnapshotRequest = {
+  label?: string | null;
+  bucket?: string;
+  scope?: string | null;
+  team_id?: string | null;
+  metadata?: Record<string, unknown>;
+};
+
+export type XMemoRestartSnapshot = {
+  id: string;
+  label?: string | null;
+  created_at?: string;
+};
+
+export type XMemoRestartRestoreRequest = {
+  snapshot_id?: string | null;
+};
+
+export type XMemoRestartRestoreResponse = {
+  restored: boolean;
+  snapshot_id?: string;
+};
+
+export type XMemoLedgerMonthlySummaryParams = {
+  month?: number;
+  year?: number;
+  currency?: string;
+};
+
+export type XMemoLedgerMonthlySummary = {
+  month: string;
+  currency: string;
+  total: number;
+  count: number;
+};
+
+export type XMemoAuditEvent = {
+  id: string;
+  action: string;
+  target_id?: string;
+  created_at?: string;
+};
+
+export type XMemoAuditEventsParams = {
+  action?: string;
+  target_id?: string;
+  limit?: number;
+  since?: string;
+  until?: string;
+};
+
+export type XMemoAuditEventsResponse = {
+  events: XMemoAuditEvent[];
+};
+
+export type XMemoAuditConsolidationParams = {
+  limit?: number;
+  since?: string;
+  until?: string;
+};
+
+export type XMemoAuditConsolidationResponse = Record<string, unknown>;
+
 export type XMemoTokenValidateResponse = {
   status: "valid";
   scopes?: string[];
@@ -427,6 +490,75 @@ export class XMemoClient {
       limit: params?.limit,
     });
     return this.request<XMemoTimelineEvent[]>(`/v1/timeline${query}`, {
+      method: "GET",
+      signal,
+    });
+  }
+
+  async saveRestartSnapshot(
+    request: XMemoRestartSnapshotRequest,
+    signal?: AbortSignal,
+  ): Promise<XMemoRestartSnapshot> {
+    return this.request<XMemoRestartSnapshot>("/v1/restart/snapshot", {
+      method: "POST",
+      body: JSON.stringify(request),
+      signal,
+    });
+  }
+
+  async restoreRestartSnapshot(
+    request?: XMemoRestartRestoreRequest,
+    signal?: AbortSignal,
+  ): Promise<XMemoRestartRestoreResponse> {
+    return this.request<XMemoRestartRestoreResponse>("/v1/restart/restore", {
+      method: "POST",
+      body: JSON.stringify(request ?? {}),
+      signal,
+    });
+  }
+
+  async getLedgerMonthlySummary(
+    params?: XMemoLedgerMonthlySummaryParams,
+    signal?: AbortSignal,
+  ): Promise<XMemoLedgerMonthlySummary> {
+    const query = this.buildSearchParams({
+      month: params?.month,
+      year: params?.year,
+      currency: params?.currency,
+    });
+    return this.request<XMemoLedgerMonthlySummary>(`/v1/me/ledger/monthly-summary${query}`, {
+      method: "GET",
+      signal,
+    });
+  }
+
+  async getAuditEvents(
+    params?: XMemoAuditEventsParams,
+    signal?: AbortSignal,
+  ): Promise<XMemoAuditEventsResponse> {
+    const query = this.buildSearchParams({
+      action: params?.action,
+      target_id: params?.target_id,
+      limit: params?.limit,
+      since: params?.since,
+      until: params?.until,
+    });
+    return this.request<XMemoAuditEventsResponse>(`/v1/audit/events${query}`, {
+      method: "GET",
+      signal,
+    });
+  }
+
+  async getAuditConsolidation(
+    params?: XMemoAuditConsolidationParams,
+    signal?: AbortSignal,
+  ): Promise<XMemoAuditConsolidationResponse> {
+    const query = this.buildSearchParams({
+      limit: params?.limit,
+      since: params?.since,
+      until: params?.until,
+    });
+    return this.request<XMemoAuditConsolidationResponse>(`/v1/audit/consolidation${query}`, {
       method: "GET",
       signal,
     });

@@ -1,7 +1,16 @@
 {
   "name": "@xmemo/openclaw-memory",
   "version": "2026.6.21",
-  "description": "OpenClaw memory plugin backed by XMemo cloud memory (xmemo.dev).",
+  "description": "XMemo for OpenClaw — bring XMemo's identity-aware memory control plane into OpenClaw as the active memory backend.",
+  "keywords": [
+    "xmemo",
+    "memory-os",
+    "openclaw",
+    "memory",
+    "agent-memory",
+    "identity-aware-memory",
+    "memory-control-plane"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/yonro/xmemo-openclaw-memory"

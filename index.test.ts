@@ -5,7 +5,7 @@ describe("xmemo-memory plugin entry", () => {
   it("exports a memory plugin with expected metadata", () => {
     expect(plugin.id).toBe("xmemo-memory");
     expect(plugin.kind).toBe("memory");
-    expect(plugin.name).toBe("XMemo Cloud Memory");
+    expect(plugin.name).toBe("XMemo for OpenClaw");
   });
 
   it("register exposes the memory capability and tools without throwing", () => {
@@ -41,7 +41,16 @@ describe("xmemo-memory plugin entry", () => {
     expect(registered.tools).toContain("memory_get");
     expect(registered.tools).toContain("memory_store");
     expect(registered.tools).toContain("memory_forget");
+    expect(registered.tools).toContain("xmemo_memory_list");
+    expect(registered.tools).toContain("xmemo_memory_update");
     expect(registered.tools).toContain("xmemo_todo_create");
+    expect(registered.tools).toContain("xmemo_todo_list");
+    expect(registered.tools).toContain("xmemo_todo_complete");
     expect(registered.tools).toContain("xmemo_record_event");
+    expect(registered.tools).toContain("xmemo_restart_snapshot_save");
+    expect(registered.tools).toContain("xmemo_restart_snapshot_restore");
+    expect(registered.tools).toContain("xmemo_ledger_monthly_summary");
+    expect(registered.tools).toContain("xmemo_audit_events");
+    expect(registered.tools).toContain("xmemo_audit_consolidation");
   });
 });

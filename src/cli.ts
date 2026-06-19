@@ -8,7 +8,7 @@ import { XMemoSearchManager } from "./search-manager.js";
 export function registerXMemoCli(api: OpenClawPluginApi): void {
   api.registerCli(
     ({ program }) => {
-      const xmemo = program.command("xmemo").description("XMemo cloud memory commands");
+      const xmemo = program.command("xmemo").description("XMemo memory commands for OpenClaw");
 
       xmemo
         .command("status")
@@ -81,7 +81,7 @@ export function registerXMemoCli(api: OpenClawPluginApi): void {
     },
     {
       descriptors: [
-        { name: "xmemo", description: "XMemo cloud memory commands", hasSubcommands: true },
+        { name: "xmemo", description: "XMemo memory commands for OpenClaw", hasSubcommands: true },
       ],
     },
   );

@@ -1,7 +1,7 @@
 {
   "id": "xmemo-memory",
-  "name": "XMemo Cloud Memory",
-  "description": "Use XMemo (xmemo.dev) as the active long-term memory backend for OpenClaw.",
+  "name": "XMemo for OpenClaw",
+  "description": "XMemo identity-aware memory control plane for OpenClaw. Brings user-owned, auditable, cross-agent memory into OpenClaw.",
   "kind": "memory",
   "activation": {
     "onStartup": false,
@@ -13,10 +13,17 @@
       "memory_get",
       "memory_store",
       "memory_forget",
+      "xmemo_memory_list",
+      "xmemo_memory_update",
       "xmemo_todo_create",
       "xmemo_todo_list",
       "xmemo_todo_complete",
-      "xmemo_record_event"
+      "xmemo_record_event",
+      "xmemo_restart_snapshot_save",
+      "xmemo_restart_snapshot_restore",
+      "xmemo_ledger_monthly_summary",
+      "xmemo_audit_events",
+      "xmemo_audit_consolidation"
     ]
   },
   "uiHints": {

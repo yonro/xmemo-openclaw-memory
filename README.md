@@ -1,32 +1,37 @@
-# XMemo Cloud Memory plugin for OpenClaw
+# XMemo for OpenClaw
 
-<img src="assets/icon.png" width="128" height="128" alt="XMemo Cloud Memory logo">
+<img src="assets/icon.png" width="128" height="128" alt="XMemo for OpenClaw logo">
 
-This is an **external** OpenClaw plugin. It is distributed through npm
-and ClawHub; it is **not** bundled in the default OpenClaw release. Source lives
-in the standalone repository `xmemo-openclaw-memory`, following the external
-plugin pattern.
+[XMemo](https://xmemo.dev) is an identity-aware memory control plane for AI
+agents — a user-owned Memory OS that stores, governs, and audits personal and
+project context across clients, devices, and agent runtimes.
 
-The plugin uses [XMemo](https://xmemo.dev) as the active long-term memory
-backend. It competes for the `plugins.slots.memory` slot and replaces local
-file-backed or vector-backed memory with XMemo's hosted semantic memory.
+This package is the **native OpenClaw plugin** for XMemo. Once enabled, OpenClaw
+uses XMemo as its active long-term memory backend instead of local file-backed
+or vector-backed stores. It is distributed through npm and ClawHub as an
+external plugin and is not bundled in the default OpenClaw release.
 
 ## Features
 
-- Remote semantic memory via XMemo REST API
-- `memory_search` / `memory_get` / `memory_store` / `memory_forget` canonical memory tools
-- `xmemo_todo_create` / `xmemo_todo_list` / `xmemo_todo_complete` reminder tools
-- `xmemo_record_event` timeline event tool
+- Identity-aware memory for OpenClaw via the XMemo REST API
+- Canonical memory tools: `memory_search`, `memory_get`, `memory_store`, `memory_forget`
+- Memory management tools: `xmemo_memory_list`, `xmemo_memory_update`
+- Reminder tools: `xmemo_todo_create`, `xmemo_todo_list`, `xmemo_todo_complete`
+- Timeline event tool: `xmemo_record_event`
+- Agent continuity: `xmemo_restart_snapshot_save`, `xmemo_restart_snapshot_restore`
+- Owner surfaces: `xmemo_ledger_monthly_summary`, `xmemo_audit_events`, `xmemo_audit_consolidation`
 - Optional automatic capture of high-signal user messages after a successful agent turn
 - No local embedding model or vector store required
-- Support for hosted XMemo (`https://xmemo.dev`) and private/self-hosted instances
+- Works with hosted XMemo (`https://xmemo.dev`) and private/self-hosted instances
 
 ## Native plugin vs MCP
 
-This is a native OpenClaw plugin (`kind: "memory"`). It becomes the active
-memory backend when `plugins.slots.memory` is set to `"xmemo-memory"`. XMemo
-also offers an MCP server; the MCP server exposes similar tools but does **not**
-occupy the OpenClaw memory slot or replace `active-memory` recall.
+This is a native OpenClaw plugin (`kind: "memory"`). It becomes OpenClaw's
+active memory backend when `plugins.slots.memory` is set to `"xmemo-memory"`.
+
+XMemo also provides a hosted MCP server (`https://xmemo.dev/mcp`) for users who
+want tools without occupying the OpenClaw memory slot. The MCP server exposes
+similar read/write memory tools but does **not** replace `active-memory` recall.
 
 ## Installation
 
