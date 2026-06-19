@@ -151,7 +151,7 @@ export class XMemoSearchManager implements MemorySearchManager {
 
   status(): MemoryProviderStatus {
     return {
-      backend: "xmemo",
+      backend: "builtin",
       provider: "xmemo-memory",
       custom: {
         baseUrl: this.config.baseUrl,

@@ -36,8 +36,11 @@ export function createXMemoMemoryRuntime(_api: OpenClawPluginApi): MemoryPluginR
     resolveMemoryBackendConfig(params) {
       const cfg = resolveXMemoMemoryConfig(params.cfg);
       void cfg;
+      // OpenClaw core currently only recognizes "builtin" and "qmd" memory backends.
+      // XMemo is a custom remote memory provider; report it as builtin so the slot
+      // contract stays satisfied without adding a core type patch.
       return {
-        backend: "xmemo",
+        backend: "builtin",
       };
     },
 

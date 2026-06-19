@@ -153,12 +153,14 @@ describe("XMemoSearchManager", () => {
     expect(lastError).not.toContain("super-secret-key");
   });
 
-  it("returns status with backend xmemo", () => {
+  it("returns status with builtin backend and xmemo provider identity", () => {
     const client = new XMemoClient("https://xmemo.dev", "key", "openclaw", "instance");
     const manager = new XMemoSearchManager(client, createConfig());
     const status = manager.status();
 
-    expect(status.backend).toBe("xmemo");
+    // OpenClaw core only accepts "builtin" and "qmd" backend identifiers.
+    // XMemo-specific identity is carried in the provider and custom fields.
+    expect(status.backend).toBe("builtin");
     expect(status.provider).toBe("xmemo-memory");
     expect((status.custom as Record<string, unknown>).configured).toBe(true);
   });
