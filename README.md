@@ -1,5 +1,7 @@
 # XMemo Cloud Memory plugin for OpenClaw
 
+<img src="assets/icon.png" width="128" height="128" alt="XMemo Cloud Memory logo">
+
 This is an **external** OpenClaw plugin. It is distributed through npm
 and ClawHub; it is **not** bundled in the default OpenClaw release. Source lives
 in the standalone repository `xmemo-openclaw-memory`, following the same external
