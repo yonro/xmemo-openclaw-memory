@@ -1,12 +1,12 @@
 {
-  "name": "@openclaw/xmemo-memory",
-  "version": "2026.6.18",
+  "name": "@xmemo/openclaw-memory",
+  "version": "2026.6.19",
   "lockfileVersion": 3,
   "requires": true,
   "packages": {
     "": {
-      "name": "@openclaw/xmemo-memory",
-      "version": "2026.6.18",
+      "name": "@xmemo/openclaw-memory",
+      "version": "2026.6.19",
       "dependencies": {
         "typebox": "1.1.39"
       }
