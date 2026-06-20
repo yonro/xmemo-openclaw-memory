@@ -1,0 +1,22 @@
+name: Remove deprecated npm date version
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unpublish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org/
+
+      - name: Remove deprecated 2026.6.22
+        run: npm unpublish @xmemo/openclaw-memory@2026.6.22
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

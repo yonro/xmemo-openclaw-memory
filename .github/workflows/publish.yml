@@ -44,16 +44,3 @@ jobs:
         run: npm publish --provenance --access public --tag latest
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Install ClawHub CLI
-        run: npm install -g clawhub
-
-      - name: Log in to ClawHub
-        run: clawhub login --token "$CLAWHUB_TOKEN" --no-input --no-browser
-        env:
-          CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
-
-      - name: Publish to ClawHub
-        run: clawhub package publish .
-        env:
-          CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
