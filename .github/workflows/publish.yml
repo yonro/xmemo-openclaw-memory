@@ -1,4 +1,4 @@
-name: Publish to npm
+name: Publish release
 
 on:
   workflow_dispatch:
@@ -44,3 +44,16 @@ jobs:
         run: npm publish --provenance --access public --tag latest
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Validate ClawHub package
+        run: npx --yes clawhub@0.22.0 package validate .
+
+      - name: Log in to ClawHub
+        run: npx --yes clawhub@0.22.0 login --token "$CLAWHUB_TOKEN" --no-input --no-browser
+        env:
+          CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
+
+      - name: Publish to ClawHub
+        run: npx --yes clawhub@0.22.0 package publish . --json
+        env:
+          CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
