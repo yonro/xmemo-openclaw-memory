@@ -177,10 +177,16 @@ export type XMemoRestartSnapshot = {
 
 export type XMemoRestartRestoreRequest = {
   snapshot_id?: string | null;
+  bucket?: string;
+  scope?: string | null;
+  team_id?: string | null;
 };
 
 export type XMemoRestartRestoreResponse = {
-  restored: boolean;
+  id?: string;
+  memory_id?: string;
+  status?: string;
+  restored?: boolean;
   snapshot_id?: string;
 };
 
@@ -217,6 +223,7 @@ export type XMemoAuditEventsResponse = {
 };
 
 export type XMemoAuditConsolidationParams = {
+  action_type?: string;
   limit?: number;
   since?: string;
   until?: string;
@@ -554,6 +561,7 @@ export class XMemoClient {
     signal?: AbortSignal,
   ): Promise<XMemoAuditConsolidationResponse> {
     const query = this.buildSearchParams({
+      action_type: params?.action_type,
       limit: params?.limit,
       since: params?.since,
       until: params?.until,

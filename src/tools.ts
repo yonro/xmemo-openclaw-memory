@@ -789,6 +789,8 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
       description: "Restore a previous restart snapshot from XMemo.",
       parameters: Type.Object({
         snapshot_id: Type.Optional(Type.String({ description: "Snapshot id to restore" })),
+        bucket: Type.Optional(Type.String({ description: "Optional bucket override" })),
+        scope: Type.Optional(Type.String({ description: "Optional scope override" })),
       }),
       async execute(_toolCallId, params, signal) {
         const client = buildClient(api);
@@ -802,19 +804,25 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
         }
 
         const raw = asToolParamsRecord(params);
+        const cfg = resolveXMemoMemoryConfig(api.config);
         try {
           const result = await client.restoreRestartSnapshot(
             {
               snapshot_id: typeof raw.snapshot_id === "string" ? raw.snapshot_id : null,
+              bucket: typeof raw.bucket === "string" ? raw.bucket : cfg.bucket,
+              scope: typeof raw.scope === "string" ? raw.scope : (cfg.scope ?? null),
+              team_id: cfg.teamId ?? null,
             },
             signal,
           );
+          const restored = result.restored === true || result.status === "restored";
+          const restoredId = result.snapshot_id ?? result.id;
           return {
             content: [
               {
                 type: "text",
-                text: result.restored
-                  ? `Restored XMemo restart snapshot${result.snapshot_id ? ` ${result.snapshot_id}` : ""}.`
+                text: restored
+                  ? `Restored XMemo restart snapshot${restoredId ? ` ${restoredId}` : ""}.`
                   : "No XMemo restart snapshot was restored.",
               },
             ],
@@ -939,6 +947,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
       label: "XMemo Audit Consolidation",
       description: "Fetch XMemo audit consolidation summary. Requires an API key with audit scope.",
       parameters: Type.Object({
+        action_type: Type.Optional(Type.String({ description: "Filter by consolidation action type" })),
         limit: optionalPositiveInteger("Max results (default: 50)"),
         since: Type.Optional(Type.String({ description: "ISO 8601 start time" })),
         until: Type.Optional(Type.String({ description: "ISO 8601 end time" })),
@@ -958,6 +967,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
         try {
           const response = await client.getAuditConsolidation(
             {
+              action_type: typeof raw.action_type === "string" ? raw.action_type : undefined,
               limit: typeof raw.limit === "number" ? raw.limit : 50,
               since: typeof raw.since === "string" ? raw.since : undefined,
               until: typeof raw.until === "string" ? raw.until : undefined,

@@ -212,4 +212,35 @@ describe("XMemoClient", () => {
     );
     expect(requestInit(0, fetchMock.mock.calls).method).toBe("GET");
   });
+
+  it("restores restart snapshots with bucket and scope in the request body", async () => {
+    fetchMock.mockResolvedValue(mockResponse({ restored: true, snapshot_id: "snap-1" }));
+    const client = new XMemoClient("https://xmemo.dev", "key", "openclaw", "instance");
+    await client.restoreRestartSnapshot({
+      snapshot_id: "snap-1",
+      bucket: "openclaw",
+      scope: "team",
+      team_id: "team-1",
+    });
+
+    expect(requestUrl(0, fetchMock.mock.calls)).toBe("https://xmemo.dev/v1/restart/restore");
+    expect(requestInit(0, fetchMock.mock.calls).method).toBe("POST");
+    expect(JSON.parse(String(requestInit(0, fetchMock.mock.calls).body))).toEqual({
+      snapshot_id: "snap-1",
+      bucket: "openclaw",
+      scope: "team",
+      team_id: "team-1",
+    });
+  });
+
+  it("fetches audit consolidation with action_type filter", async () => {
+    fetchMock.mockResolvedValue(mockResponse({ summary: {} }));
+    const client = new XMemoClient("https://xmemo.dev", "key", "openclaw", "instance");
+    await client.getAuditConsolidation({ action_type: "summarize", limit: 10 });
+
+    expect(requestUrl(0, fetchMock.mock.calls)).toBe(
+      "https://xmemo.dev/v1/audit/consolidation?action_type=summarize&limit=10",
+    );
+    expect(requestInit(0, fetchMock.mock.calls).method).toBe("GET");
+  });
 });

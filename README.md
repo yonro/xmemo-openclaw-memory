@@ -8,18 +8,19 @@ project context across clients, devices, and agent runtimes.
 
 This package is the **native OpenClaw plugin** for XMemo. Once enabled, OpenClaw
 uses XMemo as its active long-term memory backend instead of local file-backed
-or vector-backed stores. It is distributed through npm and ClawHub as an
-external plugin and is not bundled in the default OpenClaw release.
+or vector-backed stores. It is distributed independently through ClawHub and
+npm as an external plugin and is not bundled in the default OpenClaw release.
+The project does not pursue inclusion through an upstream OpenClaw pull request.
 
 ## Features
 
 - Identity-aware memory for OpenClaw via the XMemo REST API
 - Canonical memory tools: `memory_search`, `memory_get`, `memory_store`, `memory_forget`
-- Memory management tools: `xmemo_memory_list`, `xmemo_memory_update`
+- Memory list and update: `xmemo_memory_list`, `xmemo_memory_update`
 - Reminder tools: `xmemo_todo_create`, `xmemo_todo_list`, `xmemo_todo_complete`
 - Timeline event tool: `xmemo_record_event`
-- Agent continuity: `xmemo_restart_snapshot_save`, `xmemo_restart_snapshot_restore`
-- Owner surfaces: `xmemo_ledger_monthly_summary`, `xmemo_audit_events`, `xmemo_audit_consolidation`
+- Restart snapshot tools: `xmemo_restart_snapshot_save`, `xmemo_restart_snapshot_restore`
+- Ledger and audit tools (requires special API key scope): `xmemo_ledger_monthly_summary`, `xmemo_audit_events`, `xmemo_audit_consolidation`
 - Optional automatic capture of high-signal user messages after a successful agent turn
 - No local embedding model or vector store required
 - Works with hosted XMemo (`https://xmemo.dev`) and private/self-hosted instances
@@ -35,12 +36,16 @@ similar read/write memory tools but does **not** replace `active-memory` recall.
 
 ## Installation
 
-Install the plugin from npm or ClawHub:
+Install the plugin from ClawHub (recommended):
+
+```bash
+openclaw plugins install clawhub:@xmemo/openclaw-memory
+```
+
+npm is also supported as a secondary distribution channel:
 
 ```bash
 openclaw plugins install @xmemo/openclaw-memory
-# or
-openclaw plugins install clawhub:@xmemo/openclaw-memory
 ```
 
 Then set the memory slot to `xmemo-memory` and enable the entry as shown below.
@@ -189,8 +194,12 @@ Expected results:
 - `status` shows `configured: true` and `connected: true` (or a clear
   `not connected` error if the key/network is wrong).
 - `openclaw plugins inspect xmemo-memory --runtime --json` lists the registered
-  tools (`memory_search`, `memory_get`, `memory_store`, `memory_forget`, plus
-  the `xmemo_*` workflow tools).
+  tools: `memory_search`, `memory_get`, `memory_store`, `memory_forget`,
+  `xmemo_memory_list`, `xmemo_memory_update`, `xmemo_todo_create`,
+  `xmemo_todo_list`, `xmemo_todo_complete`, `xmemo_record_event`,
+  `xmemo_restart_snapshot_save`, `xmemo_restart_snapshot_restore`,
+  `xmemo_ledger_monthly_summary`, `xmemo_audit_events`,
+  `xmemo_audit_consolidation`, plus the `xmemo` CLI.
 
 The `memory_*` tools are invoked by the OpenClaw agent during a turn, not as
 standalone CLI commands.

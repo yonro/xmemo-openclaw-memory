@@ -1,6 +1,6 @@
 {
   "name": "@xmemo/openclaw-memory",
-  "version": "2026.6.21",
+  "version": "1.0.0",
   "description": "XMemo for OpenClaw — bring XMemo's identity-aware memory control plane into OpenClaw as the active memory backend.",
   "keywords": [
     "xmemo",
@@ -60,7 +60,7 @@
     "install": {
       "npmSpec": "@xmemo/openclaw-memory",
       "clawhubSpec": "clawhub:@xmemo/openclaw-memory",
-      "defaultChoice": "npm",
+      "defaultChoice": "clawhub",
       "minHostVersion": ">=2026.6.8"
     },
     "compat": {
