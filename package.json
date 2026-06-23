@@ -94,7 +94,7 @@
     "vitest": "4.1.8"
   },
   "peerDependencies": {
-    "openclaw": ">=2026.4.14"
+    "openclaw": ">=2026.6.9"
   },
   "peerDependenciesMeta": {
     "openclaw": {
@@ -109,13 +109,13 @@
       "npmSpec": "@xmemo/openclaw-memory",
       "clawhubSpec": "clawhub:@xmemo/openclaw-memory",
       "defaultChoice": "clawhub",
-      "minHostVersion": ">=2026.4.14"
+      "minHostVersion": ">=2026.6.9"
     },
     "compat": {
-      "pluginApi": ">=2026.4.14"
+      "pluginApi": ">=2026.6.9"
     },
     "build": {
-      "openclawVersion": "2026.6.8"
+      "openclawVersion": "2026.6.9"
     },
     "release": {
       "bundleRuntimeDependencies": false,
