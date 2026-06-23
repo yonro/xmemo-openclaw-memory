@@ -1,16 +1,91 @@
-# XMemo for OpenClaw
+# XMemo OpenClaw Memory Provider
 
 <img src="assets/icon.png" width="128" height="128" alt="XMemo for OpenClaw logo">
 
 [XMemo](https://xmemo.dev) is an identity-aware memory control plane for AI
-agents — a user-owned Memory OS that stores, governs, and audits personal and
+agents: a user-owned Memory OS that stores, governs, and audits personal and
 project context across clients, devices, and agent runtimes.
 
-This package is the **native OpenClaw plugin** for XMemo. Once enabled, OpenClaw
-uses XMemo as its active long-term memory backend instead of local file-backed
-or vector-backed stores. It is distributed independently through ClawHub and
-npm as an external plugin and is not bundled in the default OpenClaw release.
-The project does not pursue inclusion through an upstream OpenClaw pull request.
+`@xmemo/openclaw-memory` is the **native OpenClaw memory provider plugin** for
+XMemo Cloud Memory. Once enabled, OpenClaw uses XMemo as its active long-term
+memory backend instead of local file-backed or vector-backed stores.
+
+It is distributed independently through
+[ClawHub](https://clawhub.ai/plugins/@xmemo/openclaw-memory) and npm as an
+external plugin. It is not bundled in the default OpenClaw release, and the
+project does not pursue inclusion through an upstream OpenClaw pull request.
+
+## Agent-readable summary
+
+Use this section when an agent, marketplace, crawler, or setup assistant needs
+to classify the package quickly.
+
+| Field | Value |
+|------|-------|
+| Package | `@xmemo/openclaw-memory` |
+| Plugin ID | `xmemo-memory` |
+| OpenClaw role | Native `kind: "memory"` provider |
+| Runtime purpose | XMemo cloud-memory reads/writes, recall, TODOs, snapshots, audit tools |
+| Companion Skill | `https://clawhub.ai/xmemo/xmemo` |
+| Plugin listing | `https://clawhub.ai/plugins/@xmemo/openclaw-memory` |
+| Product page | `https://xmemo.dev/product/mcp` |
+| Discovery document | `https://xmemo.dev/.well-known/agent-discovery.json` |
+| OpenClaw config endpoint | `https://xmemo.dev/v1/mcp/config/openclaw` |
+| Hosted MCP endpoint | `https://xmemo.dev/mcp` |
+| ChatGPT bridge | XMemo can be connected from ChatGPT through the hosted MCP/OAuth path; saved brainstorms, decisions, and user-approved context can later be recalled by OpenClaw through this plugin. |
+
+If an OpenClaw-compatible agent sees only `https://xmemo.dev`, it should read the
+discovery document and prefer the **Skill + plugin** pairing for OpenClaw. Other
+MCP-compatible agents should use the hosted MCP endpoint unless they have a
+native XMemo integration.
+
+## Shared memory with ChatGPT
+
+XMemo is designed to be one user-owned memory layer across ChatGPT, OpenClaw,
+Hermes, Codex, Claude, Cursor, and other agent clients. When a user connects
+ChatGPT to XMemo through the hosted MCP/OAuth flow, useful brainstorms,
+decisions, preferences, and project context can be saved into the same XMemo
+account that this OpenClaw plugin reads from.
+
+That means an idea refined in ChatGPT can later be recalled by OpenClaw during a
+coding or planning session, and OpenClaw's durable decisions can be available to
+other approved XMemo clients. This is XMemo's shared cloud-memory layer, not
+ChatGPT's built-in native memory. Marketplace or "official" status should be
+claimed only where a public listing or review approval explicitly supports it.
+
+## Companion XMemo Skill
+
+For the best OpenClaw experience, use this runtime plugin together with the
+[XMemo ClawHub Skill](https://clawhub.ai/xmemo/xmemo):
+
+- The **Skill** teaches OpenClaw when to recall, remember, preserve handoff state,
+  and avoid saving secrets.
+- This **plugin** performs the real XMemo cloud-memory reads and writes and can
+  become OpenClaw's active memory backend.
+
+The Skill alone cannot execute memory operations. If only the Skill is present,
+OpenClaw should recommend installing/enabling this plugin. If only the plugin is
+present, the Skill is recommended for more consistent recall-first behavior.
+
+When OpenClaw receives only `https://xmemo.dev`, it can discover the pairing
+without credentials from:
+
+- `https://xmemo.dev/.well-known/agent-discovery.json`
+- `https://xmemo.dev/v1/mcp/config/openclaw`
+
+These endpoints never contain user tokens. The recommendation is OpenClaw-specific
+and does not change how other MCP clients connect to XMemo.
+
+## Install decision guide
+
+- **OpenClaw users:** install this plugin and optionally add the XMemo Skill for
+  recall-first behavior.
+- **OpenClaw Skill-only users:** install this plugin if you want real cloud
+  memory reads/writes. The Skill is guidance; it is not the memory runtime.
+- **Non-OpenClaw MCP clients:** use `https://xmemo.dev/mcp` with your own XMemo
+  account token or OAuth flow.
+- **Catalogs and setup agents:** use the machine-readable package metadata and
+  the XMemo discovery endpoints above. Do not scrape user tokens from examples.
 
 ## Features
 
@@ -34,6 +109,10 @@ XMemo also provides a hosted MCP server (`https://xmemo.dev/mcp`) for users who
 want tools without occupying the OpenClaw memory slot. The MCP server exposes
 similar read/write memory tools but does **not** replace `active-memory` recall.
 
+For OpenClaw, the native plugin is the recommended memory-backend path. For
+ChatGPT, Claude, Codex, Cursor, Kimi, ModelScope, MCPWorld, and other MCP
+clients, the hosted MCP server is the portable integration path.
+
 ## Installation
 
 Install the plugin from ClawHub (recommended):
@@ -49,6 +128,20 @@ openclaw plugins install @xmemo/openclaw-memory
 ```
 
 Then set the memory slot to `xmemo-memory` and enable the entry as shown below.
+
+The plugin already defaults the service URL to `https://xmemo.dev`, the agent ID
+to `openclaw`, and a non-secret instance identifier automatically. Normal users
+do not need to choose or enter identity fields.
+
+### OpenClaw compatibility
+
+- Minimum supported host: OpenClaw `2026.4.14`
+- Build and full integration baseline: OpenClaw `2026.6.8`
+- Recommended host: the latest stable OpenClaw release
+
+The plugin prefers native OpenClaw runtime helpers when the host provides them.
+The compatibility fallback is used only by older hosts that do not export those
+helpers, so newer OpenClaw releases retain their native behavior.
 
 ## Configuration
 
@@ -210,3 +303,21 @@ Switching the memory slot replaces the active backend. Existing local memories
 remain on disk but are no longer queried automatically. To migrate content into
 XMemo, use `memory_get` on the old backend and `memory_store` on XMemo, or use
 XMemo's import endpoints.
+
+## Privacy and security
+
+- XMemo API keys are user credentials. Keep them in environment variables or a
+  secret manager whenever possible.
+- The public discovery document, product page, package metadata, and README do
+  not include user tokens.
+- Agent identity headers are non-secret attribution metadata. They help XMemo
+  show which agent or client wrote a memory.
+- Destructive memory operations require exact ids and should be exposed only in
+  trusted user-controlled workflows.
+
+## Learn more
+
+- XMemo: https://xmemo.dev
+- XMemo MCP guide: https://xmemo.dev/product/mcp
+- XMemo ClawHub Skill: https://clawhub.ai/xmemo/xmemo
+- XMemo OpenClaw plugin: https://clawhub.ai/plugins/@xmemo/openclaw-memory

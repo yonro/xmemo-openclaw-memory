@@ -2,6 +2,11 @@ name: Publish release
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Package version to publish, without the v prefix. Must match package.json."
+        required: true
+        type: string
   push:
     tags:
       - "v*"
@@ -16,6 +21,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install Node.js
         uses: actions/setup-node@v4
@@ -27,6 +34,35 @@ jobs:
         uses: pnpm/action-setup@v4
         with:
           run_install: true
+
+      - name: Validate release version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          package_version="$(node -p "require('./package.json').version")"
+          expected_tag="v${package_version}"
+
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            if [[ "${GITHUB_REF_NAME}" != "${expected_tag}" ]]; then
+              echo "::error::Tag ${GITHUB_REF_NAME} does not match package.json version ${package_version}. Expected ${expected_tag}."
+              exit 1
+            fi
+          else
+            requested_version="${{ github.event.inputs.version }}"
+            if [[ "${requested_version}" != "${package_version}" ]]; then
+              echo "::error::workflow_dispatch version ${requested_version} does not match package.json version ${package_version}."
+              exit 1
+            fi
+
+            if ! git tag --points-at HEAD | grep -Fxq "${expected_tag}"; then
+              echo "::error::Manual publish must run from a commit tagged ${expected_tag}."
+              exit 1
+            fi
+          fi
+
+          echo "Release version: ${package_version}"
+          echo "Release tag: ${expected_tag}"
 
       - name: Build
         run: pnpm build

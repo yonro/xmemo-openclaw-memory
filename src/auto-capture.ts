@@ -6,9 +6,9 @@
 
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/memory-core-host-runtime-core";
-import { resolveLivePluginConfigObject } from "openclaw/plugin-sdk/plugin-config-runtime";
 import { XMemoClient } from "./client.js";
 import { resolveXMemoMemoryConfig, type XMemoMemoryConfig } from "./config.js";
+import { resolveLivePluginConfigObject } from "./openclaw-compat.js";
 
 type AutoCaptureCursor = {
   nextIndex: number;

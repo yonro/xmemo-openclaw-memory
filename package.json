@@ -1,19 +1,62 @@
 {
   "name": "@xmemo/openclaw-memory",
-  "version": "1.0.0",
-  "description": "XMemo for OpenClaw — bring XMemo's identity-aware memory control plane into OpenClaw as the active memory backend.",
+  "version": "1.0.1",
+  "description": "Native XMemo cloud-memory provider for OpenClaw agents: long-term memory, semantic recall, TODOs, snapshots, and audit tools.",
+  "homepage": "https://xmemo.dev",
+  "bugs": {
+    "url": "https://github.com/yonro/xmemo-openclaw-memory/issues"
+  },
   "keywords": [
     "xmemo",
     "memory-os",
     "openclaw",
+    "clawhub",
+    "mcp",
+    "mcp-server",
+    "skill",
+    "clawhub-skill",
     "memory",
+    "memory-provider",
+    "long-term-memory",
+    "semantic-memory",
+    "cloud-memory",
+    "cross-agent-memory",
+    "chatgpt-memory",
+    "shared-ai-memory",
+    "ai-agent",
     "agent-memory",
+    "openclaw-memory",
     "identity-aware-memory",
     "memory-control-plane"
   ],
+  "xmemo": {
+    "role": "openclaw_memory_provider",
+    "discovery": "https://xmemo.dev/.well-known/agent-discovery.json",
+    "mcpEndpoint": "https://xmemo.dev/mcp",
+    "openclawConfig": "https://xmemo.dev/v1/mcp/config/openclaw",
+    "productPage": "https://xmemo.dev/product/mcp",
+    "chatgptConnection": "https://xmemo.dev/mcp",
+    "pluginListing": "https://clawhub.ai/plugins/@xmemo/openclaw-memory",
+    "companionSkill": "https://clawhub.ai/xmemo/xmemo",
+    "recommendedMode": "skill_plus_plugin",
+    "requiresRuntimePlugin": true,
+    "skillCanExecuteMemory": false,
+    "credentialsInDiscovery": false,
+    "capabilities": [
+      "long_term_memory",
+      "semantic_recall",
+      "memory_store",
+      "memory_search",
+      "memory_governance",
+      "chatgpt_shared_memory",
+      "todos",
+      "restart_snapshots",
+      "audit_tools"
+    ]
+  },
   "repository": {
     "type": "git",
-    "url": "https://github.com/yonro/xmemo-openclaw-memory"
+    "url": "git+https://github.com/yonro/xmemo-openclaw-memory.git"
   },
   "type": "module",
   "main": "./dist/index.js",
@@ -46,7 +89,7 @@
     "vitest": "4.1.8"
   },
   "peerDependencies": {
-    "openclaw": ">=2026.6.8"
+    "openclaw": ">=2026.4.14"
   },
   "peerDependenciesMeta": {
     "openclaw": {
@@ -61,10 +104,10 @@
       "npmSpec": "@xmemo/openclaw-memory",
       "clawhubSpec": "clawhub:@xmemo/openclaw-memory",
       "defaultChoice": "clawhub",
-      "minHostVersion": ">=2026.6.8"
+      "minHostVersion": ">=2026.4.14"
     },
     "compat": {
-      "pluginApi": ">=2026.6.8"
+      "pluginApi": ">=2026.4.14"
     },
     "build": {
       "openclawVersion": "2026.6.8"
@@ -75,5 +118,6 @@
       "publishToNpm": true
     }
   },
-  "packageManager": "pnpm@10.33.0+sha512.10568bb4a6afb58c9eb3630da90cc9516417abebd3fabbe6739f0ae795728da1491e9db5a544c76ad8eb7570f5c4bb3d6c637b2cb41bfdcdb47fa823c8649319"
+  "packageManager": "pnpm@10.33.0+sha512.10568bb4a6afb58c9eb3630da90cc9516417abebd3fabbe6739f0ae795728da1491e9db5a544c76ad8eb7570f5c4bb3d6c637b2cb41bfdcdb47fa823c8649319",
+  "types": "./dist/index.d.ts"
 }

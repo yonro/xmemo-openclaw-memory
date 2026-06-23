@@ -1,7 +1,7 @@
 {
   "id": "xmemo-memory",
   "name": "XMemo for OpenClaw",
-  "description": "XMemo identity-aware memory control plane for OpenClaw. Brings user-owned, auditable, cross-agent memory into OpenClaw.",
+  "description": "Native XMemo cloud-memory provider for OpenClaw agents: long-term memory, semantic recall, TODOs, snapshots, and audit tools. Pair with the XMemo Skill for recall-first workflow guidance.",
   "kind": "memory",
   "activation": {
     "onStartup": false,
@@ -30,13 +30,13 @@
     "baseUrl": {
       "label": "XMemo Service URL",
       "placeholder": "https://xmemo.dev",
-      "help": "Base URL of the XMemo instance. Use a private/self-hosted URL if not using the hosted service.",
+      "help": "Hosted XMemo is ready at https://xmemo.dev. Most users should keep this default; change it only for a private/self-hosted service.",
       "advanced": true
     },
     "apiKey": {
       "label": "XMemo API Key",
       "placeholder": "xmemo_...",
-      "help": "Create a scoped API key in XMemo Memory Console -> API Keys -> Create API key. Prefer setting XMEMO_KEY instead of storing the key here.",
+      "help": "Create a scoped API key in XMemo Memory Console -> API Keys -> Create API key. Prefer setting XMEMO_KEY instead of storing the key here. Public discovery/config metadata never includes user tokens.",
       "sensitive": true
     },
     "token": {
@@ -72,7 +72,7 @@
     "agentId": {
       "label": "Agent ID",
       "placeholder": "openclaw",
-      "help": "Non-secret agent identifier sent to XMemo for attribution.",
+      "help": "Advanced attribution override. The plugin already defaults this non-secret value to openclaw, so normal users do not need to change it.",
       "advanced": true
     },
     "autoCapture": {

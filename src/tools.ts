@@ -1,8 +1,5 @@
 import type { AgentToolResult } from "openclaw/plugin-sdk/agent-core";
-import {
-  asToolParamsRecord,
-  type OpenClawPluginApi,
-} from "openclaw/plugin-sdk/memory-core-host-runtime-core";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk/memory-core-host-runtime-core";
 import { Type } from "typebox";
 import {
   XMemoClient,
@@ -14,6 +11,7 @@ import {
 } from "./client.js";
 import { resolveXMemoMemoryConfig } from "./config.js";
 import { escapeMemoryForPrompt } from "./memory-text.js";
+import { asToolParamsRecord } from "./openclaw-compat.js";
 import { XMemoSearchManager } from "./search-manager.js";
 
 function buildClient(api: OpenClawPluginApi): XMemoClient | null {

@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
-import { resolvePluginConfigObject } from "openclaw/plugin-sdk/plugin-config-runtime";
-import { coerceSecretRef, normalizeSecretInputString } from "openclaw/plugin-sdk/secret-input";
+import { coerceSecretRef } from "openclaw/plugin-sdk/secret-ref-runtime";
+import { normalizeSecretInputString } from "openclaw/plugin-sdk/secret-input";
+import { resolvePluginConfigObject } from "./openclaw-compat.js";
 
 export type XMemoAuthMode = "api-key" | "bearer" | "both";
 
