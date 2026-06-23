@@ -60,7 +60,19 @@
     "scope": {
       "label": "Default Scope",
       "placeholder": "openclaw",
-      "help": "Optional scope for isolating this workspace/agent.",
+      "help": "Optional scope for memories created by OpenClaw.",
+      "advanced": true
+    },
+    "readBucket": {
+      "label": "Read Bucket",
+      "placeholder": "%",
+      "help": "Advanced read filter for recall/search. Keep % to search all visible user-owned XMemo buckets across connected agents.",
+      "advanced": true
+    },
+    "readScope": {
+      "label": "Read Scope",
+      "placeholder": "",
+      "help": "Advanced read filter for recall/search. Leave empty to use the token default and avoid narrowing cross-agent recall.",
       "advanced": true
     },
     "teamId": {
@@ -157,6 +169,13 @@
         "default": "openclaw"
       },
       "scope": {
+        "type": ["string", "null"]
+      },
+      "readBucket": {
+        "type": "string",
+        "default": "%"
+      },
+      "readScope": {
         "type": ["string", "null"]
       },
       "teamId": {

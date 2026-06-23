@@ -16,6 +16,13 @@ function memoryIdFromPath(relPath: string): string | undefined {
   return last;
 }
 
+function resultPath(item: XMemoRecallContextItem, fallbackBucket: string): string {
+  if (item.path) {
+    return `${item.path}/${item.id}`;
+  }
+  return `${item.bucket ?? fallbackBucket}/${item.id}`;
+}
+
 export class XMemoSearchManager implements MemorySearchManager {
   private connected: boolean | undefined;
   private lastError: string | undefined;
@@ -43,8 +50,8 @@ export class XMemoSearchManager implements MemorySearchManager {
     const response = await this.client.recallContext(
       {
         query: query.slice(0, this.config.recallMaxChars),
-        bucket: this.config.bucket,
-        scope: this.config.scope ?? null,
+        bucket: this.config.readBucket,
+        scope: this.config.readScope ?? null,
         team_id: this.config.teamId ?? null,
         max_items: opts.maxResults ?? this.config.recallMaxItems,
         max_tokens: this.config.recallMaxTokens,
@@ -59,7 +66,7 @@ export class XMemoSearchManager implements MemorySearchManager {
     return (response.items ?? []).map((item: XMemoRecallContextItem, index: number) => {
       const score = item.score ?? Math.max(0.5, 0.95 - index * 0.05);
       // Encode the XMemo id into the path so readFile/forget tools can recover it.
-      const path = item.path ? `${item.path}/${item.id}` : `${this.config.bucket}/${item.id}`;
+      const path = resultPath(item, this.config.bucket);
       return {
         path,
         startLine: 1,
@@ -100,8 +107,8 @@ export class XMemoSearchManager implements MemorySearchManager {
         {
           query: relPath,
           path: relPath,
-          bucket: this.config.bucket,
-          scope: this.config.scope ?? null,
+          bucket: this.config.readBucket,
+          scope: this.config.readScope ?? null,
           team_id: this.config.teamId ?? null,
           max_items: 10,
         },
@@ -157,6 +164,8 @@ export class XMemoSearchManager implements MemorySearchManager {
         baseUrl: this.config.baseUrl,
         bucket: this.config.bucket,
         scope: this.config.scope,
+        readBucket: this.config.readBucket,
+        readScope: this.config.readScope,
         configured: this.client.isConfigured(),
         connected: this.connected ?? false,
         ...(this.lastError ? { lastError: this.lastError } : {}),

@@ -5,6 +5,7 @@ import {
   resolveXMemoAgentInstanceId,
   DEFAULT_BASE_URL,
   DEFAULT_BUCKET,
+  DEFAULT_READ_BUCKET,
   DEFAULT_AGENT_ID,
 } from "./config.js";
 
@@ -25,6 +26,8 @@ describe("resolveXMemoMemoryConfig", () => {
     const cfg = resolveXMemoMemoryConfig(emptyConfig(), {});
     expect(cfg.baseUrl).toBe(DEFAULT_BASE_URL);
     expect(cfg.bucket).toBe(DEFAULT_BUCKET);
+    expect(cfg.readBucket).toBe(DEFAULT_READ_BUCKET);
+    expect(cfg.readScope).toBeUndefined();
     expect(cfg.agentId).toBe(DEFAULT_AGENT_ID);
     expect(cfg.apiKey).toBeUndefined();
     expect(cfg.authMode).toBe("api-key");
@@ -40,6 +43,8 @@ describe("resolveXMemoMemoryConfig", () => {
         baseUrl: "https://xmemo.example.com",
         bucket: "work",
         scope: "team-a",
+        readBucket: "shared",
+        readScope: "all-agents",
         apiKey: "cfg-key",
         authMode: "bearer",
         autoCapture: true,
@@ -51,6 +56,8 @@ describe("resolveXMemoMemoryConfig", () => {
     expect(cfg.baseUrl).toBe("https://xmemo.example.com");
     expect(cfg.bucket).toBe("work");
     expect(cfg.scope).toBe("team-a");
+    expect(cfg.readBucket).toBe("shared");
+    expect(cfg.readScope).toBe("all-agents");
     expect(cfg.apiKey).toBe("cfg-key");
     expect(cfg.authMode).toBe("bearer");
     expect(cfg.autoCapture).toBe(true);

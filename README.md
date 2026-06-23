@@ -174,6 +174,12 @@ Config lives at `plugins.entries["xmemo-memory"].config`, not `plugins.config`.
 For production setups, keep the API key in the environment (`XMEMO_KEY`) instead
 of storing it in `openclaw.json`.
 
+`bucket` and `scope` control where new OpenClaw-authored memories are written.
+Recall and search read all visible user-owned XMemo memories by default so
+OpenClaw can reuse context saved by ChatGPT, Hermes, Codex, Claude, and other
+connected agents. Advanced operators can narrow reads with `readBucket` and
+`readScope`; by default `readBucket` is `%` and `readScope` is unset.
+
 ## Authentication
 
 Create a scoped API key in the XMemo Memory Console:

@@ -1,6 +1,6 @@
 {
   "name": "@xmemo/openclaw-memory",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Native XMemo cloud-memory provider for OpenClaw agents: long-term memory, semantic recall, TODOs, snapshots, and audit tools.",
   "homepage": "https://xmemo.dev",
   "bugs": {

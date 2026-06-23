@@ -135,7 +135,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
       name: "memory_search",
       label: "Memory Search",
       description:
-        "Search XMemo long-term memory by semantic similarity. Use before answering questions about prior decisions, preferences, or project context.",
+        "Search all visible user-owned XMemo long-term memory by semantic similarity, including memories written by other connected agents. Use before answering questions about prior decisions, preferences, or project context.",
       parameters: Type.Object({
         query: Type.String({ description: "Search query" }),
         maxResults: optionalPositiveInteger("Max results (default: 8)"),
@@ -612,7 +612,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
       name: "xmemo_memory_list",
       label: "XMemo Memory List",
       description:
-        "List XMemo memories matching a query or filter. Useful for browsing recent memories without a semantic search.",
+        "List all visible XMemo memories matching a query or filter. Useful for browsing recent memories without a semantic search.",
       parameters: Type.Object({
         query: Type.Optional(Type.String({ description: "Search query (optional)" })),
         maxResults: optionalPositiveInteger("Max results (default: 20)"),
@@ -638,8 +638,8 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           const response = await client.searchMemory(
             {
               query,
-              bucket: cfg.bucket,
-              scope: cfg.scope ?? null,
+              bucket: cfg.readBucket,
+              scope: cfg.readScope ?? null,
               team_id: cfg.teamId ?? null,
               max_items: maxResults,
             },

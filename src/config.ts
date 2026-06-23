@@ -11,6 +11,8 @@ export type XMemoMemoryConfig = {
   apiKey: string | undefined;
   bucket: string;
   scope: string | undefined;
+  readBucket: string;
+  readScope: string | undefined;
   teamId: string | undefined;
   agentId: string;
   agentInstanceId: string;
@@ -25,6 +27,7 @@ export type XMemoMemoryConfig = {
 
 export const DEFAULT_BASE_URL = "https://xmemo.dev";
 export const DEFAULT_BUCKET = "openclaw";
+export const DEFAULT_READ_BUCKET = "%";
 export const DEFAULT_AGENT_ID = "openclaw";
 export const DEFAULT_AUTH_MODE: XMemoAuthMode = "api-key";
 
@@ -67,6 +70,14 @@ function normalizeAuthMode(input: string | undefined): XMemoAuthMode {
     return input;
   }
   return DEFAULT_AUTH_MODE;
+}
+
+function optionalString(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
 }
 
 function resolveEnvSecretRef(value: unknown, env: NodeJS.ProcessEnv): string | undefined {
@@ -138,6 +149,8 @@ export function resolveXMemoMemoryConfig(
     apiKey: resolveApiKey(pluginConfig, env),
     bucket: (pluginConfig.bucket as string | undefined) ?? DEFAULT_BUCKET,
     scope: (pluginConfig.scope as string | undefined) ?? undefined,
+    readBucket: optionalString(pluginConfig.readBucket) ?? DEFAULT_READ_BUCKET,
+    readScope: optionalString(pluginConfig.readScope),
     teamId: (pluginConfig.teamId as string | undefined) ?? undefined,
     agentId: (pluginConfig.agentId as string | undefined) ?? resolveXMemoAgentId(env),
     agentInstanceId: resolveXMemoAgentInstanceId(env),

@@ -33,6 +33,8 @@ function createConfig(
     apiKey: string;
     bucket: string;
     scope: string | undefined;
+    readBucket: string;
+    readScope: string | undefined;
     teamId: string | undefined;
     recallMaxItems: number;
     recallMaxTokens: number;
@@ -44,6 +46,8 @@ function createConfig(
     apiKey: overrides.apiKey ?? "key",
     bucket: overrides.bucket ?? "openclaw",
     scope: overrides.scope,
+    readBucket: overrides.readBucket ?? "%",
+    readScope: overrides.readScope,
     teamId: overrides.teamId,
     agentId: "openclaw",
     agentInstanceId: "instance",
@@ -70,7 +74,7 @@ describe("XMemoSearchManager", () => {
       mockResponse({
         items: [
           { id: "mem-1", content: "first memory", path: "openclaw", score: 0.95 },
-          { id: "mem-2", content: "second memory", score: 0.88 },
+          { id: "mem-2", content: "second memory", bucket: "chatgpt", score: 0.88 },
         ],
       }),
     );
@@ -82,7 +86,32 @@ describe("XMemoSearchManager", () => {
     const [first, second] = results;
     expect(first?.path).toBe("openclaw/mem-1");
     expect(first?.snippet).toBe("first memory");
-    expect(second?.path).toBe("openclaw/mem-2");
+    expect(second?.path).toBe("chatgpt/mem-2");
+    expect(JSON.parse(String(requestInit(0, fetchMock.mock.calls).body))).toMatchObject({
+      bucket: "%",
+      scope: null,
+    });
+  });
+
+  it("uses configured read filters separately from write bucket and scope", async () => {
+    fetchMock.mockResolvedValue(mockResponse({ items: [] }));
+    const client = new XMemoClient("https://xmemo.dev", "key", "openclaw", "instance");
+    const manager = new XMemoSearchManager(
+      client,
+      createConfig({
+        bucket: "openclaw",
+        scope: "write-scope",
+        readBucket: "work",
+        readScope: "shared-project",
+      }),
+    );
+
+    await manager.search("hello");
+
+    expect(JSON.parse(String(requestInit(0, fetchMock.mock.calls).body))).toMatchObject({
+      bucket: "work",
+      scope: "shared-project",
+    });
   });
 
   it("reads a memory by id path", async () => {
