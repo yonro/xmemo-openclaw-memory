@@ -81,9 +81,14 @@
   "dependencies": {
     "typebox": "1.1.39"
   },
+  "pnpm": {
+    "overrides": {
+      "tar": "7.5.16"
+    }
+  },
   "devDependencies": {
     "@types/node": "25.9.1",
-    "openclaw": "2026.6.8",
+    "openclaw": "2026.6.9",
     "oxlint": "0.16.8",
     "typescript": "6.0.3",
     "vitest": "4.1.8"
