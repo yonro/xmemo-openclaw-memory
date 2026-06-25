@@ -237,6 +237,93 @@ export type XMemoTokenValidateResponse = {
   setup_state?: string;
 };
 
+// ---------------------------------------------------------------------------
+// Retry & Circuit Breaker
+// ---------------------------------------------------------------------------
+
+const DEFAULT_MAX_ATTEMPTS = 3;
+const DEFAULT_INITIAL_DELAY_MS = 500;
+const DEFAULT_BACKOFF_FACTOR = 2;
+const BREAKER_THRESHOLD = 5;
+const BREAKER_COOLDOWN_MS = 120_000;
+
+function isTransientStatus(status: number): boolean {
+  return status >= 500 || status === 429;
+}
+
+function isTransientError(error: unknown): boolean {
+  if (error instanceof Error) {
+    if (error.name === "AbortError") return false; // caller-initiated abort
+    if (/fetch|network|ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|UND_ERR/i.test(error.message)) {
+      return true;
+    }
+  }
+  if (error instanceof XMemoClientError && error.status !== undefined) {
+    return isTransientStatus(error.status);
+  }
+  return false;
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason ?? new Error("aborted"));
+      return;
+    }
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        reject(signal.reason ?? new Error("aborted"));
+      },
+      { once: true },
+    );
+  });
+}
+
+/**
+ * Simple circuit breaker shared across all XMemoClient instances in a process.
+ * Opens after BREAKER_THRESHOLD consecutive transient failures, auto-resets
+ * after BREAKER_COOLDOWN_MS.
+ */
+class CircuitBreaker {
+  private consecutiveFailures = 0;
+  private openUntil = 0;
+
+  isOpen(): boolean {
+    if (this.consecutiveFailures < BREAKER_THRESHOLD) return false;
+    if (Date.now() >= this.openUntil) {
+      // Half-open: allow one probe
+      this.consecutiveFailures = 0;
+      return false;
+    }
+    return true;
+  }
+
+  recordSuccess(): void {
+    this.consecutiveFailures = 0;
+  }
+
+  recordFailure(): void {
+    this.consecutiveFailures++;
+    if (this.consecutiveFailures >= BREAKER_THRESHOLD) {
+      this.openUntil = Date.now() + BREAKER_COOLDOWN_MS;
+    }
+  }
+
+  get state(): "closed" | "open" | "half-open" {
+    if (this.consecutiveFailures < BREAKER_THRESHOLD) return "closed";
+    if (Date.now() >= this.openUntil) return "half-open";
+    return "open";
+  }
+}
+
+/** Process-global breaker so all tool calls share the same failure counter. */
+const globalBreaker = new CircuitBreaker();
+
+export { globalBreaker };
+
 function redactErrorMessage(message: string, apiKey: string): string {
   if (!apiKey) {
     return message;
@@ -286,30 +373,117 @@ export class XMemoClient {
   }
 
   private async request<T>(pathname: string, options: RequestInit = {}): Promise<T> {
-    const url = `${this.baseUrl}${pathname}`;
-    const response = await fetch(url, {
-      ...options,
-      headers: {
-        ...this.headers(),
-        ...(options.headers as Record<string, string> | undefined),
-      },
-    });
-
-    if (!response.ok) {
-      const text = await response.text().catch(() => "unknown error");
-      const rawMessage = `XMemo ${pathname} failed (${response.status}): ${text}`;
+    // Check circuit breaker before attempting the request.
+    if (globalBreaker.isOpen()) {
       throw new XMemoClientError(
-        redactErrorMessage(rawMessage, this.apiKey),
-        response.status,
+        "XMemo circuit breaker is open — service temporarily unavailable",
+        503,
         pathname,
       );
     }
 
-    const contentType = response.headers.get("content-type") ?? "";
-    if (contentType.includes("application/json")) {
-      return (await response.json()) as T;
+    const isRead =
+      options.method === "GET" ||
+      (options.method === "POST" && pathname === "/v1/recall/context");
+
+    const maxAttempts = isRead ? DEFAULT_MAX_ATTEMPTS : 1;
+    let delay = DEFAULT_INITIAL_DELAY_MS;
+    let lastError: unknown;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const url = `${this.baseUrl}${pathname}`;
+        const response = await fetch(url, {
+          ...options,
+          headers: {
+            ...this.headers(),
+            ...(options.headers as Record<string, string> | undefined),
+          },
+        });
+
+        if (!response.ok) {
+          const text = await response.text().catch(() => "unknown error");
+          const rawMessage = `XMemo ${pathname} failed (${response.status}): ${text}`;
+          const error = new XMemoClientError(
+            redactErrorMessage(rawMessage, this.apiKey),
+            response.status,
+            pathname,
+          );
+
+          // Retry on transient HTTP status for read operations
+          if (isTransientStatus(response.status) && attempt < maxAttempts) {
+            lastError = error;
+            await sleep(delay, options.signal as AbortSignal | undefined);
+            delay *= DEFAULT_BACKOFF_FACTOR;
+            continue;
+          }
+
+          // Record transient failure for circuit breaker
+          if (isTransientStatus(response.status)) {
+            globalBreaker.recordFailure();
+          }
+
+          throw error;
+        }
+
+        // Success
+        globalBreaker.recordSuccess();
+
+        const contentType = response.headers.get("content-type") ?? "";
+        if (contentType.includes("application/json")) {
+          return (await response.json()) as T;
+        }
+        return {} as T;
+      } catch (error) {
+        lastError = error;
+
+        // Don't retry caller-initiated aborts
+        if (error instanceof Error && error.name === "AbortError") {
+          throw error;
+        }
+
+        // Already a classified XMemoClientError from the !response.ok path above
+        if (error instanceof XMemoClientError) {
+          if (isTransientError(error) && attempt < maxAttempts) {
+            await sleep(delay, options.signal as AbortSignal | undefined);
+            delay *= DEFAULT_BACKOFF_FACTOR;
+            continue;
+          }
+          if (isTransientError(error)) {
+            globalBreaker.recordFailure();
+          }
+          throw error;
+        }
+
+        // Network-level errors (fetch failed, DNS, connection refused, etc.)
+        if (isTransientError(error) && attempt < maxAttempts) {
+          await sleep(delay, options.signal as AbortSignal | undefined);
+          delay *= DEFAULT_BACKOFF_FACTOR;
+          continue;
+        }
+
+        // Final attempt or non-transient
+        if (isTransientError(error)) {
+          globalBreaker.recordFailure();
+        }
+
+        const message = error instanceof Error ? error.message : String(error);
+        throw new XMemoClientError(
+          redactErrorMessage(`XMemo ${pathname} failed: ${message}`, this.apiKey),
+          undefined,
+          pathname,
+        );
+      }
     }
-    return {} as T;
+
+    // Should not reach here, but satisfy the type checker
+    if (lastError instanceof XMemoClientError) throw lastError;
+    const msg = lastError instanceof Error ? lastError.message : String(lastError);
+    throw new XMemoClientError(
+      redactErrorMessage(`XMemo ${pathname} failed after ${maxAttempts} attempts: ${msg}`, this.apiKey),
+      undefined,
+      pathname,
+    );
   }
 
   private buildSearchParams(

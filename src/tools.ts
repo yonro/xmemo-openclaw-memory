@@ -4,6 +4,7 @@ import { Type } from "typebox";
 import {
   XMemoClient,
   XMemoClientError,
+  globalBreaker,
   type XMemoRememberRequest,
   type XMemoReminderRequest,
   type XMemoTimelineEventRequest,
@@ -57,14 +58,16 @@ function classifyXMemoError(error: unknown): { errorType: XMemoFailureErrorType;
 function buildUnavailableResult(error: unknown): AgentToolResult<unknown> {
   const { errorType, status } = classifyXMemoError(error);
   const statusSuffix = status !== undefined ? ` ${status}` : "";
+  const breakerState = globalBreaker.state;
+  const breakerNote = breakerState === "open" ? " Circuit breaker is open; retries paused." : "";
   return {
     content: [
       {
         type: "text",
-        text: `XMemo memory search is unavailable (${errorType}${statusSuffix}).`,
+        text: `XMemo memory service is temporarily unavailable (${errorType}${statusSuffix}).${breakerNote} The operation was not completed. Try again later.`,
       },
     ],
-    details: { unavailable: true, errorType, ...(status !== undefined ? { status } : {}) },
+    details: { unavailable: true, errorType, breakerState, ...(status !== undefined ? { status } : {}) },
   };
 }
 

@@ -47,35 +47,40 @@ export class XMemoSearchManager implements MemorySearchManager {
       return [];
     }
 
-    const response = await this.client.recallContext(
-      {
-        query: query.slice(0, this.config.recallMaxChars),
-        bucket: this.config.readBucket,
-        scope: this.config.readScope ?? null,
-        team_id: this.config.teamId ?? null,
-        max_items: opts.maxResults ?? this.config.recallMaxItems,
-        max_tokens: this.config.recallMaxTokens,
-        prefer_working: true,
-      },
-      opts.signal,
-    );
+    try {
+      const response = await this.client.recallContext(
+        {
+          query: query.slice(0, this.config.recallMaxChars),
+          bucket: this.config.readBucket,
+          scope: this.config.readScope ?? null,
+          team_id: this.config.teamId ?? null,
+          max_items: opts.maxResults ?? this.config.recallMaxItems,
+          max_tokens: this.config.recallMaxTokens,
+          prefer_working: true,
+        },
+        opts.signal,
+      );
 
-    this.connected = true;
-    this.lastError = undefined;
+      this.connected = true;
+      this.lastError = undefined;
 
-    return (response.items ?? []).map((item: XMemoRecallContextItem, index: number) => {
-      const score = item.score ?? Math.max(0.5, 0.95 - index * 0.05);
-      // Encode the XMemo id into the path so readFile/forget tools can recover it.
-      const path = resultPath(item, this.config.bucket);
-      return {
-        path,
-        startLine: 1,
-        endLine: 1,
-        score,
-        snippet: item.content ?? item.snippet ?? "",
-        source: "memory" as const,
-      };
-    });
+      return (response.items ?? []).map((item: XMemoRecallContextItem, index: number) => {
+        const score = item.score ?? Math.max(0.5, 0.95 - index * 0.05);
+        const path = resultPath(item, this.config.bucket);
+        return {
+          path,
+          startLine: 1,
+          endLine: 1,
+          score,
+          snippet: item.content ?? item.snippet ?? "",
+          source: "memory" as const,
+        };
+      });
+    } catch (error) {
+      this.connected = false;
+      this.lastError = error instanceof Error ? error.message : String(error);
+      throw error;
+    }
   }
 
   async readFile(
