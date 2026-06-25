@@ -13,6 +13,7 @@ import {
 import { resolveXMemoMemoryConfig } from "./config.js";
 import { escapeMemoryForPrompt } from "./memory-text.js";
 import { asToolParamsRecord } from "./openclaw-compat.js";
+import { ResilientXMemoClient } from "./resilient-client.js";
 import { XMemoSearchManager } from "./search-manager.js";
 
 function buildClient(api: OpenClawPluginApi): XMemoClient | null {
@@ -21,6 +22,26 @@ function buildClient(api: OpenClawPluginApi): XMemoClient | null {
     return null;
   }
   return new XMemoClient(cfg.baseUrl, cfg.apiKey, cfg.agentId, cfg.agentInstanceId, cfg.authMode);
+}
+
+/** Cached resilient client instance per process (stateless HTTP, safe to reuse). */
+let _resilientClient: ResilientXMemoClient | null = null;
+let _resilientClientKey = "";
+
+function buildResilientClient(api: OpenClawPluginApi): ResilientXMemoClient | null {
+  const cfg = resolveXMemoMemoryConfig(api.config);
+  if (!cfg.apiKey) return null;
+
+  // Reuse instance if config hasn't changed
+  const key = `${cfg.baseUrl}:${cfg.apiKey}:${cfg.agentId}`;
+  if (_resilientClient && _resilientClientKey === key) {
+    return _resilientClient;
+  }
+
+  const client = new XMemoClient(cfg.baseUrl, cfg.apiKey, cfg.agentId, cfg.agentInstanceId, cfg.authMode);
+  _resilientClient = new ResilientXMemoClient(client, cfg);
+  _resilientClientKey = key;
+  return _resilientClient;
 }
 
 function buildErrorResult(error: unknown): AgentToolResult<unknown> {
@@ -288,8 +309,8 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
         ),
       }),
       async execute(_toolCallId, params, signal) {
-        const client = buildClient(api);
-        if (!client) {
+        const resilient = buildResilientClient(api);
+        if (!resilient) {
           return {
             content: [
               {
@@ -311,30 +332,47 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           };
         }
 
-        try {
-          const response = await client.remember(
-            {
-              content,
-              path: typeof raw.path === "string" ? raw.path : cfg.bucket,
-              bucket: cfg.bucket,
-              scope: cfg.scope ?? null,
-              team_id: cfg.teamId ?? null,
-              memory_type: (typeof raw.memory_type === "string"
-                ? raw.memory_type
-                : "semantic") as XMemoRememberRequest["memory_type"],
-              importance: typeof raw.importance === "number" ? raw.importance : 0.7,
-              source: "openclaw",
-            },
-            signal,
-          );
+        const payload: Record<string, unknown> = {
+          content,
+          path: typeof raw.path === "string" ? raw.path : cfg.bucket,
+          bucket: cfg.bucket,
+          scope: cfg.scope ?? null,
+          team_id: cfg.teamId ?? null,
+          memory_type: typeof raw.memory_type === "string" ? raw.memory_type : "semantic",
+          importance: typeof raw.importance === "number" ? raw.importance : 0.7,
+          source: "openclaw",
+        };
 
+        const writeResult = await resilient.resilientWrite(
+          "remember",
+          "/v1/remember",
+          "POST",
+          payload,
+          async (_idempotencyKey) => {
+            return await resilient.rawClient.remember(
+              payload as unknown as XMemoRememberRequest,
+              signal,
+            );
+          },
+        );
+
+        if (writeResult.status === "synced") {
+          const result = writeResult.result as Record<string, unknown> | undefined;
           return {
             content: [{ type: "text", text: `Stored XMemo memory: "${content.slice(0, 80)}..."` }],
-            details: { action: "created", id: response.id },
+            details: { action: "created", id: result?.id },
           };
-        } catch (error) {
-          return buildErrorResult(error);
         }
+
+        if (writeResult.status === "queued") {
+          return {
+            content: [{ type: "text", text: `${writeResult.message} Content: "${content.slice(0, 80)}..."` }],
+            details: { action: "queued", idempotencyKey: writeResult.idempotencyKey, outboxStatus: writeResult.outboxStatus },
+          };
+        }
+
+        // status === "error"
+        return buildErrorResult(new Error(writeResult.message));
       },
     },
     { names: ["memory_store"] },
