@@ -15,6 +15,7 @@ import { escapeMemoryForPrompt } from "./memory-text.js";
 import { asToolParamsRecord } from "./openclaw-compat.js";
 import { ResilientXMemoClient } from "./resilient-client.js";
 import { XMemoSearchManager } from "./search-manager.js";
+import { setXMemoStatusProvider } from "./prompt-section.js";
 
 function buildClient(api: OpenClawPluginApi): XMemoClient | null {
   const cfg = resolveXMemoMemoryConfig(api.config);
@@ -41,6 +42,12 @@ function buildResilientClient(api: OpenClawPluginApi): ResilientXMemoClient | nu
   const client = new XMemoClient(cfg.baseUrl, cfg.apiKey, cfg.agentId, cfg.agentInstanceId, cfg.authMode);
   _resilientClient = new ResilientXMemoClient(client, cfg);
   _resilientClientKey = key;
+
+  // Wire up prompt status injection
+  setXMemoStatusProvider(() => ({
+    statusLine: _resilientClient!.getPromptStatusLine(),
+  }));
+
   return _resilientClient;
 }
 

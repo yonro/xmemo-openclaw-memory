@@ -1,12 +1,30 @@
 import type { MemoryPromptSectionBuilder } from "openclaw/plugin-sdk/memory-core-host-runtime-core";
 
+export type XMemoStatusProvider = () => {
+  statusLine: string;
+} | null;
+
+// Module-level status provider that can be set by the tools/resilient-client layer.
+let _statusProvider: XMemoStatusProvider | null = null;
+
+export function setXMemoStatusProvider(provider: XMemoStatusProvider): void {
+  _statusProvider = provider;
+}
+
 export const buildXMemoPromptSection: MemoryPromptSectionBuilder = ({ availableTools }) => {
   const lines: string[] = [];
 
   lines.push("## XMemo for OpenClaw");
-  lines.push(
-    "XMemo is enabled as the active long-term memory backend. Relevant project context, decisions, and prior fixes may be injected automatically or retrieved with the memory tools.",
-  );
+
+  // Inject live status line if available
+  const statusInfo = _statusProvider?.();
+  if (statusInfo) {
+    lines.push(statusInfo.statusLine);
+  } else {
+    lines.push(
+      "XMemo is enabled as the active long-term memory backend. Relevant project context, decisions, and prior fixes may be injected automatically or retrieved with the memory tools.",
+    );
+  }
 
   if (availableTools.has("memory_search")) {
     lines.push(
