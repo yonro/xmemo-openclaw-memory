@@ -108,6 +108,7 @@ export class ResilientXMemoClient {
       query,
       bucket: params.bucket ?? this.config.readBucket,
       scope: params.scope ?? this.config.readScope ?? null,
+      teamId: params.teamId ?? this.config.teamId ?? null,
       maxItems: params.maxItems ?? this.config.recallMaxItems,
       maxTokens: params.maxTokens ?? this.config.recallMaxTokens,
     };
@@ -173,6 +174,7 @@ export class ResilientXMemoClient {
       query,
       bucket: params.bucket ?? this.config.readBucket,
       scope: params.scope ?? this.config.readScope ?? null,
+      teamId: params.teamId ?? this.config.teamId ?? null,
       maxItems: params.maxItems ?? 10,
     };
 

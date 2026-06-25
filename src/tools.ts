@@ -33,7 +33,7 @@ function buildResilientClient(api: OpenClawPluginApi): ResilientXMemoClient | nu
   if (!cfg.apiKey) return null;
 
   // Reuse instance if config hasn't changed
-  const key = `${cfg.baseUrl}:${cfg.apiKey}:${cfg.agentId}`;
+  const key = `${cfg.baseUrl}:${cfg.apiKey}:${cfg.agentId}:${cfg.agentInstanceId}:${cfg.authMode}`;
   if (_resilientClient && _resilientClientKey === key) {
     return _resilientClient;
   }
@@ -684,8 +684,8 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
         memory_type: Type.Optional(Type.String({ description: "Filter by memory type" })),
       }),
       async execute(_toolCallId, params, signal) {
-        const client = buildClient(api);
-        if (!client) {
+        const resilient = buildResilientClient(api);
+        if (!resilient) {
           return {
             content: [
               { type: "text", text: "XMemo is not configured. Set XMEMO_KEY to enable memory list." },
@@ -700,34 +700,33 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
         const maxResults = typeof raw.maxResults === "number" ? raw.maxResults : 20;
 
         try {
-          const response = await client.searchMemory(
-            {
-              query,
-              bucket: cfg.readBucket,
-              scope: cfg.readScope ?? null,
-              team_id: cfg.teamId ?? null,
-              max_items: maxResults,
-            },
-            signal,
-          );
+          const { result, fromCache } = await resilient.searchMemory(query, {
+            bucket: cfg.readBucket,
+            scope: cfg.readScope ?? null,
+            teamId: cfg.teamId ?? null,
+            maxItems: maxResults,
+          }, signal);
 
-          if (response.results.length === 0) {
+          const response = result as { results?: Array<{ id: string; content: string; path?: string }> } | null;
+          const memories = response?.results ?? [];
+
+          if (memories.length === 0) {
             return {
               content: [{ type: "text", text: "No XMemo memories found." }],
-              details: { count: 0 },
+              details: { count: 0, fromCache },
             };
           }
 
-          const lines = response.results.map(
+          const lines = memories.map(
             (m, i) =>
               `${i + 1}. ${m.id}${m.path ? ` (${m.path})` : ""}: ${escapeMemoryForPrompt(m.content.slice(0, 120))}`,
           );
           return {
             content: [{ type: "text", text: `XMemo memories:\n\n${lines.join("\n")}` }],
-            details: { count: response.results.length, memories: response.results },
+            details: { count: memories.length, fromCache, memories },
           };
         } catch (error) {
-          return buildErrorResult(error);
+          return buildUnavailableResult(error);
         }
       },
     },
