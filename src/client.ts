@@ -500,6 +500,30 @@ export class XMemoClient {
     return query ? `?${query}` : "";
   }
 
+  /**
+   * Replay an outbox write with full auth headers and idempotency key.
+   * Used by the resilient client's outbox sync to ensure queued writes
+   * use the same authentication and agent headers as normal writes.
+   */
+  async replayWrite(
+    pathname: string,
+    method: string,
+    payload: Record<string, unknown>,
+    idempotencyKey: string,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    const body = { ...payload, idempotency_key: idempotencyKey };
+    return this.request<unknown>(pathname, {
+      method,
+      body: JSON.stringify(body),
+      headers: {
+        "Idempotency-Key": idempotencyKey,
+        "X-Idempotency-Key": idempotencyKey,
+      },
+      signal,
+    });
+  }
+
   async remember(
     request: XMemoRememberRequest,
     signal?: AbortSignal,

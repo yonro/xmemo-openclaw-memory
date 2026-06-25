@@ -5,7 +5,6 @@ import {
   XMemoClient,
   XMemoClientError,
   globalBreaker,
-  type XMemoRememberRequest,
   type XMemoReminderRequest,
   type XMemoTimelineEventRequest,
   type XMemoUpdateMemoryRequest,
@@ -172,8 +171,8 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
         maxResults: optionalPositiveInteger("Max results (default: 8)"),
       }),
       async execute(_toolCallId, params, signal) {
-        const client = buildClient(api);
-        if (!client) {
+        const resilient = buildResilientClient(api);
+        if (!resilient) {
           return {
             content: [
               {
@@ -198,24 +197,36 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
         }
 
         try {
-          const manager = new XMemoSearchManager(client, cfg);
-          const results = await manager.search(query, { maxResults, signal });
+          const { result, fromCache } = await resilient.recallContext(query, {
+            bucket: cfg.readBucket,
+            scope: cfg.readScope ?? null,
+            teamId: cfg.teamId ?? null,
+            maxItems: maxResults,
+            maxTokens: cfg.recallMaxTokens,
+            preferWorking: true,
+          }, signal);
 
-          if (results.length === 0) {
+          const response = result as { items?: Array<{ content?: string; snippet?: string; score?: number; path?: string; bucket?: string; id?: string }> } | null;
+          const items = response?.items ?? [];
+
+          if (items.length === 0) {
             return {
               content: [{ type: "text", text: "No relevant XMemo memories found." }],
-              details: { count: 0 },
+              details: { count: 0, fromCache },
             };
           }
 
-          const text = formatMemorySearchResults(
-            query,
-            results.map((r) => ({ score: r.score, snippet: r.snippet })),
-          );
+          const searchResults = items.map((item, index) => {
+            const score = item.score ?? Math.max(0.5, 0.95 - index * 0.05);
+            const snippet = item.content ?? item.snippet ?? "";
+            return { score, snippet };
+          });
+
+          const text = formatMemorySearchResults(query, searchResults);
 
           return {
             content: [{ type: "text", text }],
-            details: { count: results.length, results },
+            details: { count: items.length, fromCache, results: items },
           };
         } catch (error) {
           return buildUnavailableResult(error);
@@ -355,9 +366,15 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           "/v1/remember",
           "POST",
           payload,
-          async (_idempotencyKey) => {
-            return await resilient.rawClient.remember(
-              payload as unknown as XMemoRememberRequest,
+          async (idempotencyKey) => {
+            // Use replayWrite which attaches the idempotency key to the request,
+            // ensuring that if the response is lost but the server processed it,
+            // the subsequent outbox replay will be correctly deduplicated.
+            return await resilient.rawClient.replayWrite(
+              "/v1/remember",
+              "POST",
+              payload,
+              idempotencyKey,
               signal,
             );
           },

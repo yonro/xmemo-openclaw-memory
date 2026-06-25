@@ -62,7 +62,11 @@ export class ResilientXMemoClient {
   constructor(client: XMemoClient, config: XMemoMemoryConfig, cache?: XMemoLocalCache) {
     this.client = client;
     this.config = config;
-    this.cache = cache ?? new XMemoLocalCache();
+    // Scope the cache to this specific baseUrl + apiKey pair
+    this.cache = cache ?? new XMemoLocalCache({
+      baseUrl: config.baseUrl,
+      apiKey: config.apiKey ?? "",
+    });
 
     // Recover stale locks on construction
     this.cache.recoverStaleLocks();
@@ -280,41 +284,23 @@ export class ResilientXMemoClient {
         if (!this.cache.lockForProcessing(record.id)) continue;
 
         try {
-          // Replay the write with the original idempotency key
-          const requestPayload = { ...record.payload, idempotency_key: record.idempotencyKey };
-          const url = `${this.config.baseUrl}${record.endpoint}`;
-          const fetchOptions: RequestInit = {
-            method: record.method,
-            headers: {
-              "Content-Type": "application/json",
-              "X-API-Key": this.config.apiKey ?? "",
-              "X-Memory-OS-Agent-ID": this.config.agentId,
-              "Idempotency-Key": record.idempotencyKey,
-            },
-          };
-          // Only attach body for non-GET methods
-          if (record.method !== "GET") {
-            fetchOptions.body = JSON.stringify(requestPayload);
-          }
-          const response = await fetch(url, fetchOptions);
-
-          if (response.ok) {
-            this.cache.markSent(record.id);
-            this._recordSuccess();
-            synced++;
-          } else if (response.status >= 500 || response.status === 429) {
-            const text = await response.text().catch(() => "");
-            this.cache.markFailed(record.id, `${response.status}: ${text}`, true);
-            failed++;
-          } else {
-            const text = await response.text().catch(() => "");
-            this.cache.markFailed(record.id, `${response.status}: ${text}`, false);
-            failed++;
-          }
+          // Replay the write through XMemoClient which handles auth headers
+          // (X-API-Key / Bearer / both), agent ID, instance ID, and retry logic.
+          await this.client.replayWrite(
+            record.endpoint,
+            record.method,
+            record.payload,
+            record.idempotencyKey,
+          );
+          this.cache.markSent(record.id);
+          this._recordSuccess();
+          synced++;
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error);
           this.cache.markFailed(record.id, msg, isTransientError(error));
           failed++;
+
+          if (globalBreaker.state === "open") break;
         }
       }
     } finally {
@@ -349,6 +335,9 @@ export class ResilientXMemoClient {
     const state = globalBreaker.state;
     if (this._status === "online" && state === "closed") {
       return "XMemo status: online. Memory recall and writes are fully operational.";
+    }
+    if (this._status === "unknown") {
+      return "XMemo is enabled as the active long-term memory backend. Relevant project context, decisions, and prior fixes may be injected automatically or retrieved with the memory tools.";
     }
     if (this._status === "degraded" || state === "half-open") {
       const stats = this.cache.getStats();

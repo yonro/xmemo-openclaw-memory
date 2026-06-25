@@ -99,13 +99,25 @@ function hashSignature(operation: string, query: string, params: Record<string, 
 // Default paths
 // ---------------------------------------------------------------------------
 
-function defaultCacheDir(): string {
-  // Prefer OPENCLAW_DATA_DIR > XDG_DATA_HOME > ~/.xmemo
-  const openclawData = process.env.OPENCLAW_DATA_DIR;
-  if (openclawData) return join(openclawData, "xmemo");
-  const xdg = process.env.XDG_DATA_HOME;
-  if (xdg) return join(xdg, "xmemo");
-  return join(homedir(), ".xmemo");
+/**
+ * Generate a cache directory scoped to the current baseUrl + apiKey combination.
+ * This prevents outbox writes for account A from replaying against account B,
+ * and staging writes from replaying against production.
+ */
+function scopedCacheDir(baseUrl: string, apiKey: string): string {
+  const baseDir = (() => {
+    const openclawData = process.env.OPENCLAW_DATA_DIR;
+    if (openclawData) return join(openclawData, "xmemo");
+    const xdg = process.env.XDG_DATA_HOME;
+    if (xdg) return join(xdg, "xmemo");
+    return join(homedir(), ".xmemo");
+  })();
+
+  // Hash baseUrl + first 8 chars of apiKey to create a stable, filesystem-safe scope.
+  // This gives each (service, account) pair its own isolated cache/outbox.
+  const scopeInput = `${baseUrl}:${apiKey.slice(0, 8)}`;
+  const scopeHash = createHash("sha256").update(scopeInput).digest("hex").slice(0, 12);
+  return join(baseDir, scopeHash);
 }
 
 // ---------------------------------------------------------------------------
@@ -118,8 +130,16 @@ export class XMemoLocalCache {
   private cache: CacheStore;
   private outbox: OutboxStore;
 
-  constructor(cacheDir?: string) {
-    const dir = cacheDir ?? defaultCacheDir();
+  constructor(cacheDirOrScope?: string | { baseUrl: string; apiKey: string }) {
+    let dir: string;
+    if (typeof cacheDirOrScope === "string") {
+      dir = cacheDirOrScope;
+    } else if (cacheDirOrScope) {
+      dir = scopedCacheDir(cacheDirOrScope.baseUrl, cacheDirOrScope.apiKey);
+    } else {
+      // Fallback: use a generic unscopable directory (testing only)
+      dir = join(homedir(), ".xmemo", "_default");
+    }
     ensureDir(dir);
     this.cacheFile = join(dir, "recall-cache.json");
     this.outboxFile = join(dir, "write-outbox.json");
