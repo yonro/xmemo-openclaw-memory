@@ -50,10 +50,13 @@ describe("XMemoLocalCache", () => {
       expect(result!.response).toEqual(response);
     });
 
-    it("returns null when max stale TTL expired", () => {
+    it("returns null when max stale TTL expired", async () => {
       const response = { items: [] };
-      // Put with 0ms fresh and 0ms max stale (immediately expired)
-      cache.putCachedRecall("recall_context", "q", { bucket: "%" }, response, 0, 0);
+      // Put with 1ms fresh and 1ms max stale, then wait to ensure expiration
+      cache.putCachedRecall("recall_context", "q", { bucket: "%" }, response, 1, 1);
+
+      // Wait 5ms to guarantee TTL expiration regardless of clock resolution
+      await new Promise((resolve) => setTimeout(resolve, 5));
 
       const result = cache.getCachedRecall("recall_context", "q", { bucket: "%" });
       expect(result).toBeNull();
