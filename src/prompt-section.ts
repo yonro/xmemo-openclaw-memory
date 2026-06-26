@@ -40,7 +40,7 @@ export const buildXMemoPromptSection: MemoryPromptSectionBuilder = ({ availableT
     lines.push("- Use `memory_forget` to delete a memory by its path/id.");
   }
   if (availableTools.has("xmemo_memory_list")) {
-    lines.push("- Use `xmemo_memory_list` to browse recent memories stored in XMemo.");
+    lines.push("- Use `xmemo_memory_list` with a search query to list matching memories stored in XMemo.");
   }
   if (availableTools.has("xmemo_memory_update")) {
     lines.push("- Use `xmemo_memory_update` to edit an existing memory.");

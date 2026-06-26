@@ -1,6 +1,10 @@
 import type { AgentToolResult } from "openclaw/plugin-sdk/agent-core";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { globalBreaker } from "./client.js";
 import { escapeMemoryForPrompt } from "./memory-text.js";
 import { registerXMemoTools } from "./tools.js";
 
@@ -71,14 +75,22 @@ describe("memory tool helpers", () => {
 
 describe("memory_search failure-open", () => {
   let fetchMock: ReturnType<typeof vi.fn>;
+  let dataDir: string;
 
   beforeEach(() => {
+    globalBreaker.recordSuccess();
+    dataDir = mkdtempSync(join(tmpdir(), "xmemo-tools-test-"));
+    vi.stubEnv("OPENCLAW_DATA_DIR", dataDir);
+    vi.stubEnv("XMEMO_CONFIG_HOME", join(dataDir, "xmemo-config"));
     fetchMock = vi.fn();
     global.fetch = fetchMock as unknown as typeof fetch;
   });
 
   afterEach(() => {
+    globalBreaker.recordSuccess();
+    vi.unstubAllEnvs();
     vi.restoreAllMocks();
+    rmSync(dataDir, { recursive: true, force: true });
   });
 
   it("returns unavailable when XMemo is not configured", async () => {
@@ -118,6 +130,20 @@ describe("memory_search failure-open", () => {
     const result = await tools.get("memory_search")!.execute("tc-1", { query: "hello" });
 
     expect(result.details).toMatchObject({ unavailable: true, errorType: "auth", status: 403 });
+  });
+
+  it("returns structured request failure on 422 without calling it unavailable", async () => {
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ detail: "query is required" }), {
+        status: 422,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const { tools } = createApi({ apiKey: "key" });
+    const result = await tools.get("memory_search")!.execute("tc-1", { query: "hello" });
+
+    expect(result.details).toMatchObject({ unavailable: false, errorType: "request", status: 422 });
+    expect(textContent(result)).toContain("request was rejected (request 422)");
   });
 
   it("returns structured network failure when fetch throws", async () => {
@@ -162,10 +188,48 @@ describe("memory_search failure-open", () => {
     const result = await tools.get("memory_search")!.execute("tc-1", { query: "project plan" });
 
     expect(textContent(result)).toContain("saved from ChatGPT");
+    expect(result.details).toMatchObject({ count: 1, ids: ["mem-1"] });
+    expect(JSON.stringify(result.details)).not.toContain("saved from ChatGPT");
     expect(JSON.parse(String(requestInit(0, fetchMock.mock.calls).body))).toMatchObject({
       bucket: "%",
       scope: null,
     });
+  });
+
+  it("renders memory_search text when recallContext uses alternate item text fields", async () => {
+    fetchMock.mockResolvedValueOnce(
+      mockResponse({
+        items: [
+          { id: "mem-text", text: "content returned as text field", score: 0.95 },
+          { id: "mem-nested", memory: { content: "content returned under nested memory" }, score: 0.92 },
+        ],
+      }),
+    );
+    const { tools } = createApi({ apiKey: "key" });
+
+    const result = await tools.get("memory_search")!.execute("tc-1", { query: "XMemo" });
+
+    expect(textContent(result)).toContain("[95%] content returned as text field");
+    expect(textContent(result)).toContain("[92%] content returned under nested memory");
+    expect(JSON.stringify(result.details)).not.toContain("content returned as text field");
+  });
+
+  it("falls back to recallContext context_text sections when items omit body fields", async () => {
+    fetchMock.mockResolvedValueOnce(
+      mockResponse({
+        items: [
+          { id: "mem-1", score: 0.95 },
+          { id: "mem-2", score: 0.92 },
+        ],
+        context_text: "first context text\n\n2. second context text",
+      }),
+    );
+    const { tools } = createApi({ apiKey: "key" });
+
+    const result = await tools.get("memory_search")!.execute("tc-1", { query: "XMemo" });
+
+    expect(textContent(result)).toContain("[95%] first context text");
+    expect(textContent(result)).toContain("[92%] second context text");
   });
 
   it("uses readBucket/readScope overrides when listing memories", async () => {
@@ -180,11 +244,22 @@ describe("memory_search failure-open", () => {
       readScope: "shared-project",
     });
 
-    await tools.get("xmemo_memory_list")!.execute("tc-1", { query: "visible" });
+    const result = await tools.get("xmemo_memory_list")!.execute("tc-1", { query: "visible" });
 
     expect(requestUrl(0, fetchMock.mock.calls)).toBe(
       "https://xmemo.dev/v1/memories/search?query=visible&bucket=work&scope=shared-project&limit=20",
     );
+    expect(result.details).toMatchObject({ count: 1, ids: ["mem-1"] });
+    expect(JSON.stringify(result.details)).not.toContain("visible memory");
+  });
+
+  it("requires a query when listing memories because the search API requires one", async () => {
+    const { tools } = createApi({ apiKey: "key" });
+    const result = await tools.get("xmemo_memory_list")!.execute("tc-1", { maxResults: 1 });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result.details).toMatchObject({ error: "query_required" });
+    expect(textContent(result)).toContain("requires a search query");
   });
 });
 
@@ -275,11 +350,13 @@ describe("xmemo_restart_snapshot_restore tool", () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
+    globalBreaker.recordSuccess();
     fetchMock = vi.fn();
     global.fetch = fetchMock as unknown as typeof fetch;
   });
 
   afterEach(() => {
+    globalBreaker.recordSuccess();
     vi.restoreAllMocks();
   });
 

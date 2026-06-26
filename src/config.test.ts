@@ -1,8 +1,12 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { describe, expect, it } from "vitest";
 import {
   resolveXMemoMemoryConfig,
   resolveXMemoAgentInstanceId,
+  sharedCredentialPath,
   DEFAULT_BASE_URL,
   DEFAULT_BUCKET,
   DEFAULT_READ_BUCKET,
@@ -21,6 +25,18 @@ function pluginConfig(config: Record<string, unknown>): OpenClawConfig {
   } as OpenClawConfig;
 }
 
+function withSharedCredential(token: string): { env: NodeJS.ProcessEnv; cleanup: () => void } {
+  const root = mkdtempSync(join(tmpdir(), "xmemo-shared-credential-"));
+  writeFileSync(
+    join(root, "credentials.json"),
+    JSON.stringify({ version: 1, storage: "user-scoped-credential-file", token }),
+  );
+  return {
+    env: { XMEMO_CONFIG_HOME: root },
+    cleanup: () => rmSync(root, { recursive: true, force: true }),
+  };
+}
+
 describe("resolveXMemoMemoryConfig", () => {
   it("uses defaults when no config or env is provided", () => {
     const cfg = resolveXMemoMemoryConfig(emptyConfig(), {});
@@ -30,6 +46,7 @@ describe("resolveXMemoMemoryConfig", () => {
     expect(cfg.readScope).toBeUndefined();
     expect(cfg.agentId).toBe(DEFAULT_AGENT_ID);
     expect(cfg.apiKey).toBeUndefined();
+    expect(cfg.credentialSource).toBeUndefined();
     expect(cfg.authMode).toBe("api-key");
     expect(cfg.autoCapture).toBe(false);
     expect(cfg.captureMaxChars).toBe(500);
@@ -59,6 +76,7 @@ describe("resolveXMemoMemoryConfig", () => {
     expect(cfg.readBucket).toBe("shared");
     expect(cfg.readScope).toBe("all-agents");
     expect(cfg.apiKey).toBe("cfg-key");
+    expect(cfg.credentialSource).toBe("config");
     expect(cfg.authMode).toBe("bearer");
     expect(cfg.autoCapture).toBe(true);
     expect(cfg.captureMaxChars).toBe(1000);
@@ -72,8 +90,49 @@ describe("resolveXMemoMemoryConfig", () => {
       XMEMO_AGENT_ID: "env-agent",
     });
     expect(cfg.apiKey).toBe("env-key");
+    expect(cfg.credentialSource).toBe("env");
     expect(cfg.baseUrl).toBe("https://env.example.com");
     expect(cfg.agentId).toBe("env-agent");
+  });
+
+  it("falls back to the shared XMemo user credential when no plugin or env key exists", () => {
+    const shared = withSharedCredential("oauth-device-token");
+    try {
+      const cfg = resolveXMemoMemoryConfig(emptyConfig(), shared.env);
+      expect(cfg.apiKey).toBe("oauth-device-token");
+      expect(cfg.credentialSource).toBe("shared-credential");
+      expect(cfg.authMode).toBe("bearer");
+      expect(sharedCredentialPath(shared.env)).toBe(join(shared.env.XMEMO_CONFIG_HOME!, "credentials.json"));
+    } finally {
+      shared.cleanup();
+    }
+  });
+
+  it("prefers env vars over the shared XMemo user credential", () => {
+    const shared = withSharedCredential("oauth-device-token");
+    try {
+      const cfg = resolveXMemoMemoryConfig(emptyConfig(), {
+        ...shared.env,
+        XMEMO_KEY: "env-key",
+      });
+      expect(cfg.apiKey).toBe("env-key");
+      expect(cfg.credentialSource).toBe("env");
+      expect(cfg.authMode).toBe("api-key");
+    } finally {
+      shared.cleanup();
+    }
+  });
+
+  it("lets explicit authMode override the shared credential bearer default", () => {
+    const shared = withSharedCredential("oauth-device-token");
+    try {
+      const cfg = resolveXMemoMemoryConfig(pluginConfig({ authMode: "both" }), shared.env);
+      expect(cfg.apiKey).toBe("oauth-device-token");
+      expect(cfg.credentialSource).toBe("shared-credential");
+      expect(cfg.authMode).toBe("both");
+    } finally {
+      shared.cleanup();
+    }
   });
 
   it("resolves an env SecretRef object for apiKey", () => {
@@ -82,6 +141,7 @@ describe("resolveXMemoMemoryConfig", () => {
       { XMEMO_KEY: "env-ref-key" },
     );
     expect(cfg.apiKey).toBe("env-ref-key");
+    expect(cfg.credentialSource).toBe("env-secret-ref");
   });
 
   it("resolves an env SecretRef object for the deprecated token alias", () => {

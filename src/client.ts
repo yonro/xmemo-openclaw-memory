@@ -140,6 +140,10 @@ export type XMemoReminderListResponse = {
   reminders: XMemoReminder[];
 };
 
+type XMemoReminderEnvelope =
+  | XMemoReminder
+  | { reminder?: XMemoReminder; item?: XMemoReminder; result?: XMemoReminder };
+
 export type XMemoTimelineEventRequest = {
   content: string;
   event_type?: string;
@@ -160,6 +164,10 @@ export type XMemoTimelineEvent = {
   event_type?: string;
   occurred_at?: string;
 };
+
+type XMemoTimelineEventEnvelope =
+  | XMemoTimelineEvent
+  | { event?: XMemoTimelineEvent; timeline_event?: XMemoTimelineEvent; result?: XMemoTimelineEvent };
 
 export type XMemoRestartSnapshotRequest = {
   label?: string | null;
@@ -236,6 +244,24 @@ export type XMemoTokenValidateResponse = {
   scopes?: string[];
   setup_state?: string;
 };
+
+function unwrapReminder(response: XMemoReminderEnvelope): XMemoReminder {
+  const envelope = response as {
+    reminder?: XMemoReminder;
+    item?: XMemoReminder;
+    result?: XMemoReminder;
+  };
+  return envelope.reminder ?? envelope.item ?? envelope.result ?? (response as XMemoReminder);
+}
+
+function unwrapTimelineEvent(response: XMemoTimelineEventEnvelope): XMemoTimelineEvent {
+  const envelope = response as {
+    event?: XMemoTimelineEvent;
+    timeline_event?: XMemoTimelineEvent;
+    result?: XMemoTimelineEvent;
+  };
+  return envelope.event ?? envelope.timeline_event ?? envelope.result ?? (response as XMemoTimelineEvent);
+}
 
 // ---------------------------------------------------------------------------
 // Retry & Circuit Breaker
@@ -637,11 +663,12 @@ export class XMemoClient {
     request: XMemoReminderRequest,
     signal?: AbortSignal,
   ): Promise<XMemoReminder> {
-    return this.request<XMemoReminder>("/v1/reminders", {
+    const response = await this.request<XMemoReminderEnvelope>("/v1/reminders", {
       method: "POST",
       body: JSON.stringify(request),
       signal,
     });
+    return unwrapReminder(response);
   }
 
   async listReminders(
@@ -664,21 +691,24 @@ export class XMemoClient {
   }
 
   async completeReminder(id: string, signal?: AbortSignal): Promise<XMemoReminder> {
-    return this.request<XMemoReminder>(`/v1/reminders/${encodeURIComponent(id)}/complete`, {
+    const response = await this.request<XMemoReminderEnvelope>(`/v1/reminders/${encodeURIComponent(id)}/complete`, {
       method: "POST",
+      body: JSON.stringify({}),
       signal,
     });
+    return unwrapReminder(response);
   }
 
   async recordEvent(
     request: XMemoTimelineEventRequest,
     signal?: AbortSignal,
   ): Promise<XMemoTimelineEvent> {
-    return this.request<XMemoTimelineEvent>("/v1/timeline/events", {
+    const response = await this.request<XMemoTimelineEventEnvelope>("/v1/timeline/events", {
       method: "POST",
       body: JSON.stringify(request),
       signal,
     });
+    return unwrapTimelineEvent(response);
   }
 
   async getTimeline(

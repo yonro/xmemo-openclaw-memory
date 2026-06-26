@@ -8,7 +8,22 @@ import { describe, expect, it } from "vitest";
 
 const manifest = JSON.parse(
   fs.readFileSync(new URL("../openclaw.plugin.json", import.meta.url), "utf-8"),
-) as { configSchema: JsonSchemaObject };
+) as {
+  configSchema: JsonSchemaObject;
+  contracts?: { tools?: string[] };
+  setup?: {
+    providers?: Array<{ id?: string; authMethods?: string[]; envVars?: string[] }>;
+    requiresRuntime?: boolean;
+  };
+  toolMetadata?: Record<
+    string,
+    {
+      authSignals?: Array<{ provider?: string }>;
+      configSignals?: Array<{ rootPath?: string; requiredAny?: string[] }>;
+    }
+  >;
+  uiHints?: Record<string, { advanced?: boolean; help?: string }>;
+};
 const packageMetadata = JSON.parse(
   fs.readFileSync(new URL("../package.json", import.meta.url), "utf-8"),
 ) as {
@@ -34,6 +49,23 @@ const readme = fs.readFileSync(
   "utf-8",
 );
 
+const taggedConfigFields = [
+  "baseUrl",
+  "apiKey",
+  "token",
+  "authMode",
+  "bucket",
+  "scope",
+  "teamId",
+  "agentId",
+  "autoCapture",
+  "captureMaxChars",
+  "customTriggers",
+  "recallMaxChars",
+  "recallMaxItems",
+  "recallMaxTokens",
+] as const;
+
 function validate(value: Record<string, unknown>) {
   return validateJsonSchemaValue({
     schema: manifest.configSchema,
@@ -45,6 +77,32 @@ function validate(value: Record<string, unknown>) {
 describe("xmemo-memory manifest config schema", () => {
   it("accepts a plain string apiKey", () => {
     const result = validate({ apiKey: "xmemo_test_key" });
+    expect(result.ok).toBe(true);
+  });
+
+  it("keeps every config field accepted by previous tagged releases", () => {
+    const properties = manifest.configSchema.properties as Record<string, unknown> | undefined;
+    for (const field of taggedConfigFields) {
+      expect(properties?.[field]).toBeDefined();
+    }
+  });
+
+  it("accepts a legacy tagged config object without migration", () => {
+    const result = validate({
+      baseUrl: "https://xmemo.dev",
+      token: "legacy-token",
+      authMode: "api-key",
+      bucket: "openclaw",
+      scope: "project-a",
+      teamId: "team-a",
+      agentId: "openclaw",
+      autoCapture: true,
+      captureMaxChars: 500,
+      customTriggers: ["remember this"],
+      recallMaxChars: 1000,
+      recallMaxItems: 8,
+      recallMaxTokens: 1500,
+    });
     expect(result.ok).toBe(true);
   });
 
@@ -90,6 +148,41 @@ describe("xmemo-memory manifest config schema", () => {
 });
 
 describe("xmemo-memory public discovery metadata", () => {
+  it("exposes a one-field ordinary setup path for OpenClaw", () => {
+    expect(manifest.setup).toMatchObject({
+      requiresRuntime: false,
+      providers: [
+        {
+          id: "xmemo-memory",
+          authMethods: ["api-key", "bearer"],
+          envVars: ["XMEMO_KEY", "MEMORY_OS_API_KEY", "MEMORY_OS_MCP_TOKEN"],
+        },
+      ],
+    });
+
+    expect(manifest.uiHints?.apiKey?.advanced).toBeUndefined();
+    expect(manifest.uiHints?.apiKey?.help).toContain("XMemo CLI shared credential");
+    expect(manifest.uiHints?.baseUrl?.advanced).toBe(true);
+    expect(manifest.uiHints?.bucket?.advanced).toBe(true);
+    expect(manifest.uiHints?.autoCapture?.advanced).toBe(true);
+  });
+
+  it("declares XMemo auth availability for every plugin tool", () => {
+    const tools = manifest.contracts?.tools ?? [];
+    expect(tools.length).toBeGreaterThan(0);
+    for (const toolName of tools) {
+      expect(manifest.toolMetadata?.[toolName]).toMatchObject({
+        authSignals: [{ provider: "xmemo-memory" }],
+        configSignals: [
+          {
+            rootPath: "plugins.entries.xmemo-memory.config",
+            requiredAny: ["apiKey", "token"],
+          },
+        ],
+      });
+    }
+  });
+
   it("keeps the XMemo discovery and companion Skill relationship machine-readable", () => {
     expect(packageMetadata.homepage).toBe("https://xmemo.dev");
     expect(packageMetadata.xmemo).toMatchObject({
@@ -127,6 +220,15 @@ describe("xmemo-memory public discovery metadata", () => {
     );
     expect(readme).toContain("https://xmemo.dev/v1/mcp/config/openclaw");
     expect(readme).toContain("https://xmemo.dev/mcp");
+    expect(readme).toContain('openclaw xmemo setup "xmemo_..."');
+    expect(readme).toContain("openclaw xmemo setup --env XMEMO_KEY");
+    expect(readme).toContain("systemctl --user set-environment XMEMO_KEY");
+    expect(readme).toContain("XMemo shared user credential");
+    expect(readme).toContain("xmemo login");
+    expect(readme).not.toContain("openclaw config set plugins.entries.xmemo-memory.config.apiKey");
+    expect(readme).toContain("No manual `openclaw.json` editing is required.");
+    expect(readme).toContain("Upgrade compatibility");
+    expect(readme).toContain("`token` is kept as a compatibility alias");
     expect(readme).toContain('"memory": "xmemo-memory"');
     expect(readme).toContain("The Skill alone cannot execute memory operations.");
     expect(readme).toContain("Shared memory with ChatGPT");

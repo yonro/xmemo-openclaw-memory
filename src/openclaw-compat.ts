@@ -1,4 +1,5 @@
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import { createRequire } from "node:module";
 
 type PluginConfigRuntime = {
   resolvePluginConfigObject?: (
@@ -21,12 +22,18 @@ function isMissingOptionalExport(error: unknown): boolean {
     return false;
   }
   const code = (error as { code?: unknown }).code;
-  return code === "ERR_PACKAGE_PATH_NOT_EXPORTED" || code === "ERR_MODULE_NOT_FOUND";
+  return (
+    code === "ERR_PACKAGE_PATH_NOT_EXPORTED" ||
+    code === "ERR_MODULE_NOT_FOUND" ||
+    code === "ERR_REQUIRE_ESM"
+  );
 }
 
-async function loadPluginConfigRuntime(): Promise<PluginConfigRuntime | undefined> {
+const requireOptional = createRequire(import.meta.url);
+
+function loadPluginConfigRuntime(): PluginConfigRuntime | undefined {
   try {
-    return await import("openclaw/plugin-sdk/plugin-config-runtime");
+    return requireOptional("openclaw/plugin-sdk/plugin-config-runtime") as PluginConfigRuntime;
   } catch (error) {
     if (isMissingOptionalExport(error)) {
       return undefined;
@@ -35,10 +42,19 @@ async function loadPluginConfigRuntime(): Promise<PluginConfigRuntime | undefine
   }
 }
 
-const pluginConfigRuntime = await loadPluginConfigRuntime();
-const memoryCoreRuntime = (await import(
-  "openclaw/plugin-sdk/memory-core-host-runtime-core"
-)) as MemoryCoreRuntime;
+const pluginConfigRuntime = loadPluginConfigRuntime();
+const memoryCoreRuntime = (() => {
+  try {
+    return requireOptional("openclaw/plugin-sdk/memory-core-host-runtime-core") as
+      | MemoryCoreRuntime
+      | undefined;
+  } catch (error) {
+    if (isMissingOptionalExport(error)) {
+      return undefined;
+    }
+    throw error;
+  }
+})();
 
 export function fallbackResolvePluginConfigObject(
   config: OpenClawConfig | undefined,
@@ -103,7 +119,7 @@ export function fallbackAsToolParamsRecord(params: unknown): Record<string, unkn
 }
 
 export function asToolParamsRecord(params: unknown): Record<string, unknown> {
-  return memoryCoreRuntime.asToolParamsRecord
+  return memoryCoreRuntime?.asToolParamsRecord
     ? memoryCoreRuntime.asToolParamsRecord(params)
     : fallbackAsToolParamsRecord(params);
 }

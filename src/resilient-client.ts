@@ -113,13 +113,9 @@ export class ResilientXMemoClient {
       maxTokens: params.maxTokens ?? this.config.recallMaxTokens,
     };
 
-    // Check cache first
+    // Keep cache available only as a fallback. Recall results can be partial, so
+    // cloud remains authoritative even when the local cache is still fresh.
     const cached = this.cache.getCachedRecall("recall_context", query, cacheParams);
-
-    // If cache is fresh, return immediately
-    if (cached && cached.isFresh) {
-      return { result: cached.response, fromCache: true, isFresh: true };
-    }
 
     // Try remote call
     try {
@@ -150,7 +146,7 @@ export class ResilientXMemoClient {
 
       // If we have stale cache, return it as fallback
       if (cached) {
-        return { result: cached.response, fromCache: true, isFresh: false };
+        return { result: cached.response, fromCache: true, isFresh: cached.isFresh };
       }
 
       throw error;
@@ -178,11 +174,9 @@ export class ResilientXMemoClient {
       maxItems: params.maxItems ?? 10,
     };
 
+    // Keep cache available only as a fallback. Search results can be partial, so
+    // cloud remains authoritative even when the local cache is still fresh.
     const cached = this.cache.getCachedRecall("search", query, cacheParams);
-
-    if (cached && cached.isFresh) {
-      return { result: cached.response, fromCache: true, isFresh: true };
-    }
 
     try {
       const response = await this.client.searchMemory(
@@ -205,7 +199,7 @@ export class ResilientXMemoClient {
       this._recordFailure(error);
 
       if (cached) {
-        return { result: cached.response, fromCache: true, isFresh: false };
+        return { result: cached.response, fromCache: true, isFresh: cached.isFresh };
       }
 
       throw error;

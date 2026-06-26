@@ -7,6 +7,16 @@
     "onStartup": false,
     "onCommands": ["memory"]
   },
+  "setup": {
+    "providers": [
+      {
+        "id": "xmemo-memory",
+        "authMethods": ["api-key", "bearer"],
+        "envVars": ["XMEMO_KEY", "MEMORY_OS_API_KEY", "MEMORY_OS_MCP_TOKEN"]
+      }
+    ],
+    "requiresRuntime": false
+  },
   "contracts": {
     "tools": [
       "memory_search",
@@ -26,6 +36,143 @@
       "xmemo_audit_consolidation"
     ]
   },
+  "toolMetadata": {
+    "memory_search": {
+      "authSignals": [{ "provider": "xmemo-memory" }],
+      "configSignals": [
+        {
+          "rootPath": "plugins.entries.xmemo-memory.config",
+          "requiredAny": ["apiKey", "token"]
+        }
+      ]
+    },
+    "memory_get": {
+      "authSignals": [{ "provider": "xmemo-memory" }],
+      "configSignals": [
+        {
+          "rootPath": "plugins.entries.xmemo-memory.config",
+          "requiredAny": ["apiKey", "token"]
+        }
+      ]
+    },
+    "memory_store": {
+      "authSignals": [{ "provider": "xmemo-memory" }],
+      "configSignals": [
+        {
+          "rootPath": "plugins.entries.xmemo-memory.config",
+          "requiredAny": ["apiKey", "token"]
+        }
+      ]
+    },
+    "memory_forget": {
+      "authSignals": [{ "provider": "xmemo-memory" }],
+      "configSignals": [
+        {
+          "rootPath": "plugins.entries.xmemo-memory.config",
+          "requiredAny": ["apiKey", "token"]
+        }
+      ]
+    },
+    "xmemo_memory_list": {
+      "authSignals": [{ "provider": "xmemo-memory" }],
+      "configSignals": [
+        {
+          "rootPath": "plugins.entries.xmemo-memory.config",
+          "requiredAny": ["apiKey", "token"]
+        }
+      ]
+    },
+    "xmemo_memory_update": {
+      "authSignals": [{ "provider": "xmemo-memory" }],
+      "configSignals": [
+        {
+          "rootPath": "plugins.entries.xmemo-memory.config",
+          "requiredAny": ["apiKey", "token"]
+        }
+      ]
+    },
+    "xmemo_todo_create": {
+      "authSignals": [{ "provider": "xmemo-memory" }],
+      "configSignals": [
+        {
+          "rootPath": "plugins.entries.xmemo-memory.config",
+          "requiredAny": ["apiKey", "token"]
+        }
+      ]
+    },
+    "xmemo_todo_list": {
+      "authSignals": [{ "provider": "xmemo-memory" }],
+      "configSignals": [
+        {
+          "rootPath": "plugins.entries.xmemo-memory.config",
+          "requiredAny": ["apiKey", "token"]
+        }
+      ]
+    },
+    "xmemo_todo_complete": {
+      "authSignals": [{ "provider": "xmemo-memory" }],
+      "configSignals": [
+        {
+          "rootPath": "plugins.entries.xmemo-memory.config",
+          "requiredAny": ["apiKey", "token"]
+        }
+      ]
+    },
+    "xmemo_record_event": {
+      "authSignals": [{ "provider": "xmemo-memory" }],
+      "configSignals": [
+        {
+          "rootPath": "plugins.entries.xmemo-memory.config",
+          "requiredAny": ["apiKey", "token"]
+        }
+      ]
+    },
+    "xmemo_restart_snapshot_save": {
+      "authSignals": [{ "provider": "xmemo-memory" }],
+      "configSignals": [
+        {
+          "rootPath": "plugins.entries.xmemo-memory.config",
+          "requiredAny": ["apiKey", "token"]
+        }
+      ]
+    },
+    "xmemo_restart_snapshot_restore": {
+      "authSignals": [{ "provider": "xmemo-memory" }],
+      "configSignals": [
+        {
+          "rootPath": "plugins.entries.xmemo-memory.config",
+          "requiredAny": ["apiKey", "token"]
+        }
+      ]
+    },
+    "xmemo_ledger_monthly_summary": {
+      "authSignals": [{ "provider": "xmemo-memory" }],
+      "configSignals": [
+        {
+          "rootPath": "plugins.entries.xmemo-memory.config",
+          "requiredAny": ["apiKey", "token"]
+        }
+      ]
+    },
+    "xmemo_audit_events": {
+      "authSignals": [{ "provider": "xmemo-memory" }],
+      "configSignals": [
+        {
+          "rootPath": "plugins.entries.xmemo-memory.config",
+          "requiredAny": ["apiKey", "token"]
+        }
+      ]
+    },
+    "xmemo_audit_consolidation": {
+      "authSignals": [{ "provider": "xmemo-memory" }],
+      "configSignals": [
+        {
+          "rootPath": "plugins.entries.xmemo-memory.config",
+          "requiredAny": ["apiKey", "token"]
+        }
+      ]
+    }
+  },
   "uiHints": {
     "baseUrl": {
       "label": "XMemo Service URL",
@@ -36,7 +183,7 @@
     "apiKey": {
       "label": "XMemo API Key",
       "placeholder": "xmemo_...",
-      "help": "Create a scoped API key in XMemo Memory Console -> API Keys -> Create API key. Prefer setting XMEMO_KEY instead of storing the key here. Public discovery/config metadata never includes user tokens.",
+      "help": "Paste a scoped XMemo API key here, set XMEMO_KEY in the OpenClaw environment, or sign in once with the XMemo CLI shared credential flow.",
       "sensitive": true
     },
     "token": {
@@ -55,7 +202,8 @@
     "bucket": {
       "label": "Default Bucket",
       "placeholder": "openclaw",
-      "help": "Default bucket for memories created by OpenClaw."
+      "help": "Default bucket for memories created by OpenClaw.",
+      "advanced": true
     },
     "scope": {
       "label": "Default Scope",
@@ -89,7 +237,8 @@
     },
     "autoCapture": {
       "label": "Auto Capture",
-      "help": "Automatically persist high-signal decisions and fixes to XMemo."
+      "help": "Automatically persist high-signal decisions and fixes to XMemo.",
+      "advanced": true
     },
     "captureMaxChars": {
       "label": "Capture Max Chars",

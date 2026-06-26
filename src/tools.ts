@@ -61,6 +61,7 @@ function buildErrorResult(error: unknown): AgentToolResult<unknown> {
 type XMemoFailureErrorType =
   | "not_configured"
   | "auth"
+  | "request"
   | "timeout"
   | "network"
   | "unavailable"
@@ -77,6 +78,9 @@ function classifyXMemoError(error: unknown): { errorType: XMemoFailureErrorType;
     if (error.status === 401 || error.status === 403) {
       return { errorType: "auth", status: error.status };
     }
+    if (error.status >= 400 && error.status < 500) {
+      return { errorType: "request", status: error.status };
+    }
     return { errorType: "unavailable", status: error.status };
   }
   return { errorType: "unknown" };
@@ -87,6 +91,17 @@ function buildUnavailableResult(error: unknown): AgentToolResult<unknown> {
   const statusSuffix = status !== undefined ? ` ${status}` : "";
   const breakerState = globalBreaker.state;
   const breakerNote = breakerState === "open" ? " Circuit breaker is open; retries paused." : "";
+  if (errorType === "request") {
+    return {
+      content: [
+        {
+          type: "text",
+          text: `XMemo memory request was rejected (${errorType}${statusSuffix}). Check the tool parameters and try again.`,
+        },
+      ],
+      details: { unavailable: false, errorType, breakerState, ...(status !== undefined ? { status } : {}) },
+    };
+  }
   return {
     content: [
       {
@@ -144,6 +159,59 @@ function formatMemorySearchResults(
     ...lines,
     "</xmemo-memories>",
   ].join("\n");
+}
+
+function stringField(record: Record<string, unknown>, key: string): string | undefined {
+  const value = record[key];
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function nestedRecordField(record: Record<string, unknown>, key: string): Record<string, unknown> | undefined {
+  const value = record[key];
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function contextTextSections(contextText: string | undefined): string[] {
+  if (!contextText?.trim()) {
+    return [];
+  }
+
+  const sections = contextText
+    .split(/\n{2,}/)
+    .map((section) => section.replace(/^\s*(?:[-*]|\d+[.)])\s*/, "").trim())
+    .filter(Boolean);
+  return sections.length > 0 ? sections : [contextText.trim()];
+}
+
+function memorySearchSnippet(item: Record<string, unknown>, contextFallback?: string): string {
+  const direct =
+    stringField(item, "content") ??
+    stringField(item, "snippet") ??
+    stringField(item, "text") ??
+    stringField(item, "summary") ??
+    stringField(item, "body") ??
+    stringField(item, "memory");
+  if (direct) {
+    return direct;
+  }
+
+  for (const key of ["memory", "item", "record", "document"]) {
+    const nested = nestedRecordField(item, key);
+    const nestedText =
+      nested &&
+      (stringField(nested, "content") ??
+        stringField(nested, "snippet") ??
+        stringField(nested, "text") ??
+        stringField(nested, "summary") ??
+        stringField(nested, "body"));
+    if (nestedText) {
+      return nestedText;
+    }
+  }
+
+  return contextFallback?.trim() ?? "";
 }
 
 function formatMemoryReadResult(path: string, text: string): string {
@@ -206,7 +274,10 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
             preferWorking: true,
           }, signal);
 
-          const response = result as { items?: Array<{ content?: string; snippet?: string; score?: number; path?: string; bucket?: string; id?: string }> } | null;
+          const response = result as {
+            items?: Array<Record<string, unknown>>;
+            context_text?: string;
+          } | null;
           const items = response?.items ?? [];
 
           if (items.length === 0) {
@@ -216,9 +287,11 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
             };
           }
 
+          const contextFallbacks = contextTextSections(response?.context_text);
           const searchResults = items.map((item, index) => {
-            const score = item.score ?? Math.max(0.5, 0.95 - index * 0.05);
-            const snippet = item.content ?? item.snippet ?? "";
+            const score =
+              typeof item.score === "number" ? item.score : Math.max(0.5, 0.95 - index * 0.05);
+            const snippet = memorySearchSnippet(item, contextFallbacks[index]);
             return { score, snippet };
           });
 
@@ -226,7 +299,13 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
 
           return {
             content: [{ type: "text", text }],
-            details: { count: items.length, fromCache, results: items },
+            details: {
+              count: items.length,
+              fromCache,
+              ids: items
+                .map((item) => item.id)
+                .filter((id): id is string => typeof id === "string"),
+            },
           };
         } catch (error) {
           return buildUnavailableResult(error);
@@ -507,8 +586,14 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
             due_at: typeof raw.due_at === "string" ? raw.due_at : null,
           };
           const reminder = await client.createReminder(request, signal);
+          const reminderText = reminder.content?.trim() || content;
           return {
-            content: [{ type: "text", text: `Created XMemo reminder: ${reminder.content}` }],
+            content: [
+              {
+                type: "text",
+                text: `Created XMemo reminder ${reminder.id}: ${reminderText}`,
+              },
+            ],
             details: { action: "created", id: reminder.id },
           };
         } catch (error) {
@@ -602,9 +687,15 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
 
         try {
           const reminder = await client.completeReminder(id, signal);
+          const reminderText = reminder.content?.trim();
           return {
-            content: [{ type: "text", text: `Completed XMemo reminder: ${reminder.content}` }],
-            details: { action: "completed", id: reminder.id },
+            content: [
+              {
+                type: "text",
+                text: `Completed XMemo reminder ${reminder.id || id}${reminderText ? `: ${reminderText}` : ""}`,
+              },
+            ],
+            details: { action: "completed", id: reminder.id || id },
           };
         } catch (error) {
           return buildErrorResult(error);
@@ -660,8 +751,9 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
             source: "openclaw",
           };
           const event = await client.recordEvent(request, signal);
+          const eventText = event.content?.trim() || content;
           return {
-            content: [{ type: "text", text: `Recorded XMemo event: ${event.content}` }],
+            content: [{ type: "text", text: `Recorded XMemo event ${event.id}: ${eventText}` }],
             details: { action: "recorded", id: event.id },
           };
         } catch (error) {
@@ -677,9 +769,9 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
       name: "xmemo_memory_list",
       label: "XMemo Memory List",
       description:
-        "List all visible XMemo memories matching a query or filter. Useful for browsing recent memories without a semantic search.",
+        "List visible XMemo memories matching a search query. Provide query; the XMemo search API does not support unfiltered browsing.",
       parameters: Type.Object({
-        query: Type.Optional(Type.String({ description: "Search query (optional)" })),
+        query: Type.Optional(Type.String({ description: "Search query (required)" })),
         maxResults: optionalPositiveInteger("Max results (default: 20)"),
         memory_type: Type.Optional(Type.String({ description: "Filter by memory type" })),
       }),
@@ -698,6 +790,17 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
         const raw = asToolParamsRecord(params);
         const query = typeof raw.query === "string" ? raw.query.trim() : "";
         const maxResults = typeof raw.maxResults === "number" ? raw.maxResults : 20;
+        if (!query) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "XMemo memory list requires a search query. Call xmemo_memory_list again with query, or use memory_search for semantic recall.",
+              },
+            ],
+            details: { error: "query_required" },
+          };
+        }
 
         try {
           const { result, fromCache } = await resilient.searchMemory(query, {
@@ -723,7 +826,11 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           );
           return {
             content: [{ type: "text", text: `XMemo memories:\n\n${lines.join("\n")}` }],
-            details: { count: memories.length, fromCache, memories },
+            details: {
+              count: memories.length,
+              fromCache,
+              ids: memories.map((memory) => memory.id).filter((id): id is string => typeof id === "string"),
+            },
           };
         } catch (error) {
           return buildUnavailableResult(error);

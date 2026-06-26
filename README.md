@@ -91,7 +91,7 @@ and does not change how other MCP clients connect to XMemo.
 
 - Identity-aware memory for OpenClaw via the XMemo REST API
 - Canonical memory tools: `memory_search`, `memory_get`, `memory_store`, `memory_forget`
-- Memory list and update: `xmemo_memory_list`, `xmemo_memory_update`
+- Memory query/list and update: `xmemo_memory_list` (requires a query), `xmemo_memory_update`
 - Reminder tools: `xmemo_todo_create`, `xmemo_todo_list`, `xmemo_todo_complete`
 - Timeline event tool: `xmemo_record_event`
 - Restart snapshot tools: `xmemo_restart_snapshot_save`, `xmemo_restart_snapshot_restore`
@@ -115,11 +115,37 @@ clients, the hosted MCP server is the portable integration path.
 
 ## Installation
 
-Install the plugin from ClawHub (recommended):
+### Quick setup
+
+Install the plugin from ClawHub and set your XMemo API key:
 
 ```bash
 openclaw plugins install clawhub:@xmemo/openclaw-memory
+openclaw xmemo setup "xmemo_..."
+openclaw xmemo status
 ```
+
+No manual `openclaw.json` editing is required. Recent OpenClaw releases select
+`xmemo-memory` as the memory slot when the plugin is installed.
+
+If you already use the XMemo CLI on the same user account, the plugin can also
+use the XMemo shared user credential created by `xmemo login`:
+
+```bash
+npm install -g @xmemo/client
+xmemo login
+openclaw plugins install clawhub:@xmemo/openclaw-memory
+openclaw xmemo status
+```
+
+This is a shared XMemo credential contract, not a plugin-private dependency on
+the `@xmemo/client` package. Explicit plugin config and service environment
+variables still take precedence.
+
+If you also configure XMemo as a hosted MCP server, use the same shared
+credential path (`xmemo login` / `xmemo token add --from-stdin`) or the same
+`XMEMO_KEY` environment variable. Do not treat an empty plugin `apiKey` field as
+an error when a shared credential or environment token is present.
 
 npm is also supported as a secondary distribution channel:
 
@@ -127,11 +153,17 @@ npm is also supported as a secondary distribution channel:
 openclaw plugins install @xmemo/openclaw-memory
 ```
 
-Then set the memory slot to `xmemo-memory` and enable the entry as shown below.
-
 The plugin already defaults the service URL to `https://xmemo.dev`, the agent ID
 to `openclaw`, and a non-secret instance identifier automatically. Normal users
 do not need to choose or enter identity fields.
+For production or shared hosts, prefer an environment SecretRef instead of a
+plaintext key. Make sure `XMEMO_KEY` is already available to the OpenClaw
+gateway/service environment before saving the SecretRef:
+
+```bash
+export XMEMO_KEY="your-xmemo-api-key"
+openclaw xmemo setup --env XMEMO_KEY
+```
 
 ### OpenClaw compatibility
 
@@ -145,7 +177,7 @@ helpers, so newer OpenClaw releases retain their native behavior.
 
 ## Configuration
 
-Activate the plugin by setting the memory slot:
+Optional explicit config:
 
 ```json
 {
@@ -172,7 +204,20 @@ Activate the plugin by setting the memory slot:
 
 Config lives at `plugins.entries["xmemo-memory"].config`, not `plugins.config`.
 For production setups, keep the API key in the environment (`XMEMO_KEY`) instead
-of storing it in `openclaw.json`.
+of storing it in `openclaw.json`. Most users do not need this block at all.
+
+### Upgrade compatibility
+
+Configuration written by previous tagged releases remains valid. The plugin still
+accepts `baseUrl`, `apiKey`, deprecated `token`, `authMode`, `bucket`, `scope`,
+`teamId`, `agentId`, `autoCapture`, `captureMaxChars`, `customTriggers`,
+`recallMaxChars`, `recallMaxItems`, and `recallMaxTokens`. The newer
+`readBucket` and `readScope` fields are optional and default to cross-agent
+visible-memory recall.
+
+`token` is kept as a compatibility alias for older configs; new setup commands
+write `apiKey` instead. Running `openclaw xmemo setup ...` preserves existing
+advanced config such as `baseUrl`, `bucket`, and `scope`.
 
 `bucket` and `scope` control where new OpenClaw-authored memories are written.
 Recall and search read all visible user-owned XMemo memories by default so
@@ -184,8 +229,11 @@ connected agents. Advanced operators can narrow reads with `readBucket` and
 
 Create a scoped API key in the XMemo Memory Console:
 [xmemo.dev](https://xmemo.dev) → **API Keys** → **Create API key**.
-Copy the one-time secret value, then set it as the `XMEMO_KEY` environment
-variable:
+Copy the one-time secret value, then paste it into the plugin's **XMemo API
+Key** field or use the quick CLI command above.
+
+If you prefer environment-backed secrets, set `XMEMO_KEY` in the environment
+seen by the OpenClaw gateway:
 
 ```bash
 export XMEMO_KEY="your-xmemo-api-key"
@@ -196,6 +244,23 @@ The key can also be configured with `apiKey` (preferred) or the deprecated
 secret manager and omit the `apiKey` field from `openclaw.json`; the plugin
 will read `XMEMO_KEY` directly.
 
+For personal desktop installs, `xmemo login` from `@xmemo/client` writes a
+user-scoped XMemo shared user credential. If no plugin key and no supported
+environment variable is present, the OpenClaw plugin reads that shared
+credential and sends it as `Authorization: Bearer ...`.
+
+Running `openclaw xmemo setup "xmemo_..."` also updates the same shared
+credential file after the plugin config is saved. This keeps OpenClaw native
+memory and XMemo MCP/proxy clients aligned around one user-level credential
+contract. `openclaw xmemo setup --env XMEMO_KEY` only stores the environment
+reference and does not copy the secret out of the service environment.
+
+If OpenClaw runs as a daemon/service, remember that a shell `export` only affects
+that shell. Existing `systemctl --user set-environment XMEMO_KEY=...` setup
+still works for the gateway service after restart. Use plugin settings,
+`openclaw xmemo setup --env XMEMO_KEY`, or
+your service environment so the gateway process can see the key.
+
 ### SecretRef support
 
 The plugin resolves `apiKey`/`token` in this order:
@@ -203,13 +268,20 @@ The plugin resolves `apiKey`/`token` in this order:
 1. A literal string.
 2. An env SecretRef object: `{ "source": "env", "provider": "default", "id": "XMEMO_KEY" }`.
 3. The environment variables `XMEMO_KEY`, `MEMORY_OS_API_KEY`, or `MEMORY_OS_MCP_TOKEN`.
+4. The XMemo shared user credential file created by `xmemo login`.
 
 Only `env` SecretRefs are supported. `file` and `exec` sources are not
 implemented and are rejected by the manifest config schema.
 
-## Required environment variables
+The shared user credential fallback uses the same path contract as `@xmemo/client`:
+`$XMEMO_CONFIG_HOME/credentials.json`, `$MEMORY_OS_CONFIG_HOME/credentials.json`,
+`%LOCALAPPDATA%\XMemo\CLI\credentials.json` on Windows, or
+`$XDG_CONFIG_HOME/xmemo/credentials.json` / `~/.config/xmemo/credentials.json`
+on Unix-like systems.
 
-- `XMEMO_KEY` — XMemo API key (preferred)
+## Environment variables
+
+- `XMEMO_KEY` — XMemo API key for env-backed setup
 - `MEMORY_OS_API_KEY` — alternate env var name
 - `XMEMO_AGENT_INSTANCE_ID` — optional stable device-level identifier
 
@@ -224,6 +296,30 @@ By default the credential is sent as `X-API-Key`. To use Bearer auth or both:
 ```
 
 Allowed values: `api-key` (default), `bearer`, `both`.
+Credentials loaded from the shared `xmemo login` file default to `bearer` unless
+`authMode` is explicitly configured.
+
+`openclaw xmemo status --json` includes a non-secret `credentialSource` field
+(`config`, `env-secret-ref`, `env`, or `shared-credential`) so setup assistants
+can distinguish "no literal apiKey field" from "not configured".
+
+## MCP and native plugin together
+
+The native OpenClaw memory plugin and the hosted XMemo MCP server can coexist,
+but OpenClaw should prefer the native plugin for the active memory slot. The MCP
+server is useful for portable tool access or clients that do not use OpenClaw's
+memory slot.
+
+To avoid contradictory diagnostics:
+
+- Check `openclaw xmemo status --json` and `credentialSource`, not just whether
+  `plugins.entries["xmemo-memory"].config.apiKey` exists.
+- Check MCP auth separately only when the user is actually using the hosted MCP
+  server.
+- Prefer one credential contract: `XMEMO_KEY` for service deployments, or the
+  shared user credential file for personal desktop installs.
+- If both native plugin tools and MCP tools expose similar names, use the native
+  plugin tools for OpenClaw memory operations.
 
 ## Agent identity headers
 
@@ -238,6 +334,8 @@ plugin does not write JSON sidecars to disk.
 ## CLI
 
 ```bash
+openclaw xmemo setup "xmemo_..."
+openclaw xmemo setup --env XMEMO_KEY
 openclaw xmemo status
 openclaw xmemo status --json
 ```
@@ -302,6 +400,8 @@ Expected results:
 
 The `memory_*` tools are invoked by the OpenClaw agent during a turn, not as
 standalone CLI commands.
+`xmemo_memory_list` is backed by XMemo search and requires a non-empty query;
+use `memory_search` for semantic recall when you do not need an exact list view.
 
 ## Migration from memory-core or memory-lancedb
 
