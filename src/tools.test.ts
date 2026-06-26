@@ -209,8 +209,8 @@ describe("memory_search failure-open", () => {
 
     const result = await tools.get("memory_search")!.execute("tc-1", { query: "XMemo" });
 
-    expect(textContent(result)).toContain("[95%] content returned as text field");
-    expect(textContent(result)).toContain("[92%] content returned under nested memory");
+    expect(textContent(result)).toContain("content returned as text field");
+    expect(textContent(result)).toContain("content returned under nested memory");
     expect(JSON.stringify(result.details)).not.toContain("content returned as text field");
   });
 
@@ -228,8 +228,8 @@ describe("memory_search failure-open", () => {
 
     const result = await tools.get("memory_search")!.execute("tc-1", { query: "XMemo" });
 
-    expect(textContent(result)).toContain("[95%] first context text");
-    expect(textContent(result)).toContain("[92%] second context text");
+    expect(textContent(result)).toContain("first context text");
+    expect(textContent(result)).toContain("second context text");
   });
 
   it("uses readBucket/readScope overrides when listing memories", async () => {
