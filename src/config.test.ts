@@ -51,7 +51,7 @@ describe("resolveXMemoMemoryConfig", () => {
     expect(cfg.autoCapture).toBe(false);
     expect(cfg.captureMaxChars).toBe(500);
     expect(cfg.recallMaxItems).toBe(8);
-    expect(cfg.recallMaxTokens).toBe(1500);
+    expect(cfg.recallMaxTokens).toBe(4000);
   });
 
   it("reads config from plugins.entries[xmemo-memory].config", () => {

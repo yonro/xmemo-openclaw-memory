@@ -267,7 +267,7 @@
       "label": "Recall Max Tokens",
       "help": "Maximum token budget for the recalled context package.",
       "advanced": true,
-      "placeholder": "1500"
+      "placeholder": "4000"
     }
   },
   "configSchema": {
@@ -364,7 +364,7 @@
         "type": "integer",
         "minimum": 100,
         "maximum": 8000,
-        "default": 1500
+        "default": 4000
       }
     }
   }

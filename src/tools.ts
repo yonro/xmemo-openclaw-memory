@@ -334,8 +334,8 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
         lines: Type.Optional(Type.Integer({ description: "Line count", minimum: 1 })),
       }),
       async execute(_toolCallId, params, signal) {
-        const client = buildClient(api);
-        if (!client) {
+        const resilient = buildResilientClient(api);
+        if (!resilient) {
           return {
             content: [
               {
@@ -358,7 +358,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
         }
 
         try {
-          const manager = new XMemoSearchManager(client, cfg);
+          const manager = new XMemoSearchManager(resilient.rawClient, cfg);
           const result = await manager.readFile(
             {
               relPath,
@@ -382,7 +382,14 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
             },
           };
         } catch (error) {
-          return buildErrorResult(error);
+          // Distinguish transient failures (network/timeout) from permanent ones (404 not found)
+          if (error instanceof XMemoClientError && error.status === 404) {
+            return {
+              content: [{ type: "text", text: `Memory not found at path: ${relPath}. It may have been deleted or the ID is incorrect.` }],
+              details: { error: "not_found", path: relPath },
+            };
+          }
+          return buildUnavailableResult(error);
         }
       },
     },
