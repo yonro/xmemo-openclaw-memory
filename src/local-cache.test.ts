@@ -39,10 +39,13 @@ describe("XMemoLocalCache", () => {
       expect(result!.response).toEqual(response);
     });
 
-    it("returns stale result when fresh TTL expired", () => {
+    it("returns stale result when fresh TTL expired", async () => {
       const response = { items: [] };
-      // Put with 0ms fresh TTL (immediately stale) but 1h max stale
-      cache.putCachedRecall("recall_context", "q", { bucket: "%" }, response, 0, 3_600_000);
+      // Put with 1ms fresh TTL (expires almost immediately) but long max stale
+      cache.putCachedRecall("recall_context", "q", { bucket: "%" }, response, 1, 3_600_000);
+
+      // Wait to ensure fresh TTL has elapsed
+      await new Promise((resolve) => setTimeout(resolve, 5));
 
       const result = cache.getCachedRecall("recall_context", "q", { bucket: "%" });
       expect(result).not.toBeNull();
@@ -168,12 +171,15 @@ describe("XMemoLocalCache", () => {
       expect(stats.heldWrites).toBe(1);
     });
 
-    it("recoverStaleLocks resets stuck processing records", () => {
+    it("recoverStaleLocks resets stuck processing records", async () => {
       const id = cache.enqueueWrite("remember", "/v1/remember", "POST", { content: "test" });
       cache.lockForProcessing(id);
 
-      // Recover with 0ms timeout (everything is stale)
-      const recovered = cache.recoverStaleLocks(0);
+      // Wait to ensure the lock timestamp is in the past relative to a short timeout
+      await new Promise((resolve) => setTimeout(resolve, 5));
+
+      // Recover with 1ms timeout (everything locked before the wait is stale)
+      const recovered = cache.recoverStaleLocks(1);
       expect(recovered).toBe(1);
 
       const pending = cache.listPendingWrites();
