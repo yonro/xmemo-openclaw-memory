@@ -15,6 +15,12 @@ import { asToolParamsRecord } from "./openclaw-compat.js";
 import { ResilientXMemoClient } from "./resilient-client.js";
 import { XMemoSearchManager } from "./search-manager.js";
 import { setXMemoStatusProvider } from "./prompt-section.js";
+import {
+  tokenizeQuery,
+  extractRetrievalHints,
+  dedupeAndRank,
+  type RetrievalTrace,
+} from "./retrieval-strategy.js";
 
 function buildClient(api: OpenClawPluginApi): XMemoClient | null {
   const cfg = resolveXMemoMemoryConfig(api.config);
@@ -239,6 +245,8 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
       parameters: Type.Object({
         query: Type.String({ description: "Search query" }),
         maxResults: optionalPositiveInteger("Max results (default: 8)"),
+        minResults: Type.Optional(Type.Integer({ description: "Min results threshold for L2 fallback (default: 3)", minimum: 1 })),
+        debug: Type.Optional(Type.Boolean({ description: "Return retrieval trace (default: false)" })),
       }),
       async execute(_toolCallId, params, signal) {
         const resilient = buildResilientClient(api);
@@ -258,6 +266,8 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
         const raw = asToolParamsRecord(params);
         const query = typeof raw.query === "string" ? raw.query.trim() : "";
         const maxResults = typeof raw.maxResults === "number" ? raw.maxResults : cfg.recallMaxItems;
+        const minResults = typeof raw.minResults === "number" ? raw.minResults : 3;
+        const debug = typeof raw.debug === "boolean" ? raw.debug : false;
 
         if (!query) {
           return {
@@ -266,6 +276,29 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           };
         }
 
+        const trace: RetrievalTrace = {
+          originalQuery: query,
+          strategies: [],
+        };
+
+        const { pathHint, agentHint } = extractRetrievalHints(query);
+        if (pathHint) trace.pathHint = pathHint;
+        if (agentHint) trace.agentHint = agentHint;
+
+        type UnifiedResult = {
+          id: string;
+          score: number;
+          snippet: string;
+          path?: string;
+          bucket: string;
+          retrievedByQuery: string;
+          strategy: string;
+        };
+
+        let l1Items: UnifiedResult[] = [];
+        let l1FromCache = false;
+
+        // L1: Semantic recall
         try {
           const { result, fromCache } = await resilient.recallContext(query, {
             bucket: cfg.readBucket,
@@ -276,47 +309,158 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
             preferWorking: true,
           }, signal);
 
+          l1FromCache = fromCache;
           const response = result as {
             items?: Array<Record<string, unknown>>;
             context_text?: string;
           } | null;
           const items = response?.items ?? [];
-
-          if (items.length === 0) {
-            return {
-              content: [{ type: "text", text: "No relevant XMemo memories found." }],
-              details: { count: 0, fromCache },
-            };
-          }
-
           const contextFallbacks = contextTextSections(response?.context_text);
-          const searchResults = items.map((item, index) => {
-            const score =
-              typeof item.score === "number" ? item.score : Math.max(0.5, 0.95 - index * 0.05);
+
+          l1Items = items.map((item, index) => {
+            const id = stringField(item, "id") || "";
+            const score = typeof item.score === "number" ? item.score : Math.max(0.5, 0.95 - index * 0.05);
             const snippet = memorySearchSnippet(item, contextFallbacks[index]);
-            // Build a path that memory_get can use to retrieve the full content
-            const id = stringField(item, "id");
             const bucket = stringField(item, "bucket") ?? cfg.bucket;
             const itemPath = stringField(item, "path");
             const getPath = id ? (itemPath ? `${itemPath}/${id}` : `${bucket}/${id}`) : undefined;
-            return { score, snippet, path: getPath };
+            return {
+              id,
+              score,
+              snippet,
+              path: getPath,
+              bucket,
+              retrievedByQuery: query,
+              strategy: "L1_recall",
+            };
+          }).filter(x => x.id);
+
+          trace.strategies.push({
+            name: "L1_recall",
+            query,
+            count: l1Items.length,
+            fromCache,
           });
-
-          const text = formatMemorySearchResults(query, searchResults);
-
-          return {
-            content: [{ type: "text", text }],
-            details: {
-              count: items.length,
-              fromCache,
-              ids: items
-                .map((item) => item.id)
-                .filter((id): id is string => typeof id === "string"),
-            },
-          };
-        } catch (error) {
+        } catch (error: any) {
           return buildUnavailableResult(error);
         }
+
+        let finalItems = [...l1Items];
+
+        // L2 fallback: when semantic recall (L1) is thin, run the original query
+        // through the keyword/FTS search API as a second, independent recall path.
+        if (finalItems.length < minResults) {
+          const l2ResultsMap = new Map<string, UnifiedResult>();
+
+          // Try the path-filtered search first; if a (possibly heuristic) path
+          // hint yields nothing, retry without it so a wrong path can't sink
+          // the keyword tier.
+          const pathCandidates = pathHint ? [pathHint, undefined] : [undefined];
+          for (const candidatePath of pathCandidates) {
+            try {
+              const { result, fromCache } = await resilient.searchMemory(query, {
+                bucket: cfg.readBucket,
+                scope: cfg.readScope ?? null,
+                teamId: cfg.teamId ?? null,
+                maxItems: maxResults,
+                path: candidatePath,
+              }, signal);
+
+              const response = result as {
+                results?: Array<{ id: string; content: string; path?: string; bucket?: string; score?: number }>;
+              } | null;
+              const memories = response?.results ?? [];
+
+              const l2Items = memories.map((m, index) => {
+                const id = m.id || "";
+                const score = typeof m.score === "number" ? m.score : Math.max(0.5, 0.8 - index * 0.05);
+                const snippet = m.content;
+                const bucket = m.bucket ?? cfg.bucket;
+                const getPath = m.path ? `${m.path}/${id}` : `${bucket}/${id}`;
+                return {
+                  id,
+                  score,
+                  snippet,
+                  path: getPath,
+                  bucket,
+                  retrievedByQuery: query,
+                  strategy: "L2_search",
+                };
+              }).filter(x => x.id);
+
+              for (const item of l2Items) {
+                if (!l2ResultsMap.has(item.id)) {
+                  l2ResultsMap.set(item.id, item);
+                }
+              }
+
+              trace.strategies.push({
+                name: "L2_search",
+                query,
+                path: candidatePath,
+                count: l2Items.length,
+                fromCache,
+              });
+
+              // Stop at the first candidate path that returns matches.
+              if (l2Items.length > 0) break;
+            } catch (error: any) {
+              trace.strategies.push({
+                name: "L2_search",
+                query,
+                path: candidatePath,
+                count: 0,
+                error: error.message || String(error),
+              });
+            }
+          }
+
+          // Merge L1 and L2
+          const combined = [...l1Items];
+          for (const item of l2ResultsMap.values()) {
+            if (!combined.some(x => x.id === item.id)) {
+              combined.push(item);
+            }
+          }
+          finalItems = dedupeAndRank(combined, query, pathHint);
+        } else {
+          // If we had enough in L1, still dedupe and rank
+          finalItems = dedupeAndRank(finalItems, query, pathHint);
+        }
+
+        if (finalItems.length === 0) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "No matching XMemo memories were found for this query. This does not prove the memory does not exist. Try a different keyword, provide the saved path, specify the source agent, or provide an approximate time.",
+              },
+            ],
+            details: {
+              count: 0,
+              fromCache: l1FromCache,
+              ...(debug ? { trace } : {}),
+            },
+          };
+        }
+
+        const searchResults = finalItems.map(item => ({
+          score: item.score,
+          snippet: item.snippet,
+          path: item.path,
+        }));
+
+        const text = formatMemorySearchResults(query, searchResults);
+
+        return {
+          content: [{ type: "text", text }],
+          details: {
+            count: finalItems.length,
+            fromCache: l1FromCache,
+            ids: finalItems.map(item => item.id),
+            ...(debug ? { trace } : {}),
+          },
+        };
       },
     },
     { names: ["memory_search"] },
@@ -443,6 +587,16 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           };
         }
 
+        const userMetadata = raw.metadata && typeof raw.metadata === "object" && !Array.isArray(raw.metadata)
+          ? (raw.metadata as Record<string, unknown>)
+          : {};
+
+        const metadata: Record<string, unknown> = {
+          source_agent: userMetadata.source_agent ?? cfg.agentId ?? "openclaw",
+          retrieval_tags: userMetadata.retrieval_tags ?? tokenizeQuery(content.slice(0, 100)),
+          ...userMetadata,
+        };
+
         const payload: Record<string, unknown> = {
           content,
           path: typeof raw.path === "string" ? raw.path : cfg.bucket,
@@ -452,6 +606,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           memory_type: typeof raw.memory_type === "string" ? raw.memory_type : "semantic",
           importance: typeof raw.importance === "number" ? raw.importance : 0.7,
           source: "openclaw",
+          metadata,
         };
 
         const writeResult = await resilient.resilientWrite(
@@ -783,10 +938,12 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
       name: "xmemo_memory_list",
       label: "XMemo Memory List",
       description:
-        "List visible XMemo memories matching a search query. Provide query; the XMemo search API does not support unfiltered browsing.",
+        "List visible XMemo memories matching a search query or path. Provide either query or path.",
       parameters: Type.Object({
-        query: Type.Optional(Type.String({ description: "Search query (required)" })),
+        query: Type.Optional(Type.String({ description: "Search query" })),
+        path: Type.Optional(Type.String({ description: "Path/category hint" })),
         maxResults: optionalPositiveInteger("Max results (default: 20)"),
+        debug: Type.Optional(Type.Boolean({ description: "Return retrieval trace (default: false)" })),
         memory_type: Type.Optional(Type.String({ description: "Filter by memory type" })),
       }),
       async execute(_toolCallId, params, signal) {
@@ -803,59 +960,159 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
         const cfg = resolveXMemoMemoryConfig(api.config);
         const raw = asToolParamsRecord(params);
         const query = typeof raw.query === "string" ? raw.query.trim() : "";
+        const path = typeof raw.path === "string" ? raw.path.trim() : "";
         const maxResults = typeof raw.maxResults === "number" ? raw.maxResults : 20;
-        if (!query) {
+        const debug = typeof raw.debug === "boolean" ? raw.debug : false;
+
+        if (!query && !path) {
           return {
             content: [
               {
                 type: "text",
-                text: "XMemo memory list requires a search query. Call xmemo_memory_list again with query, or use memory_search for semantic recall.",
+                text: "XMemo memory list requires a search query. Call xmemo_memory_list again with query or path, or use memory_search for semantic recall.",
               },
             ],
             details: { error: "query_required" },
           };
         }
 
-        try {
-          const { result, fromCache } = await resilient.searchMemory(query, {
-            bucket: cfg.readBucket,
-            scope: cfg.readScope ?? null,
-            teamId: cfg.teamId ?? null,
-            maxItems: maxResults,
-          }, signal);
+        let queryVal = query;
+        if (!queryVal && path) {
+          const segments = path.split("/").map(s => s.trim()).filter(Boolean);
+          const lastSegment = segments[segments.length - 1] || "";
+          queryVal = lastSegment ? `${lastSegment} ${path}` : path;
+        }
 
-          const response = result as { results?: Array<{ id: string; content: string; path?: string }> } | null;
-          const memories = response?.results ?? [];
+        const trace: RetrievalTrace = {
+          originalQuery: queryVal,
+          strategies: [],
+        };
+        if (path) trace.pathHint = path;
 
-          if (memories.length === 0) {
-            return {
-              content: [{ type: "text", text: "No XMemo memories found." }],
-              details: { count: 0, fromCache },
-            };
-          }
+        const { pathHint, agentHint } = extractRetrievalHints(queryVal);
+        if (pathHint && !trace.pathHint) trace.pathHint = pathHint;
+        if (agentHint) trace.agentHint = agentHint;
 
-          const lines = memories.map(
-            (m, i) => {
-              const bucket = (m as Record<string, unknown>).bucket as string | undefined ?? cfg.bucket;
-              const getPath = m.path ? `${m.path}/${m.id}` : `${bucket}/${m.id}`;
-              // Show full content up to 500 chars; agent can use memory_get for longer ones
-              const preview = m.content.length > 500
-                ? `${escapeMemoryForPrompt(m.content.slice(0, 500))}... [truncated, use memory_get path=${getPath}]`
-                : escapeMemoryForPrompt(m.content);
-              return `${i + 1}. [path: ${getPath}] ${preview}`;
-            },
-          );
-          return {
-            content: [{ type: "text", text: `XMemo memories:\n\n${lines.join("\n\n")}` }],
-            details: {
-              count: memories.length,
+        const targetPath = path || pathHint;
+
+        type UnifiedResult = {
+          id: string;
+          score: number;
+          snippet: string;
+          path?: string;
+          bucket: string;
+          retrievedByQuery: string;
+          strategy: string;
+        };
+
+        const resultsMap = new Map<string, UnifiedResult>();
+        let globalFromCache = false;
+
+        // An explicit user-provided `path` is a deliberate filter and stays hard.
+        // A heuristic pathHint extracted from the query may be wrong, so fall back
+        // to a path-less search when it returns nothing.
+        const pathCandidates = path
+          ? [path]
+          : targetPath
+            ? [targetPath, undefined]
+            : [undefined];
+
+        for (const candidatePath of pathCandidates) {
+          try {
+            const { result, fromCache } = await resilient.searchMemory(queryVal, {
+              bucket: cfg.readBucket,
+              scope: cfg.readScope ?? null,
+              teamId: cfg.teamId ?? null,
+              maxItems: maxResults,
+              path: candidatePath,
+            }, signal);
+
+            if (fromCache) globalFromCache = true;
+
+            const response = result as {
+              results?: Array<{ id: string; content: string; path?: string; bucket?: string; score?: number }>;
+            } | null;
+            const memories = response?.results ?? [];
+
+            const unifiedItems = memories.map((m, index) => {
+              const id = m.id || "";
+              const score = typeof m.score === "number" ? m.score : Math.max(0.5, 0.8 - index * 0.05);
+              const snippet = m.content;
+              const bucket = m.bucket ?? cfg.bucket;
+              const getPath = m.path ? `${m.path}/${id}` : `${bucket}/${id}`;
+              return {
+                id,
+                score,
+                snippet,
+                path: getPath,
+                bucket,
+                retrievedByQuery: queryVal,
+                strategy: "L2_search",
+              };
+            }).filter(x => x.id);
+
+            for (const item of unifiedItems) {
+              if (!resultsMap.has(item.id)) {
+                resultsMap.set(item.id, item);
+              }
+            }
+
+            trace.strategies.push({
+              name: "L2_search",
+              query: queryVal,
+              path: candidatePath,
+              count: unifiedItems.length,
               fromCache,
-              ids: memories.map((memory) => memory.id).filter((id): id is string => typeof id === "string"),
+            });
+
+            // Stop at the first candidate path that returns matches.
+            if (unifiedItems.length > 0) break;
+          } catch (error: any) {
+            trace.strategies.push({
+              name: "L2_search",
+              query: queryVal,
+              path: candidatePath,
+              count: 0,
+              error: error.message || String(error),
+            });
+          }
+        }
+
+        const rankedItems = dedupeAndRank(Array.from(resultsMap.values()), queryVal, targetPath);
+
+        if (rankedItems.length === 0) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "No XMemo memories matched the query/path. This may be a wording mismatch rather than absence. Try the saved path, source agent, or alternate keywords.",
+              },
+            ],
+            details: {
+              count: 0,
+              fromCache: globalFromCache,
+              ...(debug ? { trace } : {}),
             },
           };
-        } catch (error) {
-          return buildUnavailableResult(error);
         }
+
+        const lines = rankedItems.map((m, i) => {
+          // Show full content up to 500 chars; agent can use memory_get for longer ones
+          const preview = m.snippet.length > 500
+            ? `${escapeMemoryForPrompt(m.snippet.slice(0, 500))}... [truncated, use memory_get path=${m.path}]`
+            : escapeMemoryForPrompt(m.snippet);
+          return `${i + 1}. [path: ${m.path}] ${preview}`;
+        });
+
+        return {
+          content: [{ type: "text", text: `XMemo memories:\n\n${lines.join("\n\n")}` }],
+          details: {
+            count: rankedItems.length,
+            fromCache: globalFromCache,
+            ids: rankedItems.map(item => item.id),
+            ...(debug ? { trace } : {}),
+          },
+        };
       },
     },
     { names: ["xmemo_memory_list"] },

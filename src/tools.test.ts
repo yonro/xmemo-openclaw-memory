@@ -383,3 +383,105 @@ describe("xmemo_restart_snapshot_restore tool", () => {
     });
   });
 });
+
+describe("Retrieval Robustness Tests", () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    globalBreaker.recordSuccess();
+    fetchMock = vi.fn();
+    global.fetch = fetchMock as unknown as typeof fetch;
+  });
+
+  afterEach(() => {
+    globalBreaker.recordSuccess();
+    vi.restoreAllMocks();
+  });
+
+  it("memory_search calls recallContext first, and runs L2 searchMemory when minResults is not met", async () => {
+    // L1 recall returns 1 result (less than minResults: 3)
+    fetchMock.mockResolvedValueOnce(
+      mockResponse({
+        items: [{ id: "mem-l1", content: "L1 item", score: 0.9 }],
+      }),
+    );
+    // L2 keyword search runs the original query as a second recall path
+    fetchMock.mockResolvedValueOnce(
+      mockResponse({
+        results: [{ id: "mem-l2-1", content: "L2 keyword item", path: "Projects/Xmemo" }],
+      }),
+    );
+
+    const { tools } = createApi({ apiKey: "key" });
+    const result = await tools.get("memory_search")!.execute("tc-1", {
+      query: "免注册",
+      minResults: 3,
+      debug: true,
+    });
+
+    expect(textContent(result)).toContain("L1 item");
+    expect(textContent(result)).toContain("L2 keyword item");
+    const details = result.details as any;
+    expect(details.count).toBe(2);
+    expect(details.trace).toBeDefined();
+    expect(details.trace.originalQuery).toBe("免注册");
+    // L2 runs the original query (no synonym expansion)
+    expect(details.trace.strategies.some((s: any) => s.name === "L2_search" && s.query === "免注册")).toBe(true);
+  });
+
+  it("memory_search L2 keyword fallback returns a result when L1 semantic recall is empty", async () => {
+    // L1 returns empty, triggering L2
+    fetchMock.mockResolvedValueOnce(mockResponse({ items: [] }));
+    // L2 keyword search returns a result
+    fetchMock.mockResolvedValueOnce(
+      mockResponse({
+        results: [{ id: "mem-match", content: "keyword-recalled memory", path: "Projects/Xmemo" }],
+      }),
+    );
+
+    const { tools } = createApi({ apiKey: "key" });
+    const result = await tools.get("memory_search")!.execute("tc-1", {
+      query: "免注册",
+      minResults: 1,
+    });
+
+    expect(textContent(result)).toContain("keyword-recalled memory");
+    expect((result.details as any).count).toBe(1);
+  });
+
+  it("memory_search empty result returns next-step guidance", async () => {
+    // L1 empty
+    fetchMock.mockResolvedValueOnce(mockResponse({ items: [] }));
+    // L2 empty
+    fetchMock.mockResolvedValueOnce(mockResponse({ results: [] }));
+
+    const { tools } = createApi({ apiKey: "key" });
+    const result = await tools.get("memory_search")!.execute("tc-1", {
+      query: "免注册",
+    });
+
+    expect(textContent(result)).toContain("No matching XMemo memories were found for this query");
+    expect(textContent(result)).toContain("Try a different keyword, provide the saved path");
+  });
+
+  it("xmemo_memory_list accepts path hint and performs path-aware search", async () => {
+    // Only path is provided, so queryVal is derived as "功能改造 Projects/Xmemo/功能改造"
+    // and the explicit path is passed as a hard filter (single search call).
+    fetchMock.mockResolvedValueOnce(
+      mockResponse({
+        results: [{ id: "mem-list-0", content: "memory content 0", path: "Projects/Xmemo/功能改造" }],
+      }),
+    );
+
+    const { tools } = createApi({ apiKey: "key" });
+    const result = await tools.get("xmemo_memory_list")!.execute("tc-1", {
+      path: "Projects/Xmemo/功能改造",
+      debug: true,
+    });
+
+    expect(textContent(result)).toContain("Projects/Xmemo/功能改造");
+    const details = result.details as any;
+    expect(details.count).toBeGreaterThan(0);
+    expect(details.trace.pathHint).toBe("Projects/Xmemo/功能改造");
+  });
+});

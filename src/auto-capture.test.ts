@@ -104,6 +104,23 @@ describe("xmemo auto-capture", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("skips auto-capture when the message appears to contain a secret", async () => {
+    await capture([
+      {
+        role: "user",
+        content: "remember this deployment key sk-proj-abcdefghijklmnopqrstuvwxyz1234567890",
+      },
+      {
+        role: "user",
+        content: "I prefer dark mode",
+      },
+    ]);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const body = JSON.parse(String(requestInit(0, fetchMock.mock.calls).body));
+    expect(body.content).toBe("I prefer dark mode");
+  });
+
   it("stores at most three capturable memories per run", async () => {
     fetchMock.mockResolvedValue(mockResponse({ id: "mem-1" }));
     await capture([

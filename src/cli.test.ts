@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   applyXMemoKeyConfig,
   buildXMemoEnvCredential,
+  resolveKeyCredentialFromInput,
   saveXMemoSharedCredential,
   saveXMemoKeyConfig,
   type XMemoKeyCredential,
@@ -78,6 +79,21 @@ describe("xmemo CLI key config helpers", () => {
   it("rejects invalid env var names", () => {
     expect(() => buildXMemoEnvCredential("not-valid-name")).toThrow(
       "Invalid environment variable name",
+    );
+  });
+
+  it("can read a plaintext setup credential from stdin input", () => {
+    expect(resolveKeyCredentialFromInput(undefined, { stdin: true }, "xmemo_stdin_key\n")).toBe(
+      "xmemo_stdin_key",
+    );
+  });
+
+  it("rejects ambiguous stdin setup options", () => {
+    expect(() => resolveKeyCredentialFromInput("xmemo_arg_key", { stdin: true }, "xmemo_stdin_key")).toThrow(
+      "Pass only one credential source",
+    );
+    expect(() => resolveKeyCredentialFromInput(undefined, { env: "XMEMO_KEY", stdin: true }, "xmemo_stdin_key")).toThrow(
+      "Pass only one credential source",
     );
   });
 

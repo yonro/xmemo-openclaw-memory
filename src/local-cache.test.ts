@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -230,6 +230,18 @@ describe("XMemoLocalCache", () => {
 
       expect(existsSync(join(cacheDir, "recall-cache.json"))).toBe(true);
       expect(existsSync(join(cacheDir, "write-outbox.json"))).toBe(true);
+    });
+
+    it("writes cache and outbox files with owner-only permissions where supported", () => {
+      cache.putCachedRecall("recall_context", "q", {}, {});
+      cache.enqueueWrite("remember", "/v1/remember", "POST", {});
+
+      if (process.platform === "win32") {
+        return;
+      }
+
+      expect(statSync(join(cacheDir, "recall-cache.json")).mode & 0o777).toBe(0o600);
+      expect(statSync(join(cacheDir, "write-outbox.json")).mode & 0o777).toBe(0o600);
     });
   });
 });

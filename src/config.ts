@@ -73,6 +73,23 @@ function normalizeBaseUrl(input: string | undefined): string {
   if (url.endsWith("/")) {
     url = url.slice(0, -1);
   }
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error(`Invalid XMemo baseUrl: ${url}`);
+  }
+  const isLoopback =
+    parsed.hostname === "localhost" ||
+    parsed.hostname === "127.0.0.1" ||
+    parsed.hostname === "::1" ||
+    parsed.hostname === "[::1]";
+  if (parsed.protocol === "http:" && !isLoopback) {
+    throw new Error("XMemo baseUrl must use https unless it points to localhost.");
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    throw new Error("XMemo baseUrl must use http or https.");
+  }
   return url;
 }
 
@@ -206,11 +223,10 @@ export function resolveXMemoMemoryConfig(
   const credential = resolveCredential(pluginConfig, env);
   const explicitAuthMode = normalizeAuthMode(pluginConfig.authMode as string | undefined);
 
-  return {
+  const resolved = {
     baseUrl: normalizeBaseUrl(
       (pluginConfig.baseUrl as string | undefined) ?? resolveXMemoBaseUrl(env),
     ),
-    apiKey: credential.value,
     credentialSource: credential.source,
     bucket: (pluginConfig.bucket as string | undefined) ?? DEFAULT_BUCKET,
     scope: (pluginConfig.scope as string | undefined) ?? undefined,
@@ -231,5 +247,7 @@ export function resolveXMemoMemoryConfig(
     recallMaxChars: (pluginConfig.recallMaxChars as number | undefined) ?? 1000,
     recallMaxItems: (pluginConfig.recallMaxItems as number | undefined) ?? 8,
     recallMaxTokens: (pluginConfig.recallMaxTokens as number | undefined) ?? 4000,
-  };
+  } as XMemoMemoryConfig;
+  resolved.apiKey = credential.value;
+  return resolved;
 }

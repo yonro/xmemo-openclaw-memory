@@ -22,6 +22,15 @@ const MEDIA_ATTACHED_RE = /\[media attached(?:\s+\d+\/\d+)?:[^\]]*\]/gi;
 const ACTIVE_MEMORY_RE = /<active_memory_plugin>[\s\S]*?<\/active_memory_plugin>/g;
 const UNTRUSTED_CONTEXT_RE = /^Untrusted context \(metadata[\s\S]*$/m;
 const RELEVANT_MEMORIES_RE = /<relevant-memories>[\s\S]*?<\/relevant-memories>/g;
+const SECRET_PATTERNS = [
+  /\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b/,
+  /\bxmemo_[A-Za-z0-9_-]{20,}\b/,
+  /\bAKIA[0-9A-Z]{16}\b/,
+  /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{20,}\b/,
+  /\bgithub_pat_[A-Za-z0-9_]{20,}\b/,
+  /\bxox[baprs]-[A-Za-z0-9-]{20,}\b/,
+  /\b(?:api[_-]?key|access[_-]?token|secret|password)\s*[:=]\s*["']?[A-Za-z0-9._~+/=-]{12,}/i,
+];
 
 const MEMORY_TRIGGERS = [
   /\b(remember|recall|save this|keep in mind|don't forget|note that)\b/i,
@@ -141,6 +150,10 @@ function looksLikePromptInjection(text: string): boolean {
   return /<\s*(system|assistant|developer|tool|function|relevant-memories)\b/i.test(text);
 }
 
+function containsLikelySecret(text: string): boolean {
+  return SECRET_PATTERNS.some((pattern) => pattern.test(text));
+}
+
 function shouldCapture(
   text: string,
   options: { maxChars: number; customTriggers?: string[] },
@@ -158,6 +171,9 @@ function shouldCapture(
     return false;
   }
   if (looksLikePromptInjection(text)) {
+    return false;
+  }
+  if (containsLikelySecret(text)) {
     return false;
   }
   const hasTrigger =

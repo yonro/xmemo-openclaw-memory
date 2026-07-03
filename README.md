@@ -121,7 +121,7 @@ Install the plugin from ClawHub and set your XMemo API key:
 
 ```bash
 openclaw plugins install clawhub:@xmemo/openclaw-memory
-openclaw xmemo setup "xmemo_..."
+printf "%s" "xmemo_..." | openclaw xmemo setup --stdin
 openclaw xmemo status
 ```
 
@@ -164,6 +164,10 @@ gateway/service environment before saving the SecretRef:
 export XMEMO_KEY="your-xmemo-api-key"
 openclaw xmemo setup --env XMEMO_KEY
 ```
+
+`openclaw xmemo setup "xmemo_..."` is still supported, but `--stdin` or `--env`
+is preferred because command arguments may be retained by shell history or
+process listings.
 
 ### OpenClaw compatibility
 
@@ -283,6 +287,8 @@ on Unix-like systems.
 
 - `XMEMO_KEY` — XMemo API key for env-backed setup
 - `MEMORY_OS_API_KEY` — alternate env var name
+- `XMEMO_BASE_URL` — optional XMemo service URL; must use HTTPS unless it is a
+  localhost development URL
 - `XMEMO_AGENT_INSTANCE_ID` — optional stable device-level identifier
 
 ## Auth mode
@@ -302,6 +308,35 @@ Credentials loaded from the shared `xmemo login` file default to `bearer` unless
 `openclaw xmemo status --json` includes a non-secret `credentialSource` field
 (`config`, `env-secret-ref`, `env`, or `shared-credential`) so setup assistants
 can distinguish "no literal apiKey field" from "not configured".
+
+## Local fallback cache and write outbox
+
+The plugin keeps a small local JSON fallback cache for recall/search responses
+and a write outbox for transient network failures. These files can contain
+memory response content or queued write payloads.
+
+Storage location:
+
+- `$OPENCLAW_DATA_DIR/xmemo/<scope-hash>/` when `OPENCLAW_DATA_DIR` is set
+- `$XDG_DATA_HOME/xmemo/<scope-hash>/` on Unix-like systems with XDG data set
+- `~/.xmemo/<scope-hash>/` otherwise
+
+The scope hash is derived from the XMemo service URL and a hash of the resolved
+credential. The credential itself is not written to the path or cache files.
+
+Files:
+
+- `recall-cache.json` stores fallback recall/search responses. Fresh TTL is 5
+  minutes, and stale fallback expires after 24 hours.
+- `write-outbox.json` stores writes queued after transient failures. Idempotent
+  operations such as `remember` and `update_state` replay automatically after
+  connectivity returns. Non-idempotent writes are held for manual handling.
+
+The cache directory is created with owner-only permissions where the platform
+supports POSIX modes, and both JSON files are written best-effort as `0600`.
+For sensitive environments, prefer an OS-encrypted user profile or encrypted
+disk for the OpenClaw data directory, and clear the directory when rotating
+accounts or retiring a device.
 
 ## MCP and native plugin together
 
@@ -334,7 +369,7 @@ plugin does not write JSON sidecars to disk.
 ## CLI
 
 ```bash
-openclaw xmemo setup "xmemo_..."
+printf "%s" "xmemo_..." | openclaw xmemo setup --stdin
 openclaw xmemo setup --env XMEMO_KEY
 openclaw xmemo status
 openclaw xmemo status --json
@@ -365,6 +400,7 @@ It skips:
 - envelope/transport metadata
 - injected context blocks
 - prompt-injection-looking payloads
+- messages containing common API-key or token patterns
 - messages without a memory trigger word
 
 Customize triggers with `customTriggers`:
@@ -400,8 +436,10 @@ Expected results:
 
 The `memory_*` tools are invoked by the OpenClaw agent during a turn, not as
 standalone CLI commands.
-`xmemo_memory_list` is backed by XMemo search and requires a non-empty query;
-use `memory_search` for semantic recall when you do not need an exact list view.
+- Use `memory_search` first for semantic recall. Use `xmemo_memory_list` when path/list browsing or matching specific paths/keywords matters.
+- Empty memory search results do not prove absence of the memory. If search results are empty or sparse, try retrying with alternate wording, specifying the saved path, source agent, or approximate time.
+- `xmemo_memory_list` accepts optional `path` parameter for path hint search and allows query-less listing if path is provided.
+- Both `memory_search` and `xmemo_memory_list` support query expansion and debug tracing (via `debug: true`).
 
 ## Migration from memory-core or memory-lancedb
 
@@ -414,6 +452,10 @@ XMemo's import endpoints.
 
 - XMemo API keys are user credentials. Keep them in environment variables or a
   secret manager whenever possible.
+- Use `openclaw xmemo setup --stdin` or `openclaw xmemo setup --env XMEMO_KEY`
+  instead of passing API keys as command arguments on shared machines.
+- Non-localhost `http://` XMemo service URLs are rejected to avoid transmitting
+  credentials in plaintext.
 - The public discovery document, product page, package metadata, and README do
   not include user tokens.
 - Agent identity headers are non-secret attribution metadata. They help XMemo

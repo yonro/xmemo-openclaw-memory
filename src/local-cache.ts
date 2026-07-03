@@ -10,11 +10,12 @@
  * Design constraints:
  * - Zero native dependencies (no better-sqlite3, no node:sqlite)
  * - Atomic writes via write-to-temp + rename
+ * - The credential is only used to derive a scope hash; it is never written.
  * - Single-process safe (OpenClaw plugins run in one process)
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -67,7 +68,12 @@ type OutboxStore = {
 
 function ensureDir(dir: string): void {
   if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true });
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+  }
+  try {
+    chmodSync(dir, 0o700);
+  } catch {
+    // chmod is best-effort on Windows and some mounted filesystems.
   }
 }
 
@@ -75,8 +81,18 @@ function atomicWriteJson(filepath: string, data: unknown): void {
   ensureDir(dirname(filepath));
   // Write temp file in the same directory to avoid cross-volume rename issues on Windows
   const tmp = join(dirname(filepath), `.xmemo-${randomUUID()}.tmp`);
-  writeFileSync(tmp, JSON.stringify(data, null, 2), "utf-8");
+  writeFileSync(tmp, JSON.stringify(data, null, 2), { encoding: "utf-8", mode: 0o600 });
+  try {
+    chmodSync(tmp, 0o600);
+  } catch {
+    // chmod is best-effort on Windows and some mounted filesystems.
+  }
   renameSync(tmp, filepath);
+  try {
+    chmodSync(filepath, 0o600);
+  } catch {
+    // chmod is best-effort on Windows and some mounted filesystems.
+  }
 }
 
 function readJsonSafe<T>(filepath: string, fallback: T): T {
@@ -113,10 +129,9 @@ function scopedCacheDir(baseUrl: string, apiKey: string): string {
     return join(homedir(), ".xmemo");
   })();
 
-  // Hash baseUrl + first 8 chars of apiKey to create a stable, filesystem-safe scope.
-  // This gives each (service, account) pair its own isolated cache/outbox.
-  const scopeInput = `${baseUrl}:${apiKey.slice(0, 8)}`;
-  const scopeHash = createHash("sha256").update(scopeInput).digest("hex").slice(0, 12);
+  const credentialFingerprint = apiKey ? createHash("sha256").update(apiKey).digest("hex") : "anonymous";
+  const scopeInput = JSON.stringify({ baseUrl, credentialFingerprint });
+  const scopeHash = createHash("sha256").update(scopeInput).digest("hex").slice(0, 16);
   return join(baseDir, scopeHash);
 }
 

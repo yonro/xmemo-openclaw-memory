@@ -163,6 +163,7 @@ export class ResilientXMemoClient {
       scope?: string | null;
       teamId?: string | null;
       maxItems?: number;
+      path?: string;
     },
     signal?: AbortSignal,
   ): Promise<{ result: unknown; fromCache: boolean; isFresh: boolean }> {
@@ -172,6 +173,7 @@ export class ResilientXMemoClient {
       scope: params.scope ?? this.config.readScope ?? null,
       teamId: params.teamId ?? this.config.teamId ?? null,
       maxItems: params.maxItems ?? 10,
+      path: params.path,
     };
 
     // Keep cache available only as a fallback. Search results can be partial, so
@@ -186,6 +188,7 @@ export class ResilientXMemoClient {
           scope: params.scope ?? this.config.readScope ?? null,
           team_id: params.teamId ?? this.config.teamId ?? null,
           max_items: params.maxItems ?? 10,
+          path: params.path,
         },
         signal,
       );

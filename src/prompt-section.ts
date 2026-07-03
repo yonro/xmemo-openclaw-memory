@@ -58,6 +58,8 @@ export const buildXMemoPromptSection: MemoryPromptSectionBuilder = ({ availableT
   }
 
   lines.push(
+    "- Empty memory search results do not prove absence of the memory. If search results are empty or sparse, try retrying with alternate wording, specifying the saved path, source agent, or approximate time.",
+    "- Use `memory_search` first for semantic recall. Use `xmemo_memory_list` when path/list browsing or matching specific paths/keywords matters.",
     "- Never store secrets, API keys, tokens, credentials, or sensitive customer data in XMemo.",
   );
 

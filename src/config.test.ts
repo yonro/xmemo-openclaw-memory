@@ -179,6 +179,17 @@ describe("resolveXMemoMemoryConfig", () => {
     const cfg = resolveXMemoMemoryConfig(pluginConfig({ baseUrl: "https://xmemo.dev/" }), {});
     expect(cfg.baseUrl).toBe("https://xmemo.dev");
   });
+
+  it("allows localhost http baseUrl for development", () => {
+    const cfg = resolveXMemoMemoryConfig(pluginConfig({ baseUrl: "http://localhost:3000/" }), {});
+    expect(cfg.baseUrl).toBe("http://localhost:3000");
+  });
+
+  it("rejects non-localhost http baseUrl to avoid plaintext credentials", () => {
+    expect(() =>
+      resolveXMemoMemoryConfig(pluginConfig({ baseUrl: "http://xmemo.example.com" }), {}),
+    ).toThrow("XMemo baseUrl must use https");
+  });
 });
 
 describe("resolveXMemoAgentInstanceId", () => {

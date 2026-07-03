@@ -36,6 +36,7 @@ type MutableOpenClawConfig = OpenClawConfig & {
 type XMemoKeySetOptions = {
   env?: string;
   dryRun?: boolean;
+  stdin?: boolean;
 };
 
 function trimRequired(value: string | undefined, label: string): string {
@@ -82,17 +83,42 @@ export function applyXMemoKeyConfig(
   return next;
 }
 
-function resolveKeyCredential(
+function readStdinText(): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let data = "";
+    process.stdin.setEncoding("utf-8");
+    process.stdin.on("data", (chunk) => {
+      data += chunk;
+    });
+    process.stdin.on("end", () => resolve(data));
+    process.stdin.on("error", reject);
+  });
+}
+
+export function resolveKeyCredentialFromInput(
   apiKeyArg: string | undefined,
   opts: XMemoKeySetOptions,
+  stdinText?: string,
 ): XMemoKeyCredential {
-  if (opts.env && apiKeyArg) {
-    throw new Error("Pass either an API key or --env, not both.");
+  const selectedSources = [Boolean(opts.env), Boolean(opts.stdin), Boolean(apiKeyArg)].filter(Boolean).length;
+  if (selectedSources > 1) {
+    throw new Error("Pass only one credential source: an API key argument, --stdin, or --env.");
   }
   if (opts.env) {
     return buildXMemoEnvCredential(opts.env);
   }
+  if (opts.stdin) {
+    return trimRequired(stdinText, "XMemo API key from stdin");
+  }
   return trimRequired(apiKeyArg, "XMemo API key");
+}
+
+async function resolveKeyCredential(
+  apiKeyArg: string | undefined,
+  opts: XMemoKeySetOptions,
+): Promise<XMemoKeyCredential> {
+  const stdinText = opts.stdin ? await readStdinText() : undefined;
+  return resolveKeyCredentialFromInput(apiKeyArg, opts, stdinText);
 }
 
 function describeCredential(credential: XMemoKeyCredential): string {
@@ -156,7 +182,7 @@ async function runKeySetCommand(
   opts: XMemoKeySetOptions,
 ): Promise<void> {
   try {
-    const credential = resolveKeyCredential(apiKeyArg, opts);
+    const credential = await resolveKeyCredential(apiKeyArg, opts);
 
     if (opts.dryRun) {
       applyXMemoKeyConfig(api.config, credential);
@@ -189,6 +215,7 @@ export function registerXMemoCli(api: OpenClawPluginApi): void {
         .command("setup")
         .description("Configure XMemo memory")
         .argument("[apiKey]", "XMemo API key")
+        .option("--stdin", "Read the XMemo API key from stdin instead of a command argument")
         .option("--env <name>", "Use an environment SecretRef instead of storing a plaintext key")
         .option("--dry-run", "Show what would change without writing config")
         .action(async (apiKeyArg: string | undefined, opts: XMemoKeySetOptions) => {
@@ -200,6 +227,7 @@ export function registerXMemoCli(api: OpenClawPluginApi): void {
         .command("set")
         .description("Deprecated alias for `xmemo setup`")
         .argument("[apiKey]", "XMemo API key")
+        .option("--stdin", "Read the XMemo API key from stdin instead of a command argument")
         .option("--env <name>", "Use an environment SecretRef instead of storing a plaintext key")
         .option("--dry-run", "Show what would change without writing config")
         .action(async (apiKeyArg: string | undefined, opts: XMemoKeySetOptions) => {
@@ -211,6 +239,7 @@ export function registerXMemoCli(api: OpenClawPluginApi): void {
         .command("login")
         .description("Deprecated alias for `xmemo setup`")
         .argument("[apiKey]", "XMemo API key")
+        .option("--stdin", "Read the XMemo API key from stdin instead of a command argument")
         .option("--env <name>", "Use an environment SecretRef instead of storing a plaintext key")
         .option("--dry-run", "Show what would change without writing config")
         .action(async (apiKeyArg: string | undefined, opts: XMemoKeySetOptions) => {

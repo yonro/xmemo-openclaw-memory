@@ -78,6 +78,12 @@
 
 ### 最近修复
 
+- **检索鲁棒性改造**：
+  - 新增 `src/retrieval-strategy.ts`：中英文分词、path/agent hint 提取、以及基于匹配度与 path 的去重与重排。
+  - `memory_search` 改为 L1+L2 双路级联召回：`recallContext`（语义）结果不足 `minResults` 时,用原查询追加一次 `searchMemory`（关键词/FTS）作为第二条召回路径；支持 path hint 过滤,且启发式 path 0 命中时回退去 path 再搜;调试模式下输出 debug trace。
+  - `xmemo_memory_list` 改进：支持 `path`、支持 query 缺省时由 path 末段自动衍生 query hint、显式 path 为硬过滤而启发式 path 可回退、调试模式下输出 debug trace。
+  - `memory_store` 自动丰富低风险 metadata（`source_agent`, `retrieval_tags`），并不覆盖原有用户定义字段。
+  - 完善本地验证与 corepack 锁定安装。
 - `xmemo_audit_consolidation` 工具与 client 增加 `action_type` 参数，与 XMemo `query_consolidation_audit` 完全对齐。
 - **Phase G 全量 live proof 通过**：15 个工具中 12 个通过（todo_complete、restart_snapshot_save/restore 已修复），3 个（ledger/audit）因 API key scope 限制被 skip。
 - P0 隔离安装验证已完成：
