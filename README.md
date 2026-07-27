@@ -171,8 +171,8 @@ process listings.
 
 ### OpenClaw compatibility
 
-- Minimum supported host: OpenClaw `2026.6.9`
-- Development and compatibility-test baseline: OpenClaw `2026.7.1-2`
+- Minimum supported host and release-build baseline: OpenClaw `2026.6.9`
+- Additional forward-compatibility test: OpenClaw `2026.7.1-2`
 - Recommended host: the latest stable OpenClaw release
 
 The plugin prefers native OpenClaw runtime helpers when the host provides them.

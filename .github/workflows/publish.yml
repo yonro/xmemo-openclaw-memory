@@ -16,7 +16,43 @@ permissions:
   id-token: write
 
 jobs:
+  compatibility:
+    name: OpenClaw ${{ matrix.openclaw-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        openclaw-version:
+          - "2026.6.9"
+          - "2026.7.1-2"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: true
+
+      - name: Select OpenClaw compatibility target
+        run: pnpm add --save-dev --save-exact "openclaw@${{ matrix.openclaw-version }}" --lockfile=false
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Build
+        run: pnpm build
+
+      - name: Test
+        run: pnpm test
+
   publish:
+    needs: compatibility
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
