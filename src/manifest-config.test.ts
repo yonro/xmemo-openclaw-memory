@@ -210,7 +210,7 @@ describe("xmemo-memory public discovery metadata", () => {
     );
   });
 
-  it("keeps README discovery cues clear for OpenClaw and generic MCP clients", () => {
+  it("keeps README discovery, setup, and architecture cues current", () => {
     expect(readme).toContain("https://clawhub.ai/xmemo/xmemo");
     expect(readme).toContain(
       "https://clawhub.ai/plugins/@xmemo/openclaw-memory",
@@ -220,18 +220,21 @@ describe("xmemo-memory public discovery metadata", () => {
     );
     expect(readme).toContain("https://xmemo.dev/v1/mcp/config/openclaw");
     expect(readme).toContain("https://xmemo.dev/mcp");
-    expect(readme).toContain('openclaw xmemo setup "xmemo_..."');
+    expect(readme).toContain("openclaw xmemo setup --stdin");
     expect(readme).toContain("openclaw xmemo setup --env XMEMO_KEY");
-    expect(readme).toContain("systemctl --user set-environment XMEMO_KEY");
-    expect(readme).toContain("XMemo shared user credential");
+    expect(readme).toContain("shared user credential");
     expect(readme).toContain("xmemo login");
     expect(readme).not.toContain("openclaw config set plugins.entries.xmemo-memory.config.apiKey");
-    expect(readme).toContain("No manual `openclaw.json` editing is required.");
-    expect(readme).toContain("Upgrade compatibility");
-    expect(readme).toContain("`token` is kept as a compatibility alias");
+    expect(readme).toMatch(/No manual `openclaw\.json` editing\s+is required/);
+    expect(readme).toContain("Previous tagged configurations remain compatible.");
+    expect(readme).toContain("deprecated `token` field");
     expect(readme).toContain('"memory": "xmemo-memory"');
-    expect(readme).toContain("The Skill alone cannot execute memory operations.");
-    expect(readme).toContain("Shared memory with ChatGPT");
-    expect(readme).toContain("ChatGPT's built-in native memory");
+    expect(readme).toContain("| **XMemo Skill** |");
+    expect(readme).toContain("Memories written by approved XMemo clients");
+    expect(readme).toContain("./assets/openclaw-architecture.svg");
+    expect(readme).toContain("./assets/openclaw-setup-flow.svg");
+    expect(fs.existsSync(new URL("../assets/icon.png", import.meta.url))).toBe(true);
+    expect(fs.existsSync(new URL("../assets/openclaw-architecture.svg", import.meta.url))).toBe(true);
+    expect(fs.existsSync(new URL("../assets/openclaw-setup-flow.svg", import.meta.url))).toBe(true);
   });
 });

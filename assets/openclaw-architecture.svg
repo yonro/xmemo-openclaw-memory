@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="440" viewBox="0 0 1200 440" role="img" aria-labelledby="title desc">
+  <title id="title">XMemo native memory architecture for OpenClaw</title>
+  <desc id="desc">The XMemo Skill guides behavior, the native XMemo plugin owns OpenClaw's memory slot, and XMemo Cloud provides durable cross-agent memory with a local resilience cache and write outbox.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 10 5 0 10Z" class="arrow-head"/>
+    </marker>
+    <style>
+      .canvas { fill: #f8fafc; stroke: #e2e8f0; }
+      .card { fill: #ffffff; stroke: #cbd5e1; }
+      .runtime { fill: #f5f3ff; stroke: #8b5cf6; }
+      .cloud { fill: #fdf4ff; stroke: #d946ef; }
+      .local { fill: #ecfeff; stroke: #06b6d4; }
+      .title { fill: #0f172a; font: 700 22px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .label { fill: #0f172a; font: 650 17px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .body { fill: #475569; font: 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .caption { fill: #64748b; font: 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .line { fill: none; stroke: #94a3b8; stroke-width: 2; marker-end: url(#arrow); }
+      .dashed { fill: none; stroke: #a78bfa; stroke-width: 2; stroke-dasharray: 7 6; marker-end: url(#arrow); }
+      .arrow-head { fill: #94a3b8; }
+      .accent-blue { fill: #06b6d4; }
+      .accent-violet { fill: #8b5cf6; }
+      .accent-pink { fill: #ec4899; }
+      @media (prefers-color-scheme: dark) {
+        .canvas { fill: #0d1117; stroke: #30363d; }
+        .card { fill: #161b22; stroke: #3d444d; }
+        .runtime { fill: #211a36; stroke: #a78bfa; }
+        .cloud { fill: #2a1830; stroke: #e879f9; }
+        .local { fill: #102a2e; stroke: #22d3ee; }
+        .title, .label { fill: #f0f6fc; }
+        .body { fill: #b1bac4; }
+        .caption { fill: #8b949e; }
+        .line { stroke: #6e7681; }
+        .arrow-head { fill: #6e7681; }
+      }
+    </style>
+  </defs>
+
+  <rect class="canvas" x="1" y="1" width="1198" height="438" rx="22"/>
+  <text class="title" x="48" y="54">Native memory, clear responsibilities</text>
+  <text class="caption" x="48" y="80">The Skill guides behavior; the plugin performs memory operations and owns the active memory slot.</text>
+
+  <rect class="card" x="48" y="122" width="232" height="220" rx="16"/>
+  <rect class="accent-blue" x="48" y="122" width="7" height="220" rx="3"/>
+  <text class="label" x="80" y="164">OpenClaw agent</text>
+  <text class="body" x="80" y="202">Conversation runtime</text>
+  <text class="body" x="80" y="230">Tool selection</text>
+  <text class="body" x="80" y="258">Active-memory recall</text>
+  <text class="caption" x="80" y="306">One selected memory backend</text>
+
+  <rect class="card" x="350" y="108" width="230" height="92" rx="14"/>
+  <text class="label" x="380" y="144">XMemo Skill</text>
+  <text class="body" x="380" y="172">Recall-first workflow guidance</text>
+
+  <rect class="runtime" x="350" y="230" width="230" height="148" rx="16"/>
+  <rect class="accent-violet" x="350" y="230" width="7" height="148" rx="3"/>
+  <text class="label" x="382" y="270">Native plugin</text>
+  <text class="body" x="382" y="304">kind: memory</text>
+  <text class="body" x="382" y="330">slot: xmemo-memory</text>
+  <text class="caption" x="382" y="356">15 tools + CLI + hooks</text>
+
+  <rect class="cloud" x="666" y="122" width="246" height="220" rx="16"/>
+  <rect class="accent-pink" x="666" y="122" width="7" height="220" rx="3"/>
+  <text class="label" x="698" y="164">XMemo Cloud</text>
+  <text class="body" x="698" y="202">Durable memory</text>
+  <text class="body" x="698" y="230">Semantic recall and search</text>
+  <text class="body" x="698" y="258">TODOs and continuity</text>
+  <text class="body" x="698" y="286">Governance and audit</text>
+  <text class="caption" x="698" y="318">Hosted or self-managed endpoint</text>
+
+  <rect class="local" x="982" y="122" width="170" height="220" rx="16"/>
+  <text class="label" x="1012" y="164">Local resilience</text>
+  <text class="body" x="1012" y="202">Recall cache</text>
+  <text class="body" x="1012" y="230">Write outbox</text>
+  <text class="body" x="1012" y="258">Retry backoff</text>
+  <text class="caption" x="1012" y="304">User-scoped data</text>
+
+  <path class="dashed" d="M280 170 H338"/>
+  <path class="line" d="M280 270 H338"/>
+  <path class="line" d="M580 304 H630 V232 H654"/>
+  <path class="line" d="M912 232 H970"/>
+  <path class="line" d="M982 286 H936 V286 H924"/>
+
+  <text class="caption" x="48" y="406">Memories written by approved clients can be recalled across OpenClaw, ChatGPT, Hermes, Codex, Claude, Cursor, and other XMemo integrations.</text>
+</svg>
