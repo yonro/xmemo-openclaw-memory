@@ -12,7 +12,7 @@
   </p>
 
   <p>
-    <a href="https://github.com/yonro/xmemo-openclaw-memory/actions/workflows/publish.yml"><img alt="Release workflow" src="https://img.shields.io/github/actions/workflow/status/yonro/xmemo-openclaw-memory/publish.yml?style=flat-square&logo=githubactions&logoColor=white&label=release"></a>
+    <a href="https://github.com/yonro/xmemo-openclaw-memory/actions/workflows/publish.yml"><img alt="Release workflow" src="https://img.shields.io/github/actions/workflow/status/yonro/xmemo-openclaw-memory/publish.yml?event=push&style=flat-square&logo=githubactions&logoColor=white&label=release"></a>
     <a href="https://www.npmjs.com/package/@xmemo/openclaw-memory"><img alt="npm version" src="https://img.shields.io/npm/v/@xmemo/openclaw-memory?style=flat-square&logo=npm&logoColor=white&label=npm"></a>
     <a href="https://www.npmjs.com/package/@xmemo/openclaw-memory"><img alt="npm downloads" src="https://img.shields.io/npm/dm/@xmemo/openclaw-memory?style=flat-square&logo=npm&logoColor=white&label=downloads"></a>
     <a href="https://github.com/yonro/xmemo-openclaw-memory/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/yonro/xmemo-openclaw-memory?style=flat-square&logo=github&label=stars"></a>
