@@ -22,7 +22,6 @@ const manifest = JSON.parse(
       configSignals?: Array<{ rootPath?: string; requiredAny?: string[] }>;
     }
   >;
-  uiHints?: Record<string, { advanced?: boolean; help?: string }>;
 };
 const packageMetadata = JSON.parse(
   fs.readFileSync(new URL("../package.json", import.meta.url), "utf-8"),
@@ -160,11 +159,7 @@ describe("xmemo-memory public discovery metadata", () => {
       ],
     });
 
-    expect(manifest.uiHints?.apiKey?.advanced).toBeUndefined();
-    expect(manifest.uiHints?.apiKey?.help).toContain("XMemo CLI shared credential");
-    expect(manifest.uiHints?.baseUrl?.advanced).toBe(true);
-    expect(manifest.uiHints?.bucket?.advanced).toBe(true);
-    expect(manifest.uiHints?.autoCapture?.advanced).toBe(true);
+    expect(manifest).not.toHaveProperty("uiHints");
   });
 
   it("declares XMemo auth availability for every plugin tool", () => {
