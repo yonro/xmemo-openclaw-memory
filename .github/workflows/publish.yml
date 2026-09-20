@@ -126,7 +126,7 @@ jobs:
           CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
 
       - name: Publish to npm
-        run: npm publish --provenance --access public --tag latest
-        continue-on-error: true
+        run: |
+          npm publish --provenance --access public --tag latest || echo "::warning::npm publish skipped or failed (check NPM_TOKEN secret permissions)"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -17,6 +17,8 @@ cross-agent context, continuity tools, and governed cloud memory.
 | **Official Hub** | [ClawHub Plugin](https://clawhub.ai/plugins/@xmemo/openclaw-memory) · [Companion Skill](https://clawhub.ai/xmemo/xmemo) |
 | **Source Code** | [GitHub Repository](https://github.com/yonro/xmemo-openclaw-memory) |
 
+[English](README.md) · [简体中文](README_CN.md)
+
 [Quick start](#quick-start) · [Architecture](#architecture) · [Tools](#tool-catalog) · [Configuration](#configuration) · [Operations](#operations) · [Security](#security-and-privacy)
 
 ---

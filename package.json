@@ -68,6 +68,7 @@
     "assets/**",
     "openclaw.plugin.json",
     "README.md",
+    "README_CN.md",
     "package.json",
     "npm-shrinkwrap.json"
   ],
