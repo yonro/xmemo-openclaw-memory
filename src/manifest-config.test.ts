@@ -161,7 +161,9 @@ describe("xmemo-memory public discovery metadata", () => {
     });
 
     expect(manifest.uiHints?.apiKey?.sensitive).toBe(true);
-    expect(manifest.uiHints?.baseUrl?.advanced).toBe(true);
+    expect(manifest.uiHints?.baseUrl?.advanced).toBe(false);
+    expect(manifest.uiHints?.authMode?.advanced).toBe(false);
+    expect(manifest.uiHints?.agentId?.advanced).toBe(false);
     expect(manifest.uiHints?.bucket?.advanced).toBe(true);
     expect((manifest.configSchema.properties as Record<string, { default?: unknown }>).baseUrl?.default).toBe(
       "https://xmemo.dev",

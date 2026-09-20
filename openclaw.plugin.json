@@ -17,6 +17,22 @@
     ],
     "requiresRuntime": false
   },
+  "providerAuthChoices": [
+    {
+      "provider": "xmemo-memory",
+      "method": "api-key",
+      "choiceId": "xmemo-api-key",
+      "appGuidedSecret": true,
+      "choiceLabel": "XMemo API key",
+      "groupId": "xmemo",
+      "groupLabel": "XMemo",
+      "groupHint": "API key or Bearer token",
+      "optionKey": "xmemoApiKey",
+      "cliFlag": "--xmemo-api-key",
+      "cliOption": "--xmemo-api-key <key>",
+      "cliDescription": "XMemo API key"
+    }
+  ],
   "contracts": {
     "tools": [
       "memory_search",
@@ -178,7 +194,7 @@
       "label": "XMemo Service URL",
       "placeholder": "https://xmemo.dev",
       "help": "Hosted XMemo service is at https://xmemo.dev. Change only for private/self-hosted instances.",
-      "advanced": true
+      "advanced": false
     },
     "apiKey": {
       "label": "XMemo API Key",
@@ -194,10 +210,10 @@
       "advanced": true
     },
     "authMode": {
-      "label": "Auth Mode",
+      "label": "Auth Mode (授权方式)",
       "placeholder": "api-key",
       "help": "How to authenticate requests: api-key (X-API-Key header), bearer (Authorization: Bearer), or both.",
-      "advanced": true
+      "advanced": false
     },
     "bucket": {
       "label": "Default Bucket",
@@ -233,7 +249,7 @@
       "label": "Agent ID",
       "placeholder": "openclaw",
       "help": "Advanced attribution override. Defaults to openclaw.",
-      "advanced": true
+      "advanced": false
     },
     "autoCapture": {
       "label": "Auto Capture",
