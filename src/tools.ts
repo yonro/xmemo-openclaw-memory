@@ -34,6 +34,11 @@ function buildClient(api: OpenClawPluginApi): XMemoClient | null {
 let _resilientClient: ResilientXMemoClient | null = null;
 let _resilientClientKey = "";
 
+export function resetResilientClientForTesting(): void {
+  _resilientClient = null;
+  _resilientClientKey = "";
+}
+
 function buildResilientClient(api: OpenClawPluginApi): ResilientXMemoClient | null {
   const cfg = resolveXMemoMemoryConfig(api.config);
   if (!cfg.apiKey) return null;

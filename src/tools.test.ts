@@ -6,7 +6,7 @@ import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { globalBreaker } from "./client.js";
 import { escapeMemoryForPrompt } from "./memory-text.js";
-import { registerXMemoTools } from "./tools.js";
+import { registerXMemoTools, resetResilientClientForTesting } from "./tools.js";
 
 type ToolResult = AgentToolResult<unknown>;
 
@@ -78,6 +78,7 @@ describe("memory_search failure-open", () => {
   let dataDir: string;
 
   beforeEach(() => {
+    resetResilientClientForTesting();
     globalBreaker.recordSuccess();
     dataDir = mkdtempSync(join(tmpdir(), "xmemo-tools-test-"));
     vi.stubEnv("OPENCLAW_DATA_DIR", dataDir);
@@ -87,6 +88,7 @@ describe("memory_search failure-open", () => {
   });
 
   afterEach(() => {
+    resetResilientClientForTesting();
     globalBreaker.recordSuccess();
     vi.unstubAllEnvs();
     vi.restoreAllMocks();

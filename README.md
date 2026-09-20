@@ -1,41 +1,24 @@
-<div align="center">
-  <a href="https://xmemo.dev">
-    <img src="./assets/icon.png" width="132" alt="XMemo logo">
-  </a>
+# XMemo for OpenClaw
 
-  <h1>XMemo for OpenClaw</h1>
+[![XMemo logo](./assets/icon.png)](https://xmemo.dev)
 
-  <p><strong>Native, user-owned long-term memory for OpenClaw agents.</strong></p>
-  <p>
-    Replace the active OpenClaw memory backend with XMemo for durable recall,
-    cross-agent context, continuity tools, and governed cloud memory.
-  </p>
+**Native, user-owned long-term memory for OpenClaw agents.**
 
-  <p>
-    <a href="https://github.com/yonro/xmemo-openclaw-memory/actions/workflows/publish.yml"><img alt="Release workflow" src="https://img.shields.io/github/actions/workflow/status/yonro/xmemo-openclaw-memory/publish.yml?event=push&style=flat-square&logo=githubactions&logoColor=white&label=release"></a>
-    <a href="https://www.npmjs.com/package/@xmemo/openclaw-memory"><img alt="npm version" src="https://img.shields.io/npm/v/@xmemo/openclaw-memory?style=flat-square&logo=npm&logoColor=white&label=npm"></a>
-    <a href="https://www.npmjs.com/package/@xmemo/openclaw-memory"><img alt="npm downloads" src="https://img.shields.io/npm/dm/@xmemo/openclaw-memory?style=flat-square&logo=npm&logoColor=white&label=downloads"></a>
-    <a href="https://github.com/yonro/xmemo-openclaw-memory/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/yonro/xmemo-openclaw-memory?style=flat-square&logo=github&label=stars"></a>
-    <img alt="OpenClaw compatibility" src="https://img.shields.io/badge/OpenClaw-%E2%89%A52026.6.9-2563eb?style=flat-square">
-    <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-6-3178c6?style=flat-square&logo=typescript&logoColor=white">
-  </p>
+Replace the active OpenClaw memory backend with XMemo for durable recall,
+cross-agent context, continuity tools, and governed cloud memory.
 
-  <p>
-    <a href="https://clawhub.ai/plugins/@xmemo/openclaw-memory"><img alt="ClawHub" src="https://img.shields.io/badge/ClawHub-plugin-111827?style=flat-square"></a>
-    <a href="#native-plugin-skill-and-mcp"><img alt="Native memory provider" src="https://img.shields.io/badge/OpenClaw-native_memory-7c3aed?style=flat-square"></a>
-    <a href="#security-and-privacy"><img alt="Privacy first" src="https://img.shields.io/badge/privacy-first-334155?style=flat-square&logo=shield&logoColor=white"></a>
-    <a href="#tool-catalog"><img alt="Tool count" src="https://img.shields.io/badge/tools-15-ec4899?style=flat-square"></a>
-  </p>
+[![Release workflow](https://img.shields.io/github/actions/workflow/status/yonro/xmemo-openclaw-memory/publish.yml?event=push&style=flat-square&logo=githubactions&logoColor=white&label=release)](https://github.com/yonro/xmemo-openclaw-memory/actions/workflows/publish.yml)
+[![npm version](https://img.shields.io/npm/v/@xmemo/openclaw-memory?style=flat-square&logo=npm&logoColor=white&label=npm)](https://www.npmjs.com/package/@xmemo/openclaw-memory)
+[![npm downloads](https://img.shields.io/npm/dm/@xmemo/openclaw-memory?style=flat-square&logo=npm&logoColor=white&label=downloads)](https://www.npmjs.com/package/@xmemo/openclaw-memory)
+[![GitHub stars](https://img.shields.io/github/stars/yonro/xmemo-openclaw-memory?style=flat-square&logo=github&label=stars)](https://github.com/yonro/xmemo-openclaw-memory/stargazers)
+![OpenClaw compatibility](https://img.shields.io/badge/OpenClaw-%E2%89%A52026.6.9-2563eb?style=flat-square)
+![TypeScript](https://img.shields.io/badge/TypeScript-6-3178c6?style=flat-square&logo=typescript&logoColor=white)
+[![ClawHub](https://img.shields.io/badge/ClawHub-plugin-111827?style=flat-square)](https://clawhub.ai/plugins/@xmemo/openclaw-memory)
+[![Native memory provider](https://img.shields.io/badge/OpenClaw-native_memory-7c3aed?style=flat-square)](#native-plugin-skill-and-mcp)
+[![Privacy first](https://img.shields.io/badge/privacy-first-334155?style=flat-square&logo=shield&logoColor=white)](#security-and-privacy)
+[![Tool count](https://img.shields.io/badge/tools-15-ec4899?style=flat-square)](#tool-catalog)
 
-  <p>
-    <a href="#quick-start">Quick start</a> ·
-    <a href="#architecture">Architecture</a> ·
-    <a href="#tool-catalog">Tools</a> ·
-    <a href="#configuration">Configuration</a> ·
-    <a href="#operations">Operations</a> ·
-    <a href="#security-and-privacy">Security</a>
-  </p>
-</div>
+[Quick start](#quick-start) · [Architecture](#architecture) · [Tools](#tool-catalog) · [Configuration](#configuration) · [Operations](#operations) · [Security](#security-and-privacy)
 
 ---
 
@@ -56,9 +39,7 @@ OpenClaw, ChatGPT, Hermes, Codex, Claude, Cursor, and other connected agents.
 
 ## Architecture
 
-<p align="center">
-  <img src="./assets/openclaw-architecture.svg" width="100%" alt="XMemo native memory architecture for OpenClaw">
-</p>
+![XMemo native memory architecture for OpenClaw](./assets/openclaw-architecture.svg)
 
 | | |
 | --- | --- |
@@ -124,9 +105,7 @@ openclaw plugins install clawhub:@xmemo/openclaw-memory
 openclaw xmemo status
 ```
 
-<p align="center">
-  <img src="./assets/openclaw-setup-flow.svg" width="100%" alt="XMemo for OpenClaw setup flow">
-</p>
+![XMemo for OpenClaw setup flow](./assets/openclaw-setup-flow.svg)
 
 > [!TIP]
 > On production or shared hosts, prefer an environment SecretRef:
