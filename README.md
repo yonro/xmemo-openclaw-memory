@@ -7,16 +7,15 @@
 Replace the active OpenClaw memory backend with XMemo for durable recall,
 cross-agent context, continuity tools, and governed cloud memory.
 
-[![Release workflow](https://img.shields.io/github/actions/workflow/status/yonro/xmemo-openclaw-memory/publish.yml?event=push&style=flat-square&logo=githubactions&logoColor=white&label=release)](https://github.com/yonro/xmemo-openclaw-memory/actions/workflows/publish.yml)
-[![npm version](https://img.shields.io/npm/v/@xmemo/openclaw-memory?style=flat-square&logo=npm&logoColor=white&label=npm)](https://www.npmjs.com/package/@xmemo/openclaw-memory)
-[![npm downloads](https://img.shields.io/npm/dm/@xmemo/openclaw-memory?style=flat-square&logo=npm&logoColor=white&label=downloads)](https://www.npmjs.com/package/@xmemo/openclaw-memory)
-[![GitHub stars](https://img.shields.io/github/stars/yonro/xmemo-openclaw-memory?style=flat-square&logo=github&label=stars)](https://github.com/yonro/xmemo-openclaw-memory/stargazers)
-![OpenClaw compatibility](https://img.shields.io/badge/OpenClaw-%E2%89%A52026.6.9-2563eb?style=flat-square)
-![TypeScript](https://img.shields.io/badge/TypeScript-6-3178c6?style=flat-square&logo=typescript&logoColor=white)
-[![ClawHub](https://img.shields.io/badge/ClawHub-plugin-111827?style=flat-square)](https://clawhub.ai/plugins/@xmemo/openclaw-memory)
-[![Native memory provider](https://img.shields.io/badge/OpenClaw-native_memory-7c3aed?style=flat-square)](#native-plugin-skill-and-mcp)
-[![Privacy first](https://img.shields.io/badge/privacy-first-334155?style=flat-square&logo=shield&logoColor=white)](#security-and-privacy)
-[![Tool count](https://img.shields.io/badge/tools-15-ec4899?style=flat-square)](#tool-catalog)
+| Specification | Details |
+| :--- | :--- |
+| **Plugin ID** | `xmemo-memory` (Native `kind: "memory"` provider) |
+| **Compatibility** | OpenClaw `≥ 2026.6.9` |
+| **Tools Included** | 15 native memory & governance tools |
+| **Data Ownership** | User-owned, private cloud or local storage |
+| **Cross-Agent** | Shared recall with Claude, ChatGPT, Codex, Hermes, Cursor |
+| **Official Hub** | [ClawHub Plugin](https://clawhub.ai/plugins/@xmemo/openclaw-memory) · [Companion Skill](https://clawhub.ai/xmemo/xmemo) |
+| **Source Code** | [GitHub Repository](https://github.com/yonro/xmemo-openclaw-memory) |
 
 [Quick start](#quick-start) · [Architecture](#architecture) · [Tools](#tool-catalog) · [Configuration](#configuration) · [Operations](#operations) · [Security](#security-and-privacy)
 
@@ -33,8 +32,7 @@ OpenClaw, ChatGPT, Hermes, Codex, Claude, Cursor, and other connected agents.
 
 > [!NOTE]
 > This is an external OpenClaw plugin distributed through
-> [ClawHub](https://clawhub.ai/plugins/@xmemo/openclaw-memory) and
-> [npm](https://www.npmjs.com/package/@xmemo/openclaw-memory). It is not bundled
+> [ClawHub](https://clawhub.ai/plugins/@xmemo/openclaw-memory). It is not bundled
 > in the default OpenClaw release.
 
 ## Architecture
@@ -452,6 +450,6 @@ XMemo integration.
 - [XMemo MCP guide](https://xmemo.dev/product/mcp)
 - [XMemo OpenClaw plugin on ClawHub](https://clawhub.ai/plugins/@xmemo/openclaw-memory)
 - [XMemo Skill on ClawHub](https://clawhub.ai/xmemo/xmemo)
-- [npm package](https://www.npmjs.com/package/@xmemo/openclaw-memory)
+- [GitHub Repository](https://github.com/yonro/xmemo-openclaw-memory)
 - [Issues](https://github.com/yonro/xmemo-openclaw-memory/issues)
 - [Releases](https://github.com/yonro/xmemo-openclaw-memory/releases)

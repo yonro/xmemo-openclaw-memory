@@ -206,7 +206,7 @@ describe("xmemo-memory public discovery metadata", () => {
   });
 
   it("keeps README discovery, setup, and architecture cues current", () => {
-    expect(readme).toContain("publish.yml?event=push&style=flat-square");
+    expect(readme).toContain("https://github.com/yonro/xmemo-openclaw-memory");
     expect(readme).toContain("https://clawhub.ai/xmemo/xmemo");
     expect(readme).toContain(
       "https://clawhub.ai/plugins/@xmemo/openclaw-memory",
