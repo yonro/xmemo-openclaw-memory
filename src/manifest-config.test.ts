@@ -22,6 +22,7 @@ const manifest = JSON.parse(
       configSignals?: Array<{ rootPath?: string; requiredAny?: string[] }>;
     }
   >;
+  uiHints?: Record<string, { advanced?: boolean; help?: string; sensitive?: boolean; label?: string }>;
 };
 const packageMetadata = JSON.parse(
   fs.readFileSync(new URL("../package.json", import.meta.url), "utf-8"),
@@ -159,7 +160,12 @@ describe("xmemo-memory public discovery metadata", () => {
       ],
     });
 
-    expect(manifest).not.toHaveProperty("uiHints");
+    expect(manifest.uiHints?.apiKey?.sensitive).toBe(true);
+    expect(manifest.uiHints?.baseUrl?.advanced).toBe(true);
+    expect(manifest.uiHints?.bucket?.advanced).toBe(true);
+    expect((manifest.configSchema.properties as Record<string, { default?: unknown }>).baseUrl?.default).toBe(
+      "https://xmemo.dev",
+    );
   });
 
   it("declares XMemo auth availability for every plugin tool", () => {

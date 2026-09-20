@@ -173,13 +173,111 @@
       ]
     }
   },
+  "uiHints": {
+    "baseUrl": {
+      "label": "XMemo Service URL",
+      "placeholder": "https://xmemo.dev",
+      "help": "Hosted XMemo service is at https://xmemo.dev. Change only for private/self-hosted instances.",
+      "advanced": true
+    },
+    "apiKey": {
+      "label": "XMemo API Key",
+      "placeholder": "xmemo_...",
+      "help": "Paste a scoped XMemo API key here, set XMEMO_KEY in the environment, or run `openclaw xmemo setup`.",
+      "sensitive": true
+    },
+    "token": {
+      "label": "XMemo Token (deprecated)",
+      "placeholder": "xmemo_...",
+      "help": "Deprecated alias for apiKey. Prefer apiKey or the XMEMO_KEY environment variable.",
+      "sensitive": true,
+      "advanced": true
+    },
+    "authMode": {
+      "label": "Auth Mode",
+      "placeholder": "api-key",
+      "help": "How to authenticate requests: api-key (X-API-Key header), bearer (Authorization: Bearer), or both.",
+      "advanced": true
+    },
+    "bucket": {
+      "label": "Default Bucket",
+      "placeholder": "openclaw",
+      "help": "Default bucket for memories created by OpenClaw.",
+      "advanced": true
+    },
+    "scope": {
+      "label": "Default Scope",
+      "placeholder": "openclaw",
+      "help": "Optional scope for memories created by OpenClaw.",
+      "advanced": true
+    },
+    "readBucket": {
+      "label": "Read Bucket",
+      "placeholder": "%",
+      "help": "Advanced read filter for recall/search. Keep % to search all visible user-owned XMemo buckets.",
+      "advanced": true
+    },
+    "readScope": {
+      "label": "Read Scope",
+      "placeholder": "",
+      "help": "Advanced read filter for recall/search. Leave empty to use the token default.",
+      "advanced": true
+    },
+    "teamId": {
+      "label": "Team ID",
+      "placeholder": "",
+      "help": "Optional team/organization id for enterprise XMemo deployments.",
+      "advanced": true
+    },
+    "agentId": {
+      "label": "Agent ID",
+      "placeholder": "openclaw",
+      "help": "Advanced attribution override. Defaults to openclaw.",
+      "advanced": true
+    },
+    "autoCapture": {
+      "label": "Auto Capture",
+      "help": "Automatically persist high-signal decisions and fixes to XMemo.",
+      "advanced": true
+    },
+    "captureMaxChars": {
+      "label": "Capture Max Chars",
+      "help": "Maximum message length eligible for auto-capture.",
+      "advanced": true,
+      "placeholder": "500"
+    },
+    "customTriggers": {
+      "label": "Custom Auto-Capture Triggers",
+      "help": "Additional words or phrases that trigger auto-capture (case-insensitive).",
+      "advanced": true
+    },
+    "recallMaxChars": {
+      "label": "Recall Query Max Chars",
+      "help": "Maximum prompt/query length sent to XMemo for recall.",
+      "advanced": true,
+      "placeholder": "1000"
+    },
+    "recallMaxItems": {
+      "label": "Recall Max Items",
+      "help": "Maximum number of memories returned by XMemo recall.",
+      "advanced": true,
+      "placeholder": "8"
+    },
+    "recallMaxTokens": {
+      "label": "Recall Max Tokens",
+      "help": "Maximum token budget for the recalled context package.",
+      "advanced": true,
+      "placeholder": "4000"
+    }
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
       "baseUrl": {
         "type": "string",
-        "format": "uri"
+        "format": "uri",
+        "default": "https://xmemo.dev"
       },
       "apiKey": {
         "oneOf": [
