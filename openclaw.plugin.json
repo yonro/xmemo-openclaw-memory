@@ -26,11 +26,25 @@
       "choiceLabel": "XMemo API key",
       "groupId": "xmemo",
       "groupLabel": "XMemo",
-      "groupHint": "API key or Bearer token",
+      "groupHint": "API key (recommended)",
       "optionKey": "xmemoApiKey",
       "cliFlag": "--xmemo-api-key",
       "cliOption": "--xmemo-api-key <key>",
       "cliDescription": "XMemo API key"
+    },
+    {
+      "provider": "xmemo-memory",
+      "method": "bearer",
+      "choiceId": "xmemo-bearer-token",
+      "appGuidedSecret": true,
+      "choiceLabel": "XMemo Bearer token",
+      "groupId": "xmemo",
+      "groupLabel": "XMemo",
+      "groupHint": "Bearer token or JWT",
+      "optionKey": "xmemoBearerToken",
+      "cliFlag": "--xmemo-bearer-token",
+      "cliOption": "--xmemo-bearer-token <token>",
+      "cliDescription": "XMemo Bearer token"
     }
   ],
   "contracts": {
@@ -200,7 +214,8 @@
       "label": "XMemo API Key",
       "placeholder": "xmemo_...",
       "help": "Paste a scoped XMemo API key here, set XMEMO_KEY in the environment, or run `openclaw xmemo setup`.",
-      "sensitive": true
+      "sensitive": true,
+      "advanced": false
     },
     "token": {
       "label": "XMemo Token (deprecated)",

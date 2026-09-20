@@ -23,6 +23,7 @@ const manifest = JSON.parse(
     }
   >;
   uiHints?: Record<string, { advanced?: boolean; help?: string; sensitive?: boolean; label?: string }>;
+  providerAuthChoices?: Array<Record<string, unknown>>;
 };
 const packageMetadata = JSON.parse(
   fs.readFileSync(new URL("../package.json", import.meta.url), "utf-8"),
@@ -161,6 +162,7 @@ describe("xmemo-memory public discovery metadata", () => {
     });
 
     expect(manifest.uiHints?.apiKey?.sensitive).toBe(true);
+    expect(manifest.uiHints?.apiKey?.advanced).toBe(false);
     expect(manifest.uiHints?.baseUrl?.advanced).toBe(false);
     expect(manifest.uiHints?.authMode?.advanced).toBe(false);
     expect(manifest.uiHints?.agentId?.advanced).toBe(false);
@@ -168,6 +170,18 @@ describe("xmemo-memory public discovery metadata", () => {
     expect((manifest.configSchema.properties as Record<string, { default?: unknown }>).baseUrl?.default).toBe(
       "https://xmemo.dev",
     );
+    expect(manifest.providerAuthChoices).toEqual([
+      expect.objectContaining({
+        provider: "xmemo-memory",
+        method: "api-key",
+        choiceId: "xmemo-api-key",
+      }),
+      expect.objectContaining({
+        provider: "xmemo-memory",
+        method: "bearer",
+        choiceId: "xmemo-bearer-token",
+      }),
+    ]);
   });
 
   it("declares XMemo auth availability for every plugin tool", () => {
