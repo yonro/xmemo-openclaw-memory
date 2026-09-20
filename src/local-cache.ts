@@ -91,7 +91,7 @@ function atomicWriteJson(filepath: string, data: unknown): void {
     renameSync(tmp, filepath);
   } catch (err: unknown) {
     const code = err && typeof err === "object" && "code" in err ? (err as { code?: string }).code : undefined;
-    if (process.platform === "win32" && (code === "EPERM" || code === "EBUSY")) {
+    if (process.platform === "win32" && (code === "EPERM" || code === "EBUSY" || code === "EACCES")) {
       try {
         copyFileSync(tmp, filepath);
         try {

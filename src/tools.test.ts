@@ -486,4 +486,63 @@ describe("Retrieval Robustness Tests", () => {
     expect(details.count).toBeGreaterThan(0);
     expect(details.trace.pathHint).toBe("Projects/Xmemo/功能改造");
   });
+
+  it("xmemo_memory_update supports bare memory ID and updates memory", async () => {
+    fetchMock.mockResolvedValueOnce(
+      mockResponse({
+        id: "mem-uuid-123",
+        content: "updated content",
+        path: "openclaw",
+        updated_at: "2026-09-20T16:00:00Z",
+      }),
+    );
+
+    const { tools } = createApi({ apiKey: "key" });
+    const result = await tools.get("xmemo_memory_update")!.execute("tc-1", {
+      id: "mem-uuid-123",
+      content: "updated content",
+    });
+
+    expect(textContent(result)).toContain("mem-uuid-123");
+    expect(textContent(result)).toContain("Updated XMemo memory");
+    const details = result.details as any;
+    expect(details.id).toBe("mem-uuid-123");
+    expect(details.action).toBe("updated");
+  });
+
+  it("xmemo_memory_update supports bucket/id path", async () => {
+    fetchMock.mockResolvedValueOnce(
+      mockResponse({
+        id: "mem-uuid-456",
+        content: "updated content 2",
+        path: "openclaw",
+        updated_at: "2026-09-20T16:00:00Z",
+      }),
+    );
+
+    const { tools } = createApi({ apiKey: "key" });
+    const result = await tools.get("xmemo_memory_update")!.execute("tc-1", {
+      id: "openclaw/mem-uuid-456",
+      content: "updated content 2",
+    });
+
+    expect(textContent(result)).toContain("mem-uuid-456");
+    const details = result.details as any;
+    expect(details.id).toBe("mem-uuid-456");
+  });
+
+  it("xmemo_memory_update validates empty id and requires fields", async () => {
+    const { tools } = createApi({ apiKey: "key" });
+    const emptyIdResult = await tools.get("xmemo_memory_update")!.execute("tc-1", {
+      id: "   ",
+      content: "test",
+    });
+    expect(textContent(emptyIdResult)).toContain("Memory id is required for xmemo_memory_update");
+
+    const noFieldsResult = await tools.get("xmemo_memory_update")!.execute("tc-1", {
+      id: "mem-1",
+    });
+    expect(textContent(noFieldsResult)).toContain("At least one field to update is required");
+  });
 });
+

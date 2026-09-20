@@ -373,8 +373,9 @@ export async function runDeviceLoginCommand(
     return token;
   }
 
-  await saveXMemoKeyConfig(api, token);
+  // Persist shared credential first so the token is never lost if host config mutation fails
   const credentialPath = await saveXMemoSharedCredential(token);
+  await saveXMemoKeyConfig(api, token);
 
   console.log("\n\x1b[32m✓ Successfully authenticated with XMemo!\x1b[0m");
   console.log(`✓ API key saved to OpenClaw config (${API_KEY_CONFIG_PATH}).`);

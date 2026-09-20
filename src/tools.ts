@@ -79,10 +79,13 @@ type XMemoFailureErrorType =
   | "unknown";
 
 function classifyXMemoError(error: unknown): { errorType: XMemoFailureErrorType; status?: number } {
-  if (error instanceof Error && error.name === "AbortError") {
+  if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) {
     return { errorType: "timeout" };
   }
-  if (error instanceof Error && /fetch|network|ENOTFOUND|ECONNREFUSED/i.test(error.message)) {
+  if (
+    error instanceof Error &&
+    /fetch|network|ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|UND_ERR/i.test(error.message)
+  ) {
     return { errorType: "network" };
   }
   if (error instanceof XMemoClientError && error.status !== undefined) {
@@ -143,6 +146,30 @@ function parseForgetMemoryId(
   const id = parts[parts.length - 1];
   if (!id) {
     return { ok: false, reason: `Path must include a memory id: ${trimmed}` };
+  }
+  if (/\s/.test(id)) {
+    return { ok: false, reason: `Memory id cannot contain spaces: ${trimmed}` };
+  }
+  if (id.length > 256) {
+    return { ok: false, reason: `Memory id is too long: ${id.length} characters.` };
+  }
+  return { ok: true, id };
+}
+
+function parseUpdateMemoryId(
+  input: string,
+): { ok: true; id: string } | { ok: false; reason: string } {
+  const trimmed = input.trim();
+  if (!trimmed) {
+    return { ok: false, reason: "Memory id is required for xmemo_memory_update." };
+  }
+  if (trimmed.startsWith("/") || trimmed.endsWith("/") || trimmed.includes("//")) {
+    return { ok: false, reason: `Invalid memory id or path: ${trimmed}` };
+  }
+  const parts = trimmed.split("/");
+  const id = parts[parts.length - 1];
+  if (!id) {
+    return { ok: false, reason: `Memory id is required: ${trimmed}` };
   }
   if (/\s/.test(id)) {
     return { ok: false, reason: `Memory id cannot contain spaces: ${trimmed}` };
@@ -1152,7 +1179,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
 
         const raw = asToolParamsRecord(params);
         const relPath = typeof raw.id === "string" ? raw.id.trim() : "";
-        const parsed = parseForgetMemoryId(relPath);
+        const parsed = parseUpdateMemoryId(relPath);
         if (!parsed.ok) {
           return {
             content: [{ type: "text", text: parsed.reason }],
