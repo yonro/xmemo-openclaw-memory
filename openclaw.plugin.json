@@ -3,16 +3,19 @@
   "name": "XMemo for OpenClaw",
   "description": "Native XMemo cloud-memory provider for OpenClaw agents: long-term memory, semantic recall, TODOs, snapshots, and audit tools. Pair with the XMemo Skill for recall-first workflow guidance.",
   "kind": "memory",
-  "activation": {
-    "onStartup": false,
-    "onCommands": ["memory"]
-  },
   "commandAliases": [
     {
       "name": "xmemo",
       "cliCommand": "xmemo"
     }
   ],
+  "activation": {
+    "onStartup": true,
+    "onCommands": [
+      "xmemo",
+      "memory"
+    ]
+  },
   "setup": {
     "providers": [
       {

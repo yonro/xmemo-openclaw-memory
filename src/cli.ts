@@ -526,7 +526,7 @@ export function registerXMemoCli(api: OpenClawPluginApi): void {
             console.log(`  Auto capture: ${status.autoCapture}`);
             if (!configured) {
               console.log(
-                `  Setup: paste an XMemo API key in plugin settings, or run: ${SHORT_SETUP_COMMAND}`,
+                `  Setup: run \`openclaw xmemo login\` (browser authorization), paste key in settings, or run: ${SHORT_SETUP_COMMAND}`,
               );
             }
             if (lastError) {
