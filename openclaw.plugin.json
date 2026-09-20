@@ -280,6 +280,7 @@
         "default": "https://xmemo.dev"
       },
       "apiKey": {
+        "type": ["string", "object"],
         "oneOf": [
           { "type": "string" },
           {
@@ -295,6 +296,7 @@
         ]
       },
       "token": {
+        "type": ["string", "object"],
         "oneOf": [
           { "type": "string" },
           {
