@@ -6,6 +6,8 @@ import { describe, expect, it } from "vitest";
 import {
   applyXMemoKeyConfig,
   buildXMemoEnvCredential,
+  pollDeviceLoginToken,
+  requestDeviceLoginStart,
   resolveKeyCredentialFromInput,
   saveXMemoSharedCredential,
   saveXMemoKeyConfig,
@@ -155,5 +157,101 @@ describe("xmemo CLI key config helpers", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  describe("device code browser authorization", () => {
+    it("requests device login start and parses returned endpoints", async () => {
+      const mockFetch = async (input: unknown, init?: unknown) => {
+        expect(String(input)).toBe("https://xmemo.dev/api/v1/auth/device/start");
+        const body = JSON.parse((init as { body?: string })?.body || "{}");
+        expect(body).toMatchObject({
+          client_id: "openclaw-xmemo",
+          token_type: "mcp_token",
+          scopes: ["memory:read", "memory:write"],
+        });
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            device_code: "dev_123",
+            user_code: "USER-456",
+            verification_uri: "https://xmemo.dev/device-login",
+            verification_uri_complete: "https://xmemo.dev/device-login?user_code=USER-456",
+            expires_in: 300,
+            interval: 2,
+          }),
+        } as Response;
+      };
+
+      const start = await requestDeviceLoginStart(
+        "https://xmemo.dev",
+        ["memory:read", "memory:write"],
+        mockFetch as unknown as typeof fetch,
+      );
+
+      expect(start.device_code).toBe("dev_123");
+      expect(start.user_code).toBe("USER-456");
+      expect(start.verification_uri_complete).toBe("https://xmemo.dev/device-login?user_code=USER-456");
+    });
+
+    it("polls until authorization is granted", async () => {
+      let pollCount = 0;
+      const sleepDelays: number[] = [];
+
+      const mockFetch = async (input: unknown, _init?: unknown) => {
+        expect(String(input)).toBe("https://xmemo.dev/api/v1/auth/device/token");
+        pollCount++;
+        if (pollCount === 1) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ error: "authorization_pending" }),
+          } as Response;
+        }
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ access_token: "xmemo_polled_token_abc" }),
+        } as Response;
+      };
+
+      const mockSleep = async (ms: number) => {
+        sleepDelays.push(ms);
+      };
+
+      const token = await pollDeviceLoginToken(
+        "https://xmemo.dev",
+        "dev_123",
+        { interval: 2, expires_in: 30 },
+        10_000,
+        mockFetch as unknown as typeof fetch,
+        mockSleep,
+      );
+
+      expect(token).toBe("xmemo_polled_token_abc");
+      expect(pollCount).toBe(2);
+      expect(sleepDelays).toEqual([2000, 2000]);
+    });
+
+    it("throws when device authorization fails with an error", async () => {
+      const mockFetch = async () => {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ error: "access_denied", error_description: "User rejected login" }),
+        } as Response;
+      };
+
+      await expect(
+        pollDeviceLoginToken(
+          "https://xmemo.dev",
+          "dev_123",
+          { interval: 1, expires_in: 10 },
+          5_000,
+          mockFetch as unknown as typeof fetch,
+          async () => {},
+        ),
+      ).rejects.toThrow("Device authorization failed: User rejected login");
+    });
   });
 });

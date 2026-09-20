@@ -15,7 +15,7 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -87,7 +87,25 @@ function atomicWriteJson(filepath: string, data: unknown): void {
   } catch {
     // chmod is best-effort on Windows and some mounted filesystems.
   }
-  renameSync(tmp, filepath);
+  try {
+    renameSync(tmp, filepath);
+  } catch (err: unknown) {
+    const code = err && typeof err === "object" && "code" in err ? (err as { code?: string }).code : undefined;
+    if (process.platform === "win32" && (code === "EPERM" || code === "EBUSY")) {
+      try {
+        copyFileSync(tmp, filepath);
+        try {
+          unlinkSync(tmp);
+        } catch {
+          // unlink of temp is best-effort
+        }
+      } catch {
+        renameSync(tmp, filepath);
+      }
+    } else {
+      throw err;
+    }
+  }
   try {
     chmodSync(filepath, 0o600);
   } catch {

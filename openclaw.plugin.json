@@ -7,17 +7,36 @@
     "onStartup": false,
     "onCommands": ["memory"]
   },
+  "commandAliases": [
+    {
+      "name": "xmemo",
+      "cliCommand": "xmemo"
+    }
+  ],
   "setup": {
     "providers": [
       {
         "id": "xmemo-memory",
-        "authMethods": ["api-key", "bearer"],
+        "authMethods": ["api-key", "bearer", "device-code"],
         "envVars": ["XMEMO_KEY", "MEMORY_OS_API_KEY", "MEMORY_OS_MCP_TOKEN"]
       }
     ],
     "requiresRuntime": false
   },
   "providerAuthChoices": [
+    {
+      "provider": "xmemo-memory",
+      "method": "device-code",
+      "choiceId": "xmemo-device-code",
+      "choiceLabel": "XMemo Browser Login (OAuth / Device Flow)",
+      "choiceHint": "Authorize via browser at xmemo.dev (openclaw xmemo login)",
+      "groupId": "xmemo",
+      "groupLabel": "XMemo",
+      "groupHint": "Browser login (interactive)",
+      "cliFlag": "--xmemo-login",
+      "cliOption": "--xmemo-login",
+      "cliDescription": "Log in via browser at xmemo.dev"
+    },
     {
       "provider": "xmemo-memory",
       "method": "api-key",
@@ -213,7 +232,7 @@
     "apiKey": {
       "label": "XMemo API Key",
       "placeholder": "xmemo_...",
-      "help": "Paste a scoped XMemo API key here, set XMEMO_KEY in the environment, or run `openclaw xmemo setup`.",
+      "help": "Paste an XMemo API key here, set XMEMO_KEY in environment, or run `openclaw xmemo login` in terminal for one-click browser authorization.",
       "sensitive": true,
       "advanced": false
     },
@@ -225,10 +244,10 @@
       "advanced": true
     },
     "authMode": {
-      "label": "Auth Mode (授权方式)",
+      "label": "Header Transport (请求头格式)",
       "placeholder": "api-key",
-      "help": "How to authenticate requests: api-key (X-API-Key header), bearer (Authorization: Bearer), or both.",
-      "advanced": false
+      "help": "HTTP header format: api-key (X-API-Key header, recommended) or bearer (Authorization: Bearer). Default: api-key.",
+      "advanced": true
     },
     "bucket": {
       "label": "Default Bucket",

@@ -206,6 +206,184 @@ async function runKeySetCommand(
   }
 }
 
+export type DeviceLoginStartResponse = {
+  device_code: string;
+  user_code: string;
+  verification_uri: string;
+  verification_uri_complete?: string;
+  expires_in?: number;
+  interval?: number;
+};
+
+export type DeviceLoginTokenResponse = {
+  access_token?: string;
+  token?: string;
+  token_type?: string;
+  error?: string;
+  error_description?: string;
+  interval?: number;
+};
+
+export type DeviceLoginOptions = {
+  baseUrl?: string;
+  scopes?: string[];
+  loginTimeoutMs?: number;
+  pollTimeoutMs?: number;
+  openBrowser?: boolean;
+  dryRun?: boolean;
+};
+
+export async function requestDeviceLoginStart(
+  baseUrl: string,
+  scopes: string[] = [
+    "memory:read",
+    "memory:write",
+    "memory:restore",
+    "ledger:write",
+    "ledger:read",
+  ],
+  fetchFn: typeof fetch = fetch,
+): Promise<DeviceLoginStartResponse> {
+  const url = `${baseUrl.replace(/\/+$/, "")}/api/v1/auth/device/start`;
+  const res = await fetchFn(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      client_id: "openclaw-xmemo",
+      token_type: "mcp_token",
+      scopes,
+    }),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Device login start failed (${res.status}): ${text}`);
+  }
+
+  const data = (await res.json()) as DeviceLoginStartResponse;
+  if (!data.device_code || !data.verification_uri) {
+    throw new Error("Device login did not return device_code or verification_uri.");
+  }
+  return data;
+}
+
+export async function pollDeviceLoginToken(
+  baseUrl: string,
+  deviceCode: string,
+  start: { interval?: number; expires_in?: number },
+  timeoutMs = 600_000,
+  fetchFn: typeof fetch = fetch,
+  sleepFn: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
+): Promise<string> {
+  let intervalSec = start.interval && start.interval > 0 ? start.interval : 5;
+  const maxWaitMs = (start.expires_in ?? 600) * 1000;
+  const deadline = Date.now() + Math.min(maxWaitMs, timeoutMs);
+  const tokenUrl = `${baseUrl.replace(/\/+$/, "")}/api/v1/auth/device/token`;
+
+  while (Date.now() <= deadline) {
+    await sleepFn(intervalSec * 1000);
+
+    let body: DeviceLoginTokenResponse;
+    try {
+      const res = await fetchFn(tokenUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          device_code: deviceCode,
+          grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+        }),
+      });
+      body = (await res.json()) as DeviceLoginTokenResponse;
+    } catch {
+      // Network hiccup while polling: retry next tick
+      continue;
+    }
+
+    const token = body.access_token || body.token;
+    if (token) {
+      return token;
+    }
+
+    if (body.error === "authorization_pending") {
+      continue;
+    }
+    if (body.error === "slow_down") {
+      intervalSec += 5;
+      continue;
+    }
+    if (body.error) {
+      throw new Error(`Device authorization failed: ${body.error_description || body.error}`);
+    }
+  }
+
+  throw new Error("Device authorization expired before approval was received.");
+}
+
+export function tryOpenBrowser(url: string): void {
+  try {
+    const cmd =
+      process.platform === "darwin"
+        ? `open "${url}"`
+        : process.platform === "win32"
+        ? `start "" "${url}"`
+        : `xdg-open "${url}"`;
+    import("node:child_process")
+      .then(({ exec }) => {
+        exec(cmd, () => {});
+      })
+      .catch(() => {});
+  } catch {
+    // Best-effort
+  }
+}
+
+export async function runDeviceLoginCommand(
+  api: OpenClawPluginApi,
+  opts: DeviceLoginOptions = {},
+): Promise<string | undefined> {
+  const cfg = resolveXMemoMemoryConfig(api.config);
+  const baseUrl = opts.baseUrl || cfg.baseUrl || "https://xmemo.dev";
+
+  console.log(`Requesting authorization from ${baseUrl}...`);
+  const start = await requestDeviceLoginStart(baseUrl, opts.scopes);
+
+  const verifyUrl = start.verification_uri_complete || start.verification_uri;
+  console.log("\n" + "=".repeat(64));
+  console.log("  XMemo Browser Authorization");
+  console.log("=".repeat(64));
+  console.log("\n1. Open this URL in your browser:\n");
+  console.log(`   \x1b[36m${verifyUrl}\x1b[0m\n`);
+  console.log(`2. Confirm the code in your browser: \x1b[1m\x1b[33m${start.user_code}\x1b[0m\n`);
+  console.log("Waiting for confirmation in browser... (Press Ctrl+C to cancel)");
+  console.log("=".repeat(64) + "\n");
+
+  if (opts.openBrowser !== false) {
+    tryOpenBrowser(verifyUrl);
+  }
+
+  const token = await pollDeviceLoginToken(
+    baseUrl,
+    start.device_code,
+    start,
+    opts.pollTimeoutMs ?? opts.loginTimeoutMs,
+  );
+
+  if (opts.dryRun) {
+    console.log("Dry run: authorization successful, token acquired (not saved).");
+    return token;
+  }
+
+  await saveXMemoKeyConfig(api, token);
+  const credentialPath = await saveXMemoSharedCredential(token);
+
+  console.log("\n\x1b[32m✓ Successfully authenticated with XMemo!\x1b[0m");
+  console.log(`✓ API key saved to OpenClaw config (${API_KEY_CONFIG_PATH}).`);
+  console.log(`✓ Selected ${PLUGIN_ID} as the active memory slot.`);
+  console.log(`✓ Shared credential written: ${credentialPath}`);
+  console.log("Run `openclaw xmemo status` to verify.\n");
+  return token;
+}
+
 export function registerXMemoCli(api: OpenClawPluginApi): void {
   api.registerCli(
     ({ program }) => {
@@ -237,15 +415,47 @@ export function registerXMemoCli(api: OpenClawPluginApi): void {
 
       xmemo
         .command("login")
-        .description("Deprecated alias for `xmemo setup`")
-        .argument("[apiKey]", "XMemo API key")
-        .option("--stdin", "Read the XMemo API key from stdin instead of a command argument")
+        .description("Log in to XMemo via browser authorization or configure API key")
+        .argument("[apiKey]", "Optional XMemo API key. If omitted, launches browser authorization.")
+        .option("--token <token>", "XMemo API key or token")
+        .option("--stdin", "Read the XMemo API key from stdin")
         .option("--env <name>", "Use an environment SecretRef instead of storing a plaintext key")
+        .option("--no-open", "Do not automatically launch the browser")
+        .option("--scopes <scopes>", "Comma-separated scopes")
+        .option("--base-url <url>", "XMemo service URL override")
         .option("--dry-run", "Show what would change without writing config")
-        .action(async (apiKeyArg: string | undefined, opts: XMemoKeySetOptions) => {
-          console.warn(`Deprecated: use \`${SHORT_SETUP_COMMAND}\` instead.`);
-          await runKeySetCommand(api, apiKeyArg, opts);
-        });
+        .action(
+          async (
+            apiKeyArg: string | undefined,
+            opts: XMemoKeySetOptions & {
+              token?: string;
+              open?: boolean;
+              scopes?: string;
+              baseUrl?: string;
+            },
+          ) => {
+            const explicitKey = apiKeyArg || opts.token;
+            if (explicitKey || opts.stdin || opts.env) {
+              await runKeySetCommand(api, explicitKey, opts);
+              return;
+            }
+            try {
+              const scopes = opts.scopes
+                ? opts.scopes.split(",").map((s) => s.trim()).filter(Boolean)
+                : undefined;
+              await runDeviceLoginCommand(api, {
+                baseUrl: opts.baseUrl,
+                scopes,
+                openBrowser: opts.open !== false,
+                dryRun: opts.dryRun,
+              });
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              console.error(`\x1b[31mError:\x1b[0m ${message}`);
+              process.exitCode = 1;
+            }
+          },
+        );
 
       xmemo
         .command("status")
