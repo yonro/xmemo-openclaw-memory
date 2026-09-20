@@ -237,7 +237,7 @@ export function resolveXMemoMemoryConfig(
     agentInstanceId: resolveXMemoAgentInstanceId(env),
     authMode:
       typeof pluginConfig.authMode === "string" ? explicitAuthMode : credential.defaultAuthMode ?? explicitAuthMode,
-    autoCapture: (pluginConfig.autoCapture as boolean | undefined) ?? false,
+    autoCapture: (pluginConfig.autoCapture as boolean | undefined) ?? true,
     captureMaxChars: (pluginConfig.captureMaxChars as number | undefined) ?? 500,
     customTriggers: Array.isArray(pluginConfig.customTriggers)
       ? (pluginConfig.customTriggers as string[]).filter(

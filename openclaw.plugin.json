@@ -289,9 +289,9 @@
       "advanced": false
     },
     "autoCapture": {
-      "label": "Auto Capture",
-      "help": "Automatically persist high-signal decisions and fixes to XMemo.",
-      "advanced": true
+      "label": "Auto-Capture (自动记忆)",
+      "help": "Automatically persist high-signal decisions, facts, and context to XMemo without manual tool invocations.",
+      "advanced": false
     },
     "captureMaxChars": {
       "label": "Capture Max Chars",
@@ -392,7 +392,7 @@
       },
       "autoCapture": {
         "type": "boolean",
-        "default": false
+        "default": true
       },
       "captureMaxChars": {
         "type": "number",
