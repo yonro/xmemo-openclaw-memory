@@ -50,7 +50,7 @@ describe("resolveXMemoMemoryConfig", () => {
     expect(cfg.authMode).toBe("api-key");
     expect(cfg.autoCapture).toBe(true);
     expect(cfg.captureMaxChars).toBe(500);
-    expect(cfg.recallMaxItems).toBe(15);
+    expect(cfg.recallMaxItems).toBe(8);
     expect(cfg.recallMaxTokens).toBe(12000);
   });
 

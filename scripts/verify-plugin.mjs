@@ -50,6 +50,7 @@ const expectedTools = [
   "memory_store",
   "memory_forget",
   "xmemo_memory_list",
+  "xmemo_memory_get",
   "xmemo_memory_update",
   "xmemo_todo_create",
   "xmemo_todo_list",

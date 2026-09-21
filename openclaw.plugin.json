@@ -77,6 +77,7 @@
       "memory_store",
       "memory_forget",
       "xmemo_memory_list",
+      "xmemo_memory_get",
       "xmemo_memory_update",
       "xmemo_todo_create",
       "xmemo_todo_list",
@@ -127,6 +128,15 @@
       ]
     },
     "xmemo_memory_list": {
+      "authSignals": [{ "provider": "xmemo-memory" }],
+      "configSignals": [
+        {
+          "rootPath": "plugins.entries.xmemo-memory.config",
+          "requiredAny": ["apiKey", "token"]
+        }
+      ]
+    },
+    "xmemo_memory_get": {
       "authSignals": [{ "provider": "xmemo-memory" }],
       "configSignals": [
         {
@@ -415,7 +425,7 @@
         "type": "integer",
         "minimum": 1,
         "maximum": 100,
-        "default": 15
+        "default": 8
       },
       "recallMaxTokens": {
         "type": "integer",

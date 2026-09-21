@@ -544,5 +544,170 @@ describe("Retrieval Robustness Tests", () => {
     });
     expect(textContent(noFieldsResult)).toContain("At least one field to update is required");
   });
+
+  it("xmemo_memory_list supports full=true and outputs memory IDs without truncation", async () => {
+    const longContent = "A".repeat(1200);
+    fetchMock.mockResolvedValueOnce(
+      mockResponse({
+        results: [
+          {
+            id: "uuid-long-doc-1",
+            content: longContent,
+            path: "[ROOT]/projects/xmemo/Docs-architecture/spec.md",
+          },
+        ],
+      }),
+    );
+
+    const { tools } = createApi({ apiKey: "key" });
+    const result = await tools.get("xmemo_memory_list")!.execute("tc-1", {
+      query: "docs",
+      full: true,
+    });
+
+    const text = textContent(result);
+    expect(text).toContain("[id: uuid-long-doc-1]");
+    expect(text).toContain("[path: [ROOT]/projects/xmemo/Docs-architecture/spec.md/uuid-long-doc-1]");
+    expect(text).toContain(longContent);
+    expect(text).not.toContain("[truncated");
+    const details = result.details as any;
+    expect(details.full).toBe(true);
+    expect(details.ids).toEqual(["uuid-long-doc-1"]);
+  });
+
+  it("xmemo_memory_list truncates with hint to use xmemo_memory_get", async () => {
+    const longContent = "B".repeat(800);
+    fetchMock.mockResolvedValueOnce(
+      mockResponse({
+        results: [
+          {
+            id: "uuid-doc-2",
+            content: longContent,
+            path: "restart/work",
+          },
+        ],
+      }),
+    );
+
+    const { tools } = createApi({ apiKey: "key" });
+    const result = await tools.get("xmemo_memory_list")!.execute("tc-1", {
+      query: "restart",
+      maxChars: 100,
+    });
+
+    const text = textContent(result);
+    expect(text).toContain("[id: uuid-doc-2]");
+    expect(text).toContain('use xmemo_memory_get id="uuid-doc-2"');
+    expect(text).not.toContain("use memory_get path=");
+  });
+
+  it("xmemo_memory_get retrieves document by id via getMemory", async () => {
+    fetchMock.mockResolvedValueOnce(
+      mockResponse({
+        id: "doc-uuid-101",
+        content: "Complete line 1\nComplete line 2\nComplete line 3",
+        path: "[ROOT]/projects/spec.md",
+      }),
+    );
+
+    const { tools } = createApi({ apiKey: "key" });
+    const result = await tools.get("xmemo_memory_get")!.execute("tc-1", {
+      id: "doc-uuid-101",
+    });
+
+    const text = textContent(result);
+    expect(text).toContain('<xmemo-memory path="[ROOT]/projects/spec.md">');
+    expect(text).toContain("Complete line 1\nComplete line 2\nComplete line 3");
+    const details = result.details as any;
+    expect(details.id).toBe("doc-uuid-101");
+    expect(details.lines).toBe(3);
+    expect(details.truncated).toBe(false);
+  });
+
+  it("xmemo_memory_get supports pagination with from and lines", async () => {
+    fetchMock.mockResolvedValueOnce(
+      mockResponse({
+        id: "doc-uuid-102",
+        content: "Line 1\nLine 2\nLine 3\nLine 4\nLine 5",
+        path: "restart/work",
+      }),
+    );
+
+    const { tools } = createApi({ apiKey: "key" });
+    const result = await tools.get("xmemo_memory_get")!.execute("tc-1", {
+      id: "doc-uuid-102",
+      from: 2,
+      lines: 2,
+    });
+
+    const text = textContent(result);
+    expect(text).toContain("Line 2\nLine 3");
+    expect(text).not.toContain("Line 1\n");
+    expect(text).not.toContain("Line 4");
+    const details = result.details as any;
+    expect(details.from).toBe(2);
+    expect(details.lines).toBe(2);
+    expect(details.truncated).toBe(true);
+  });
+
+  it("xmemo_memory_get retrieves by path fallback when id is not directly found", async () => {
+    // 1. Direct GET by ID fails with 404
+    fetchMock.mockResolvedValueOnce(mockResponse({ detail: "not found" }, 404));
+    // 2. Search fallback inside getMemory returns empty
+    fetchMock.mockResolvedValueOnce(mockResponse({ results: [] }));
+    // 3. Fallback search via searchMemory returns matching document
+    fetchMock.mockResolvedValueOnce(
+      mockResponse({
+        results: [
+          {
+            id: "doc-uuid-fallback",
+            content: "Architecture plan content from path fallback",
+            path: "[ROOT]/projects/xmemo/Docs-architecture",
+          },
+        ],
+      }),
+    );
+
+    const { tools } = createApi({ apiKey: "key" });
+    const result = await tools.get("xmemo_memory_get")!.execute("tc-1", {
+      id: "doc-uuid-fallback",
+      path: "[ROOT]/projects/xmemo/Docs-architecture",
+    });
+
+    const text = textContent(result);
+    expect(text).toContain("Architecture plan content from path fallback");
+    const details = result.details as any;
+    expect(details.id).toBe("doc-uuid-fallback");
+  });
+
+  it("xmemo_memory_get retrieves directly by path when no id is passed", async () => {
+    fetchMock.mockResolvedValueOnce(
+      mockResponse({
+        results: [
+          {
+            id: "doc-uuid-path-only",
+            content: "Path only content",
+            path: "restart/work",
+          },
+        ],
+      }),
+    );
+
+    const { tools } = createApi({ apiKey: "key" });
+    const result = await tools.get("xmemo_memory_get")!.execute("tc-1", {
+      path: "restart/work",
+    });
+
+    const text = textContent(result);
+    expect(text).toContain("Path only content");
+    const details = result.details as any;
+    expect(details.id).toBe("doc-uuid-path-only");
+  });
+
+  it("xmemo_memory_get requires either id or path", async () => {
+    const { tools } = createApi({ apiKey: "key" });
+    const result = await tools.get("xmemo_memory_get")!.execute("tc-1", {});
+    expect(textContent(result)).toContain("Either id or path is required for xmemo_memory_get");
+  });
 });
 

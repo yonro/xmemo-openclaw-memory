@@ -42,6 +42,7 @@ describe("xmemo-memory plugin entry", () => {
     expect(registered.tools).toContain("memory_store");
     expect(registered.tools).toContain("memory_forget");
     expect(registered.tools).toContain("xmemo_memory_list");
+    expect(registered.tools).toContain("xmemo_memory_get");
     expect(registered.tools).toContain("xmemo_memory_update");
     expect(registered.tools).toContain("xmemo_todo_create");
     expect(registered.tools).toContain("xmemo_todo_list");

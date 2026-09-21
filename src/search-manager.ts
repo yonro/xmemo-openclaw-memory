@@ -104,9 +104,33 @@ export class XMemoSearchManager implements MemorySearchManager {
     let path = relPath;
 
     if (id) {
-      const memory = await this.client.getMemory(id, signal);
-      text = memory.content;
-      path = memory.path ?? relPath;
+      try {
+        const memory = await this.client.getMemory(id, signal);
+        text = memory.content;
+        path = memory.path ?? relPath;
+      } catch (err) {
+        // Fallback to searchMemory if direct getMemory failed (e.g. document-backed path)
+        const response = await this.client.searchMemory(
+          {
+            query: relPath,
+            path: relPath,
+            bucket: this.config.readBucket,
+            scope: this.config.readScope ?? null,
+            team_id: this.config.teamId ?? null,
+            max_items: 10,
+          },
+          signal,
+        );
+        const match =
+          response.results.find((r) => r.path === relPath) ??
+          response.results.find((r) => r.id === id) ??
+          response.results.find((r) => r.path?.endsWith(relPath) || relPath.endsWith(r.path || "")) ??
+          response.results[0];
+
+        if (!match) throw err;
+        text = match.content;
+        path = match.path ?? relPath;
+      }
     } else {
       const response = await this.client.searchMemory(
         {
