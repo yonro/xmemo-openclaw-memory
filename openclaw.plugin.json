@@ -246,7 +246,7 @@
     "apiKey": {
       "label": "XMemo API Key",
       "placeholder": "xmemo_...",
-      "help": "Register and obtain your API key at https://xmemo.dev (前往 xmemo.dev 注册获取 Key). Alternatively, set XMEMO_KEY in environment, or run `openclaw xmemo login` in terminal for one-click browser authorization.",
+      "help": "Register and obtain your API key at https://xmemo.dev. Alternatively, set XMEMO_KEY in environment, or run `openclaw xmemo login` in terminal for one-click browser authorization.",
       "sensitive": true,
       "advanced": false
     },
@@ -258,7 +258,7 @@
       "advanced": true
     },
     "authMode": {
-      "label": "Header Transport (请求头格式)",
+      "label": "Header Transport",
       "placeholder": "api-key",
       "help": "HTTP header format: api-key (X-API-Key header, recommended) or bearer (Authorization: Bearer). Default: api-key.",
       "advanced": true
@@ -300,8 +300,8 @@
       "advanced": false
     },
     "autoCapture": {
-      "label": "Auto-Capture (自动记忆)",
-      "help": "Automatically persist high-signal decisions, facts, and context to XMemo without manual tool invocations.",
+      "label": "Auto-Capture",
+      "help": "Automatically extract facts and preferences from conversation ends into XMemo cloud without manual tool invocations.",
       "advanced": false
     },
     "captureMaxChars": {
