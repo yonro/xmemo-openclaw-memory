@@ -144,4 +144,186 @@ describe("ResilientXMemoClient read cache policy", () => {
       results: [{ id: "remote", content: "remote authoritative result" }],
     });
   });
+
+  it("refuses to fall back to recall cache on 401 Unauthorized", async () => {
+    const cache = new XMemoLocalCache(cacheDir);
+    cache.putCachedRecall(
+      "recall_context",
+      "secret data",
+      {
+        query: "secret data",
+        bucket: "%",
+        scope: null,
+        teamId: null,
+        maxItems: 8,
+        maxTokens: 1500,
+      },
+      { items: [{ id: "cached", content: "cached secret data" }] },
+    );
+    fetchMock.mockResolvedValue(mockResponse({ error: "unauthorized" }, 401));
+
+    await expect(
+      buildClient(cacheDir).recallContext("secret data", {}),
+    ).rejects.toThrow("failed (401)");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses to fall back to recall cache on 403 Forbidden", async () => {
+    const cache = new XMemoLocalCache(cacheDir);
+    cache.putCachedRecall(
+      "recall_context",
+      "team secret",
+      {
+        query: "team secret",
+        bucket: "%",
+        scope: null,
+        teamId: null,
+        maxItems: 8,
+        maxTokens: 1500,
+      },
+      { items: [{ id: "cached", content: "cached team secret" }] },
+    );
+    fetchMock.mockResolvedValue(mockResponse({ error: "forbidden" }, 403));
+
+    await expect(
+      buildClient(cacheDir).recallContext("team secret", {}),
+    ).rejects.toThrow("failed (403)");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses to fall back to search cache on 403 Forbidden or 401 Unauthorized", async () => {
+    const cache = new XMemoLocalCache(cacheDir);
+    cache.putCachedRecall(
+      "search",
+      "secret",
+      {
+        query: "secret",
+        bucket: "%",
+        scope: null,
+        teamId: null,
+        maxItems: 10,
+      },
+      { results: [{ id: "cached", content: "cached secret" }] },
+    );
+    fetchMock.mockResolvedValue(mockResponse({ error: "forbidden" }, 403));
+
+    await expect(
+      buildClient(cacheDir).searchMemory("secret", {}),
+    ).rejects.toThrow("failed (403)");
+  });
+
+  it("refuses to fall back to cache on cancellation (AbortError)", async () => {
+    const cache = new XMemoLocalCache(cacheDir);
+    cache.putCachedRecall(
+      "search",
+      "query",
+      {
+        query: "query",
+        bucket: "%",
+        scope: null,
+        teamId: null,
+        maxItems: 10,
+      },
+      { results: [{ id: "cached", content: "cached" }] },
+    );
+    const abortErr = new Error("The operation was aborted");
+    abortErr.name = "AbortError";
+    fetchMock.mockRejectedValue(abortErr);
+
+    await expect(
+      buildClient(cacheDir).searchMemory("query", {}),
+    ).rejects.toThrow("aborted");
+  });
+
+  it("refuses to fall back to cache on deterministic 404 miss", async () => {
+    const cache = new XMemoLocalCache(cacheDir);
+    cache.putCachedRecall(
+      "search",
+      "missing",
+      {
+        query: "missing",
+        bucket: "%",
+        scope: null,
+        teamId: null,
+        maxItems: 10,
+      },
+      { results: [{ id: "cached", content: "cached" }] },
+    );
+    fetchMock.mockResolvedValue(mockResponse({ error: "not found" }, 404));
+
+    await expect(
+      buildClient(cacheDir).searchMemory("missing", {}),
+    ).rejects.toThrow("failed (404)");
+  });
+
+  it("falls back to search cache on transient 500 server error", async () => {
+    const cache = new XMemoLocalCache(cacheDir);
+    cache.putCachedRecall(
+      "search",
+      "resilient query",
+      {
+        query: "resilient query",
+        bucket: "%",
+        scope: null,
+        teamId: null,
+        maxItems: 10,
+      },
+      { results: [{ id: "cached", content: "cached resilient data" }] },
+    );
+    fetchMock.mockResolvedValue(mockResponse({ error: "internal error" }, 500));
+
+    const result = await buildClient(cacheDir).searchMemory("resilient query", {});
+
+    expect(result).toMatchObject({ fromCache: true, isFresh: true });
+    expect(result.result).toEqual({
+      results: [{ id: "cached", content: "cached resilient data" }],
+    });
+  });
+
+  it("resilientWrite invalidates affected cache on successful write", async () => {
+    const client = buildClient(cacheDir);
+    const cache = (client as any).cache as XMemoLocalCache;
+    cache.putCachedRecall(
+      "search",
+      "important",
+      {
+        query: "important",
+        bucket: "openclaw",
+        scope: "team",
+        teamId: "team-1",
+        maxItems: 10,
+      },
+      { results: [{ id: "stale" }] },
+    );
+
+    expect(
+      cache.getCachedRecall("search", "important", {
+        query: "important",
+        bucket: "openclaw",
+        scope: "team",
+        teamId: "team-1",
+        maxItems: 10,
+      }),
+    ).not.toBeNull();
+
+    await client.resilientWrite(
+      "remember",
+      "/v1/remember",
+      "POST",
+      { bucket: "openclaw", scope: "team", team_id: "team-1", content: "new memory" },
+      async () => ({ id: "new-mem" }),
+    );
+
+    expect(
+      cache.getCachedRecall("search", "important", {
+        query: "important",
+        bucket: "openclaw",
+        scope: "team",
+        teamId: "team-1",
+        maxItems: 10,
+      }),
+    ).toBeNull();
+  });
 });

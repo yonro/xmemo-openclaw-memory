@@ -31,11 +31,14 @@ export type ProviderStatus = "online" | "degraded" | "offline" | "unknown";
 
 function isTransientError(error: unknown): boolean {
   if (error instanceof XMemoClientError && error.status !== undefined) {
-    return error.status >= 500 || error.status === 429;
+    // 401/403 (auth), 404 (deterministic miss), 400/422 (bad request) are non-transient.
+    // 5xx (server error), 429 (rate limit), 408/504 (timeout) are transient.
+    return error.status >= 500 || error.status === 429 || error.status === 408 || error.status === 504;
   }
   if (error instanceof Error) {
     if (error.name === "AbortError") return false;
-    if (/fetch|network|ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT/i.test(error.message)) {
+    if (error.name === "TimeoutError") return true;
+    if (/fetch|network|ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|UND_ERR|timeout/i.test(error.message)) {
       return true;
     }
   }
@@ -107,8 +110,8 @@ export class ResilientXMemoClient {
     const cacheParams: Record<string, unknown> = {
       query,
       bucket: params.bucket ?? this.config.readBucket,
-      scope: params.scope ?? this.config.readScope ?? null,
-      teamId: params.teamId ?? this.config.teamId ?? null,
+      scope: params.scope !== undefined ? params.scope : (this.config.readScope ?? null),
+      teamId: params.teamId !== undefined ? params.teamId : (this.config.teamId ?? null),
       maxItems: params.maxItems ?? this.config.recallMaxItems,
       maxTokens: params.maxTokens ?? this.config.recallMaxTokens,
     };
@@ -123,8 +126,8 @@ export class ResilientXMemoClient {
         {
           query: query.slice(0, this.config.recallMaxChars),
           bucket: params.bucket ?? this.config.readBucket,
-          scope: params.scope ?? this.config.readScope ?? null,
-          team_id: params.teamId ?? this.config.teamId ?? null,
+          scope: params.scope !== undefined ? params.scope : (this.config.readScope ?? null),
+          team_id: params.teamId !== undefined ? params.teamId : (this.config.teamId ?? null),
           max_items: params.maxItems ?? this.config.recallMaxItems,
           max_tokens: params.maxTokens ?? this.config.recallMaxTokens,
           prefer_working: params.preferWorking ?? true,
@@ -144,8 +147,9 @@ export class ResilientXMemoClient {
     } catch (error) {
       this._recordFailure(error);
 
-      // If we have stale cache, return it as fallback
-      if (cached) {
+      // Only allow fallback to stale cache on explicit transient failures (network error, 5xx, timeout).
+      // 401/403 (auth), 404 (deterministic miss), and cancellation MUST NOT return cache fallback.
+      if (cached && isTransientError(error)) {
         return { result: cached.response, fromCache: true, isFresh: cached.isFresh };
       }
 
@@ -170,8 +174,8 @@ export class ResilientXMemoClient {
     const cacheParams: Record<string, unknown> = {
       query,
       bucket: params.bucket ?? this.config.readBucket,
-      scope: params.scope ?? this.config.readScope ?? null,
-      teamId: params.teamId ?? this.config.teamId ?? null,
+      scope: params.scope !== undefined ? params.scope : (this.config.readScope ?? null),
+      teamId: params.teamId !== undefined ? params.teamId : (this.config.teamId ?? null),
       maxItems: params.maxItems ?? 10,
       path: params.path,
     };
@@ -185,8 +189,8 @@ export class ResilientXMemoClient {
         {
           query,
           bucket: params.bucket ?? this.config.readBucket,
-          scope: params.scope ?? this.config.readScope ?? null,
-          team_id: params.teamId ?? this.config.teamId ?? null,
+          scope: params.scope !== undefined ? params.scope : (this.config.readScope ?? null),
+          team_id: params.teamId !== undefined ? params.teamId : (this.config.teamId ?? null),
           max_items: params.maxItems ?? 10,
           path: params.path,
         },
@@ -201,7 +205,9 @@ export class ResilientXMemoClient {
     } catch (error) {
       this._recordFailure(error);
 
-      if (cached) {
+      // Only allow fallback to stale cache on explicit transient failures (network error, 5xx, timeout).
+      // 401/403 (auth), 404 (deterministic miss), and cancellation MUST NOT return cache fallback.
+      if (cached && isTransientError(error)) {
         return { result: cached.response, fromCache: true, isFresh: cached.isFresh };
       }
 
@@ -234,6 +240,11 @@ export class ResilientXMemoClient {
     try {
       const result = await apiFn(idempotencyKey);
       this._recordSuccess();
+      this.invalidateCache({
+        bucket: (payload.bucket as string) ?? this.config.bucket,
+        scope: payload.scope !== undefined ? (payload.scope as string | null) : (this.config.scope ?? null),
+        teamId: payload.team_id !== undefined ? (payload.team_id as string | null) : (this.config.teamId ?? null),
+      });
       this._triggerOutboxSync();
       return { status: "synced", result };
     } catch (error) {
@@ -292,6 +303,11 @@ export class ResilientXMemoClient {
             record.idempotencyKey,
           );
           this.cache.markSent(record.id);
+          this.invalidateCache({
+            bucket: (record.payload?.bucket as string) ?? this.config.bucket,
+            scope: record.payload?.scope !== undefined ? (record.payload.scope as string | null) : (this.config.scope ?? null),
+            teamId: record.payload?.team_id !== undefined ? (record.payload.team_id as string | null) : (this.config.teamId ?? null),
+          });
           this._recordSuccess();
           synced++;
         } catch (error) {
@@ -307,6 +323,22 @@ export class ResilientXMemoClient {
     }
 
     return { synced, failed };
+  }
+
+  // -------------------------------------------------------------------------
+  // Cache Management
+  // -------------------------------------------------------------------------
+
+  /**
+   * Invalidate cached recall/search entries for this identity/space.
+   * Does not clear the write outbox or affect other accounts.
+   */
+  invalidateCache(filter?: {
+    bucket?: string | null;
+    scope?: string | null;
+    teamId?: string | null;
+  }): number {
+    return this.cache.invalidateRecallCache(filter);
   }
 
   // -------------------------------------------------------------------------

@@ -863,5 +863,163 @@ describe("Retrieval Robustness Tests", () => {
     expect(text).toContain("XMemo memory tool failed");
     expect((result.details as any)?.error).toContain("500");
   });
+
+  it("memory_search refuses cached fallback on 401 unauthorized", async () => {
+    // 1. Warm cache with successful search
+    fetchMock.mockResolvedValueOnce(
+      mockResponse({
+        items: [
+          {
+            id: "mem-secret-401",
+            text: "Classified secret content",
+            score: 0.95,
+          },
+        ],
+      }),
+    );
+
+    const { tools } = createApi({ apiKey: "key" });
+    const warmResult = await tools.get("memory_search")!.execute("tc-1", { query: "classified" });
+    expect(textContent(warmResult)).toContain("Classified secret content");
+
+    // 2. Token revoked / 401
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ detail: "Invalid token" }), {
+        status: 401,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const failResult = await tools.get("memory_search")!.execute("tc-2", { query: "classified" });
+    expect((failResult.details as any)?.unavailable).toBe(true);
+    expect((failResult.details as any)?.errorType).toBe("auth");
+    expect((failResult.details as any)?.status).toBe(401);
+    expect(textContent(failResult)).toContain("unavailable (auth 401)");
+    expect(textContent(failResult)).not.toContain("Classified secret content");
+  });
+
+  it("memory_search refuses cached fallback on 403 forbidden", async () => {
+    // 1. Warm cache
+    fetchMock.mockResolvedValueOnce(
+      mockResponse({
+        items: [
+          {
+            id: "mem-secret-403",
+            text: "Restricted data 403",
+            score: 0.95,
+          },
+        ],
+      }),
+    );
+
+    const { tools } = createApi({ apiKey: "key" });
+    const warmRes = await tools.get("memory_search")!.execute("tc-1", { query: "restricted" });
+    expect(textContent(warmRes)).toContain("Restricted data 403");
+
+    // 2. 403 Forbidden
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ detail: "Forbidden access" }), {
+        status: 403,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const failResult = await tools.get("memory_search")!.execute("tc-2", { query: "restricted" });
+    expect((failResult.details as any)?.unavailable).toBe(true);
+    expect((failResult.details as any)?.errorType).toBe("auth");
+    expect((failResult.details as any)?.status).toBe(403);
+    expect(textContent(failResult)).toContain("unavailable (auth 403)");
+    expect(textContent(failResult)).not.toContain("Restricted data 403");
+  });
+
+  it("memory_search falls back to cache on transient network failure with prompt notice", async () => {
+    // 1. Warm cache
+    fetchMock.mockResolvedValueOnce(
+      mockResponse({
+        items: [
+          {
+            id: "mem-degraded-1",
+            text: "Resilient offline data",
+            score: 0.95,
+          },
+        ],
+      }),
+    );
+
+    const { tools } = createApi({ apiKey: "key" });
+    const warmRes = await tools.get("memory_search")!.execute("tc-1", { query: "resilient offline" });
+    expect(textContent(warmRes)).toContain("Resilient offline data");
+    expect((warmRes.details as any)?.fromCache).toBe(false);
+
+    // 2. Transient network error (fetch failure)
+    fetchMock.mockRejectedValue(new TypeError("fetch failed: network down"));
+
+    const degradedRes = await tools.get("memory_search")!.execute("tc-2", { query: "resilient offline" });
+    const degradedText = textContent(degradedRes);
+    expect(degradedText).toContain("[Degraded / Offline Cache: fromCache=true, isFresh=true]");
+    expect(degradedText).toContain("Resilient offline data");
+    expect((degradedRes.details as any)?.fromCache).toBe(true);
+    expect((degradedRes.details as any)?.isFresh).toBe(true);
+  });
+
+  it("xmemo_memory_list falls back to cache on transient failure with prompt notice", async () => {
+    // 1. Warm cache via search
+    fetchMock.mockResolvedValueOnce(
+      mockResponse({
+        results: [
+          {
+            id: "mem-list-degraded",
+            content: "Degraded list item",
+            path: "list/item",
+          },
+        ],
+      }),
+    );
+
+    const { tools } = createApi({ apiKey: "key" });
+    const warmRes = await tools.get("xmemo_memory_list")!.execute("tc-1", { query: "degraded item" });
+    expect(textContent(warmRes)).toContain("Degraded list item");
+
+    // 2. Transient network error
+    fetchMock.mockRejectedValue(new TypeError("fetch failed: network down"));
+
+    const degradedRes = await tools.get("xmemo_memory_list")!.execute("tc-2", { query: "degraded item" });
+    const degradedText = textContent(degradedRes);
+    expect(degradedText).toContain("[Degraded / Offline Cache: fromCache=true, isFresh=true]");
+    expect(degradedText).toContain("Degraded list item");
+    expect((degradedRes.details as any)?.fromCache).toBe(true);
+    expect((degradedRes.details as any)?.isFresh).toBe(true);
+  });
+
+  it("memory_forget invalidates search cache so transient network error does not resurrect deleted memory", async () => {
+    // 1. Warm cache
+    fetchMock.mockResolvedValueOnce(
+      mockResponse({
+        items: [
+          {
+            id: "mem-to-forget-123",
+            text: "Do not resurrect me",
+            score: 0.95,
+          },
+        ],
+      }),
+    );
+
+    const { tools } = createApi({ apiKey: "key" });
+    await tools.get("memory_search")!.execute("tc-1", { query: "resurrect" });
+
+    // 2. Forget memory
+    fetchMock.mockResolvedValueOnce(mockResponse({ ok: true }));
+    const forgetRes = await tools.get("memory_forget")!.execute("tc-2", { path: "openclaw/mem-to-forget-123" });
+    expect(textContent(forgetRes)).toContain("Forgotten XMemo memory mem-to-forget-123");
+
+    // 3. Network fails on subsequent search
+    fetchMock.mockRejectedValue(new TypeError("fetch failed: network down"));
+
+    const searchAfterForget = await tools.get("memory_search")!.execute("tc-3", { query: "resurrect" });
+    // Cache was invalidated, so it cannot fall back to the deleted memory!
+    expect((searchAfterForget.details as any)?.unavailable).toBe(true);
+    expect(textContent(searchAfterForget)).not.toContain("Do not resurrect me");
+  });
 });
 

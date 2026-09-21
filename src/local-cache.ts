@@ -29,6 +29,9 @@ export type CachedRecallEntry = {
   query: string;
   paramsHash: string;
   response: unknown;
+  bucket?: string;
+  scope?: string | null;
+  teamId?: string | null;
   createdAt: number;
   freshUntil: number;
   maxStaleUntil: number;
@@ -228,6 +231,9 @@ export class XMemoLocalCache {
       query,
       paramsHash: id,
       response,
+      bucket: typeof params.bucket === "string" ? params.bucket : undefined,
+      scope: params.scope !== undefined ? (params.scope as string | null) : undefined,
+      teamId: params.teamId !== undefined ? (params.teamId as string | null) : undefined,
       createdAt: now,
       freshUntil: now + freshTtlMs,
       maxStaleUntil: now + maxStaleTtlMs,
@@ -385,6 +391,59 @@ export class XMemoLocalCache {
       this._saveCache();
       this._saveOutbox();
     }
+  }
+
+  /**
+   * Invalidate cached recall entries matching the filter for this identity/space.
+   * If no filter is given, invalidates all read cache entries in this scoped store.
+   * Never modifies or clears the outbox or other accounts.
+   */
+  invalidateRecallCache(filter?: {
+    bucket?: string | null;
+    scope?: string | null;
+    teamId?: string | null;
+  }): number {
+    let count = 0;
+    const entries = Object.entries(this.cache.entries);
+
+    for (const [id, entry] of entries) {
+      if (filter) {
+        // If entry has bucket metadata, check if it overlaps with filter.bucket
+        if (filter.bucket !== undefined && filter.bucket !== null && entry.bucket !== undefined) {
+          const bucketMatches =
+            entry.bucket === "%" ||
+            filter.bucket === "%" ||
+            entry.bucket.toLowerCase() === filter.bucket.toLowerCase();
+          if (!bucketMatches) continue;
+        }
+
+        // Check scope overlap
+        if (filter.scope !== undefined && entry.scope !== undefined) {
+          const scopeMatches =
+            entry.scope === null ||
+            filter.scope === null ||
+            entry.scope === filter.scope;
+          if (!scopeMatches) continue;
+        }
+
+        // Check teamId overlap
+        if (filter.teamId !== undefined && entry.teamId !== undefined) {
+          const teamMatches =
+            entry.teamId === null ||
+            filter.teamId === null ||
+            entry.teamId === filter.teamId;
+          if (!teamMatches) continue;
+        }
+      }
+
+      delete this.cache.entries[id];
+      count++;
+    }
+
+    if (count > 0) {
+      this._saveCache();
+    }
+    return count;
   }
 
   clearCache(): void {

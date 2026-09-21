@@ -88,6 +88,23 @@ describe("XMemoLocalCache", () => {
       expect(result1!.response).toEqual(r1);
       expect(result2!.response).toEqual(r2);
     });
+
+    it("different scope and team combinations produce isolated cache entries", () => {
+      const respTeamA = { items: [{ id: "team-a-mem" }] };
+      const respTeamB = { items: [{ id: "team-b-mem" }] };
+      const respPersonal = { items: [{ id: "personal-mem" }] };
+      const respUnscoped = { items: [{ id: "unscoped-mem" }] };
+
+      cache.putCachedRecall("search", "deploy", { bucket: "b", scope: "team", teamId: "team-1" }, respTeamA);
+      cache.putCachedRecall("search", "deploy", { bucket: "b", scope: "team", teamId: "team-2" }, respTeamB);
+      cache.putCachedRecall("search", "deploy", { bucket: "b", scope: "personal", teamId: null }, respPersonal);
+      cache.putCachedRecall("search", "deploy", { bucket: "b", scope: null, teamId: null }, respUnscoped);
+
+      expect(cache.getCachedRecall("search", "deploy", { bucket: "b", scope: "team", teamId: "team-1" })?.response).toEqual(respTeamA);
+      expect(cache.getCachedRecall("search", "deploy", { bucket: "b", scope: "team", teamId: "team-2" })?.response).toEqual(respTeamB);
+      expect(cache.getCachedRecall("search", "deploy", { bucket: "b", scope: "personal", teamId: null })?.response).toEqual(respPersonal);
+      expect(cache.getCachedRecall("search", "deploy", { bucket: "b", scope: null, teamId: null })?.response).toEqual(respUnscoped);
+    });
   });
 
   describe("write outbox", () => {
@@ -204,6 +221,31 @@ describe("XMemoLocalCache", () => {
 
       cache.clearOutbox();
       expect(cache.getStats().pendingWrites).toBe(0);
+    });
+
+    it("invalidateRecallCache removes matching scope entries while keeping others and preserving outbox", () => {
+      cache.putCachedRecall("search", "q1", { bucket: "openclaw", scope: "team", teamId: "t1" }, { items: ["a"] });
+      cache.putCachedRecall("search", "q2", { bucket: "openclaw", scope: "personal", teamId: null }, { items: ["b"] });
+      cache.putCachedRecall("search", "q3", { bucket: "other", scope: "team", teamId: "t1" }, { items: ["c"] });
+      cache.enqueueWrite("remember", "/v1/remember", "POST", { content: "keep-me" });
+
+      const removed = cache.invalidateRecallCache({ bucket: "openclaw", scope: "team", teamId: "t1" });
+      expect(removed).toBe(1);
+
+      expect(cache.getCachedRecall("search", "q1", { bucket: "openclaw", scope: "team", teamId: "t1" })).toBeNull();
+      expect(cache.getCachedRecall("search", "q2", { bucket: "openclaw", scope: "personal", teamId: null })).not.toBeNull();
+      expect(cache.getCachedRecall("search", "q3", { bucket: "other", scope: "team", teamId: "t1" })).not.toBeNull();
+      expect(cache.getStats().pendingWrites).toBe(1);
+    });
+
+    it("invalidateRecallCache with no filter removes all cache entries but preserves outbox", () => {
+      cache.putCachedRecall("search", "q1", { bucket: "b" }, { items: ["a"] });
+      cache.enqueueWrite("remember", "/v1/remember", "POST", { content: "keep-me" });
+
+      const removed = cache.invalidateRecallCache();
+      expect(removed).toBe(1);
+      expect(cache.getStats().cacheEntries).toBe(0);
+      expect(cache.getStats().pendingWrites).toBe(1);
     });
   });
 
