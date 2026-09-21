@@ -46,6 +46,7 @@
       "choiceId": "xmemo-api-key",
       "appGuidedSecret": true,
       "choiceLabel": "XMemo API key",
+      "choiceHint": "Register at https://xmemo.dev to get an API key",
       "groupId": "xmemo",
       "groupLabel": "XMemo",
       "groupHint": "API key (recommended)",
@@ -235,7 +236,7 @@
     "apiKey": {
       "label": "XMemo API Key",
       "placeholder": "xmemo_...",
-      "help": "Paste an XMemo API key here, set XMEMO_KEY in environment, or run `openclaw xmemo login` in terminal for one-click browser authorization.",
+      "help": "Register and obtain your API key at https://xmemo.dev (前往 xmemo.dev 注册获取 Key). Alternatively, set XMEMO_KEY in environment, or run `openclaw xmemo login` in terminal for one-click browser authorization.",
       "sensitive": true,
       "advanced": false
     },
