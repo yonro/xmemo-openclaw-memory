@@ -172,7 +172,7 @@ describe("xmemo-memory public discovery metadata", () => {
       "https://xmemo.dev",
     );
     expect((manifest.configSchema.properties as Record<string, { default?: unknown }>).autoCapture?.default).toBe(
-      true,
+      false,
     );
     expect(manifest.providerAuthChoices).toEqual([
       expect.objectContaining({

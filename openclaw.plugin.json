@@ -403,7 +403,7 @@
       },
       "autoCapture": {
         "type": "boolean",
-        "default": true
+        "default": false
       },
       "captureMaxChars": {
         "type": "number",
