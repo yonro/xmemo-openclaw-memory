@@ -617,10 +617,15 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
               details: { error: "invalid_path", path: relPath },
             };
           }
-          if (error instanceof Error && error.message.includes("out of bounds")) {
+          if (
+            error instanceof Error &&
+            (error.message.includes("out of bounds") ||
+              (error as any).code === "range_error" ||
+              (error as any).code === "RANGE_OUT_OF_BOUNDS")
+          ) {
             return {
               content: [{ type: "text", text: error.message }],
-              details: { error: "range_out_of_bounds", path: relPath },
+              details: { error: "range_error", code: "range_error", path: relPath },
             };
           }
           return buildUnavailableResult(error);
@@ -1454,6 +1459,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
               ],
               details: {
                 error: "range_out_of_bounds",
+                code: "range_error",
                 totalLines: allLines.length,
                 from: startFrom,
               },

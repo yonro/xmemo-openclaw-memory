@@ -231,4 +231,30 @@ describe("XMemoSearchManager", () => {
     expect(result.lines).toBe(2);
     expect(result.truncated).toBe(false);
   });
+
+  it("throws range_error with code property when from exceeds total lines", async () => {
+    fetchMock.mockImplementation(() =>
+      Promise.resolve(
+        mockResponse({
+          id: "mem-short",
+          content: "line1\nline2",
+          path: "openclaw",
+        }),
+      ),
+    );
+    const client = new XMemoClient("https://xmemo.dev", "key", "openclaw", "instance");
+    const manager = new XMemoSearchManager(client, createConfig());
+    await expect(manager.readFile({ relPath: "openclaw/mem-short", from: 10 })).rejects.toThrow(
+      "Requested line 10 is out of bounds",
+    );
+    let caught: any;
+    try {
+      await manager.readFile({ relPath: "openclaw/mem-short", from: 10 });
+    } catch (err: any) {
+      caught = err;
+    }
+    expect(caught).toBeDefined();
+    expect(caught.message).toContain("Requested line 10 is out of bounds");
+    expect(caught.code).toBe("range_error");
+  });
 });

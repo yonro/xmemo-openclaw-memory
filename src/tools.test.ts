@@ -803,8 +803,29 @@ describe("Retrieval Robustness Tests", () => {
 
     expect(textContent(result)).toContain("Requested line 10 is out of bounds");
     expect((result.details as any)?.error).toBe("range_out_of_bounds");
+    expect((result.details as any)?.code).toBe("range_error");
     expect((result.details as any)?.totalLines).toBe(2);
     expect((result.details as any)?.from).toBe(10);
+  });
+
+  it("memory_get returns range_error when from exceeds totalLines", async () => {
+    fetchMock.mockResolvedValueOnce(
+      mockResponse({
+        id: "doc-short-2",
+        content: "line1\nline2",
+        path: "short/doc2",
+      }),
+    );
+
+    const { tools } = createApi({ apiKey: "key" });
+    const result = await tools.get("memory_get")!.execute("tc-1", {
+      id: "doc-short-2",
+      from: 10,
+    });
+
+    expect(textContent(result)).toContain("Requested line 10 is out of bounds");
+    expect((result.details as any)?.error).toBe("range_error");
+    expect((result.details as any)?.code).toBe("range_error");
   });
 
   it("xmemo_memory_get does not fallback to search on 401 auth error", async () => {

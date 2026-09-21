@@ -159,7 +159,9 @@ export class XMemoSearchManager implements MemorySearchManager {
     const allLines = text.split("\n");
     const startFrom = Math.max(1, from ?? 1);
     if (text.length > 0 && startFrom > allLines.length) {
-      throw new Error(`Requested line ${startFrom} is out of bounds (document has ${allLines.length} lines)`);
+      const err = new Error(`Requested line ${startFrom} is out of bounds (document has ${allLines.length} lines)`);
+      (err as any).code = "range_error";
+      throw err;
     }
     const lineCount = typeof lines === "number" ? Math.max(0, lines) : allLines.length;
     const sliced = text.length === 0 ? [] : allLines.slice(startFrom - 1, startFrom - 1 + lineCount);
