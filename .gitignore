@@ -12,3 +12,7 @@ reports/
 
 # Local planning documents
 plans/
+
+# Plan documents (local working artifacts per owner instruction)
+PLAN.md
+RETRIEVAL_ROBUSTNESS_PLAN.md
