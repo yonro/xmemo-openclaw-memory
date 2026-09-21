@@ -363,23 +363,29 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           const items = response?.items ?? [];
           const contextFallbacks = contextTextSections(response?.context_text);
 
-          l1Items = items.map((item, index) => {
-            const id = stringField(item, "id") || "";
-            const score = typeof item.score === "number" ? item.score : Math.max(0.5, 0.95 - index * 0.05);
-            const snippet = memorySearchSnippet(item, contextFallbacks[index]);
-            const bucket = stringField(item, "bucket") ?? cfg.bucket;
-            const itemPath = stringField(item, "path");
-            const getPath = id ? (itemPath ? `${itemPath}/${id}` : `${bucket}/${id}`) : undefined;
-            return {
-              id,
-              score,
-              snippet,
-              path: getPath,
-              bucket,
-              retrievedByQuery: query,
-              strategy: "L1_recall",
-            };
-          }).filter(x => x.id);
+          l1Items = items
+            .filter((item) => {
+              const status = stringField(item, "status");
+              return !status || status.toLowerCase() !== "deleted";
+            })
+            .map((item, index) => {
+              const id = stringField(item, "id") || "";
+              const score = typeof item.score === "number" ? item.score : Math.max(0.5, 0.95 - index * 0.05);
+              const snippet = memorySearchSnippet(item, contextFallbacks[index]);
+              const bucket = stringField(item, "bucket") ?? cfg.bucket;
+              const itemPath = stringField(item, "path");
+              const getPath = id ? (itemPath ? `${itemPath}/${id}` : `${bucket}/${id}`) : undefined;
+              return {
+                id,
+                score,
+                snippet,
+                path: getPath,
+                bucket,
+                retrievedByQuery: query,
+                strategy: "L1_recall",
+              };
+            })
+            .filter((x) => x.id);
 
           trace.strategies.push({
             name: "L1_recall",
@@ -410,6 +416,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
                 bucket: cfg.readBucket,
                 scope: cfg.readScope ?? null,
                 teamId: cfg.teamId ?? null,
+                status: "active",
                 maxItems: maxResults,
                 path: candidatePath,
               }, signal);
@@ -420,26 +427,29 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
               }
 
               const response = result as {
-                results?: Array<{ id: string; content: string; path?: string; bucket?: string; score?: number }>;
+                results?: Array<{ id: string; content: string; path?: string; bucket?: string; score?: number; status?: string }>;
               } | null;
               const memories = response?.results ?? [];
 
-              const l2Items = memories.map((m, index) => {
-                const id = m.id || "";
-                const score = typeof m.score === "number" ? m.score : Math.max(0.5, 0.8 - index * 0.05);
-                const snippet = m.content;
-                const bucket = m.bucket ?? cfg.bucket;
-                const getPath = m.path ? `${m.path}/${id}` : `${bucket}/${id}`;
-                return {
-                  id,
-                  score,
-                  snippet,
-                  path: getPath,
-                  bucket,
-                  retrievedByQuery: query,
-                  strategy: "L2_search",
-                };
-              }).filter(x => x.id);
+              const l2Items = memories
+                .filter((m) => !m.status || m.status.toLowerCase() !== "deleted")
+                .map((m, index) => {
+                  const id = m.id || "";
+                  const score = typeof m.score === "number" ? m.score : Math.max(0.5, 0.8 - index * 0.05);
+                  const snippet = m.content;
+                  const bucket = m.bucket ?? cfg.bucket;
+                  const getPath = m.path ? `${m.path}/${id}` : `${bucket}/${id}`;
+                  return {
+                    id,
+                    score,
+                    snippet,
+                    path: getPath,
+                    bucket,
+                    retrievedByQuery: query,
+                    strategy: "L2_search",
+                  };
+                })
+                .filter((x) => x.id);
 
               for (const item of l2Items) {
                 if (!l2ResultsMap.has(item.id)) {
@@ -1080,6 +1090,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
         ),
         full: Type.Optional(Type.Boolean({ description: "Return full content without truncation (default: false)" })),
         maxChars: Type.Optional(Type.Integer({ description: "Max characters per snippet when truncating (default: 500, max: 100000)", minimum: 1, maximum: 100000 })),
+        include_deleted: Type.Optional(Type.Boolean({ description: "Include soft-deleted memories (default: false)" })),
       }),
       async execute(_toolCallId, params, signal) {
         const resilient = buildResilientClient(api);
@@ -1100,6 +1111,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
         const debug = typeof raw.debug === "boolean" ? raw.debug : false;
         const full = typeof raw.full === "boolean" ? raw.full : false;
         const maxChars = typeof raw.maxChars === "number" && raw.maxChars > 0 ? raw.maxChars : 500;
+        const includeDeleted = typeof raw.include_deleted === "boolean" ? raw.include_deleted : false;
 
         const rawMemoryType = typeof raw.memory_type === "string" ? raw.memory_type.trim() : undefined;
         let memoryType: string | undefined = undefined;
@@ -1192,6 +1204,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
               scope: cfg.readScope ?? null,
               teamId: cfg.teamId ?? null,
               memory_type: memoryType,
+              status: includeDeleted ? undefined : "active",
               maxItems: maxResults,
               path: candidatePath,
             }, signal);
@@ -1202,26 +1215,28 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
             }
 
             const response = result as {
-              results?: Array<{ id: string; content: string; path?: string; bucket?: string; score?: number }>;
+              results?: Array<{ id: string; content: string; path?: string; bucket?: string; score?: number; status?: string }>;
             } | null;
             const memories = response?.results ?? [];
 
-            const unifiedItems = memories.map((m, index) => {
-              const id = m.id || "";
-              const score = typeof m.score === "number" ? m.score : Math.max(0.5, 0.95 - index * 0.05);
-              const snippet = m.content;
-              const bucket = m.bucket ?? cfg.bucket;
-              const getPath = m.path ? `${m.path}/${id}` : `${bucket}/${id}`;
-              return {
-                id,
-                score,
-                snippet,
-                path: getPath,
-                bucket,
-                retrievedByQuery: queryVal,
-                strategy: "L2_search",
-              };
-            }).filter(x => x.id);
+            const unifiedItems = memories
+              .filter((m) => includeDeleted || !m.status || m.status.toLowerCase() !== "deleted")
+              .map((m, index) => {
+                const id = m.id || "";
+                const score = typeof m.score === "number" ? m.score : Math.max(0.5, 0.95 - index * 0.05);
+                const snippet = m.content;
+                const bucket = m.bucket ?? cfg.bucket;
+                const getPath = m.path ? `${m.path}/${id}` : `${bucket}/${id}`;
+                return {
+                  id,
+                  score,
+                  snippet,
+                  path: getPath,
+                  bucket,
+                  retrievedByQuery: queryVal,
+                  strategy: "L2_search",
+                };
+              }).filter(x => x.id);
 
             for (const item of unifiedItems) {
               if (!resultsMap.has(item.id)) {
@@ -1383,7 +1398,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           if (effectiveId) {
             try {
               const memory = await resilient.rawClient.getMemory(effectiveId, signal);
-              if (typeof memory?.content === "string") {
+              if (typeof memory?.content === "string" && (!memory.status || memory.status.toLowerCase() !== "deleted")) {
                 text = memory.content;
                 matchedPath = memory.path ?? path;
                 matchedId = memory.id;
@@ -1406,6 +1421,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
                 bucket: cfg.readBucket,
                 scope: cfg.readScope ?? null,
                 teamId: cfg.teamId ?? null,
+                status: "active",
                 maxItems: 10,
               },
               signal,
@@ -1416,15 +1432,16 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
               const results =
                 (
                   searchRes.result as {
-                    results?: Array<{ id: string; content: string; path?: string; bucket?: string }>;
+                    results?: Array<{ id: string; content: string; path?: string; bucket?: string; status?: string }>;
                   }
                 )?.results ?? [];
+              const activeResults = results.filter((r) => !r.status || r.status.toLowerCase() !== "deleted");
 
               // Strict matching: ID, exact path, or clean segment suffix. NEVER fall back to results[0]!
               const match =
-                (effectiveId ? results.find((r) => r.id === effectiveId) : undefined) ??
-                (path ? results.find((r) => r.path === path || r.path?.toLowerCase() === path.toLowerCase()) : undefined) ??
-                (path ? results.find((r) => r.path?.endsWith("/" + path) || path.endsWith("/" + r.path)) : undefined);
+                (effectiveId ? activeResults.find((r) => r.id === effectiveId) : undefined) ??
+                (path ? activeResults.find((r) => r.path === path || r.path?.toLowerCase() === path.toLowerCase()) : undefined) ??
+                (path ? activeResults.find((r) => r.path?.endsWith("/" + path) || path.endsWith("/" + r.path)) : undefined);
 
               if (match && typeof match.content === "string") {
                 text = match.content;

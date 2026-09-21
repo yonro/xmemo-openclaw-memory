@@ -117,7 +117,7 @@ export class XMemoSearchManager implements MemorySearchManager {
     if (id && (isUuid || !trimmed.endsWith(".md"))) {
       try {
         const memory = await this.client.getMemory(id, signal);
-        if (typeof memory?.content === "string") {
+        if (typeof memory?.content === "string" && (!memory.status || memory.status.toLowerCase() !== "deleted")) {
           text = memory.content;
           path = memory.path ?? trimmed;
         }
@@ -137,14 +137,16 @@ export class XMemoSearchManager implements MemorySearchManager {
           bucket: this.config.readBucket,
           scope: this.config.readScope ?? null,
           team_id: this.config.teamId ?? null,
+          status: "active",
           max_items: 10,
         },
         signal,
       );
+      const activeResults = response.results.filter((r) => !r.status || r.status.toLowerCase() !== "deleted");
       const match =
-        (id ? response.results.find((r) => r.id === id) : undefined) ??
-        response.results.find((r) => r.path === trimmed || r.path === trimmed.toLowerCase()) ??
-        response.results.find((r) => r.path?.endsWith("/" + trimmed) || trimmed.endsWith("/" + r.path));
+        (id ? activeResults.find((r) => r.id === id) : undefined) ??
+        activeResults.find((r) => r.path === trimmed || r.path === trimmed.toLowerCase()) ??
+        activeResults.find((r) => r.path?.endsWith("/" + trimmed) || trimmed.endsWith("/" + r.path));
 
       if (!match || typeof match.content !== "string") {
         throw new Error(`Memory not found for path: ${trimmed}`);

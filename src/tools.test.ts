@@ -249,10 +249,45 @@ describe("memory_search failure-open", () => {
     const result = await tools.get("xmemo_memory_list")!.execute("tc-1", { query: "visible" });
 
     expect(requestUrl(0, fetchMock.mock.calls)).toBe(
-      "https://xmemo.dev/v1/memories/search?query=visible&bucket=work&scope=shared-project&limit=20",
+      "https://xmemo.dev/v1/memories/search?query=visible&bucket=work&scope=shared-project&status=active&limit=20",
     );
     expect(result.details).toMatchObject({ count: 1, ids: ["mem-1"] });
     expect(JSON.stringify(result.details)).not.toContain("visible memory");
+  });
+
+  it("filters out memories with status='deleted' in xmemo_memory_list", async () => {
+    fetchMock.mockResolvedValue(
+      mockResponse({
+        results: [
+          { id: "mem-active", content: "active memory", bucket: "openclaw", status: "active" },
+          { id: "mem-deleted", content: "deleted memory", bucket: "openclaw", status: "deleted" },
+        ],
+      }),
+    );
+    const { tools } = createApi({ apiKey: "key", bucket: "openclaw" });
+    const result = await tools.get("xmemo_memory_list")!.execute("tc-1", { query: "memory" });
+
+    expect(result.details).toMatchObject({ count: 1, ids: ["mem-active"] });
+    expect(textContent(result)).toContain("mem-active");
+    expect(textContent(result)).not.toContain("mem-deleted");
+  });
+
+  it("includes soft-deleted memories in xmemo_memory_list when include_deleted=true", async () => {
+    fetchMock.mockResolvedValue(
+      mockResponse({
+        results: [
+          { id: "mem-active", content: "active memory", bucket: "openclaw", status: "active" },
+          { id: "mem-deleted", content: "deleted memory", bucket: "openclaw", status: "deleted" },
+        ],
+      }),
+    );
+    const { tools } = createApi({ apiKey: "key", bucket: "openclaw" });
+    const result = await tools.get("xmemo_memory_list")!.execute("tc-1", { query: "memory", include_deleted: true });
+
+    expect(requestUrl(0, fetchMock.mock.calls)).not.toContain("status=active");
+    expect(result.details).toMatchObject({ count: 2, ids: ["mem-active", "mem-deleted"] });
+    expect(textContent(result)).toContain("mem-active");
+    expect(textContent(result)).toContain("mem-deleted");
   });
 
   it("requires a query when listing memories because the search API requires one", async () => {

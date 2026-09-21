@@ -167,6 +167,7 @@ export class ResilientXMemoClient {
       scope?: string | null;
       teamId?: string | null;
       memory_type?: string;
+      status?: string;
       maxItems?: number;
       path?: string;
     },
@@ -178,6 +179,7 @@ export class ResilientXMemoClient {
       scope: params.scope !== undefined ? params.scope : (this.config.readScope ?? null),
       teamId: params.teamId !== undefined ? params.teamId : (this.config.teamId ?? null),
       ...(params.memory_type ? { memory_type: params.memory_type } : {}),
+      ...(params.status ? { status: params.status } : {}),
       maxItems: params.maxItems ?? 10,
       path: params.path,
     };
@@ -194,6 +196,7 @@ export class ResilientXMemoClient {
           scope: params.scope !== undefined ? params.scope : (this.config.readScope ?? null),
           team_id: params.teamId !== undefined ? params.teamId : (this.config.teamId ?? null),
           memory_type: params.memory_type,
+          status: params.status,
           max_items: params.maxItems ?? 10,
           path: params.path,
         },

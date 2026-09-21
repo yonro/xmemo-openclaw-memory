@@ -65,6 +65,7 @@ export type XMemoSearchMemoryRequest = {
   scope?: string | null;
   team_id?: string | null;
   memory_type?: string;
+  status?: string;
   max_items?: number;
   threshold?: number;
 };
@@ -77,6 +78,7 @@ export type XMemoSearchMemoryResult = {
   scope?: string | null;
   score?: number;
   memory_type?: string;
+  status?: string;
 };
 
 export type XMemoSearchMemoryResponse = {
@@ -594,6 +596,7 @@ export class XMemoClient {
       scope: request.scope,
       team_id: request.team_id,
       memory_type: request.memory_type,
+      status: request.status,
       limit: request.max_items,
       threshold: request.threshold,
     });
@@ -610,6 +613,9 @@ export class XMemoClient {
         { method: "GET", signal },
       );
       if (explain && typeof explain.content === "string") {
+        if (explain.status && String(explain.status).toLowerCase() === "deleted") {
+          throw new XMemoClientError("Memory not found", 404);
+        }
         return {
           id: explain.id || explain.memory_id || id,
           content: explain.content,
@@ -635,11 +641,12 @@ export class XMemoClient {
           bucket: undefined,
           scope: null,
           team_id: null,
+          status: "active",
           max_items: 5,
         },
         signal,
       );
-      const match = search.results.find((r) => r.id === id);
+      const match = search.results.find((r) => r.id === id && (!r.status || r.status.toLowerCase() !== "deleted"));
       if (match && typeof match.content === "string") {
         return {
           id: match.id,
