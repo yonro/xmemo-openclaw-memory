@@ -245,8 +245,8 @@ export function resolveXMemoMemoryConfig(
         )
       : undefined,
     recallMaxChars: (pluginConfig.recallMaxChars as number | undefined) ?? 1000,
-    recallMaxItems: (pluginConfig.recallMaxItems as number | undefined) ?? 8,
-    recallMaxTokens: (pluginConfig.recallMaxTokens as number | undefined) ?? 4000,
+    recallMaxItems: (pluginConfig.recallMaxItems as number | undefined) ?? 15,
+    recallMaxTokens: (pluginConfig.recallMaxTokens as number | undefined) ?? 12000,
   } as XMemoMemoryConfig;
   resolved.apiKey = credential.value;
   return resolved;

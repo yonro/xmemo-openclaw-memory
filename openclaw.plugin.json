@@ -315,13 +315,13 @@
       "label": "Recall Max Items",
       "help": "Maximum number of memories returned by XMemo recall.",
       "advanced": true,
-      "placeholder": "8"
+      "placeholder": "15"
     },
     "recallMaxTokens": {
       "label": "Recall Max Tokens",
       "help": "Maximum token budget for the recalled context package.",
       "advanced": true,
-      "placeholder": "4000"
+      "placeholder": "12000"
     }
   },
   "configSchema": {
@@ -414,14 +414,14 @@
       "recallMaxItems": {
         "type": "integer",
         "minimum": 1,
-        "maximum": 50,
-        "default": 8
+        "maximum": 100,
+        "default": 15
       },
       "recallMaxTokens": {
         "type": "integer",
         "minimum": 100,
-        "maximum": 8000,
-        "default": 4000
+        "maximum": 64000,
+        "default": 12000
       }
     }
   }
