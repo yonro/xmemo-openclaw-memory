@@ -91,6 +91,16 @@ describe("XMemoClient", () => {
     expect(requestInit(0, fetchMock.mock.calls).method).toBe("GET");
   });
 
+  it("includes memory_type in searchMemory query params when provided", async () => {
+    fetchMock.mockResolvedValue(mockResponse({ results: [] }));
+    const client = new XMemoClient("https://xmemo.dev", "key", "openclaw", "instance");
+    await client.searchMemory({ query: "hello", bucket: "openclaw", memory_type: "episodic" });
+
+    expect(requestUrl(0, fetchMock.mock.calls)).toBe(
+      "https://xmemo.dev/v1/memories/search?query=hello&bucket=openclaw&memory_type=episodic",
+    );
+  });
+
   it("redacts the api key when it appears in the response body", async () => {
     fetchMock.mockResolvedValue(
       new Response(JSON.stringify({ error: "invalid key: super-secret-key" }), {

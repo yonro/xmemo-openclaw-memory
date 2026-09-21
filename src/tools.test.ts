@@ -1021,5 +1021,80 @@ describe("Retrieval Robustness Tests", () => {
     expect((searchAfterForget.details as any)?.unavailable).toBe(true);
     expect(textContent(searchAfterForget)).not.toContain("Do not resurrect me");
   });
+
+  it("xmemo_memory_list rejects invalid memory_type without making network requests", async () => {
+    const { tools } = createApi({ apiKey: "key" });
+    const result = await tools.get("xmemo_memory_list")!.execute("tc-1", {
+      query: "planning",
+      memory_type: "bogus_type",
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect((result.details as any)?.error).toBe("invalid_argument");
+    expect((result.details as any)?.field).toBe("memory_type");
+    expect(textContent(result)).toContain('Invalid memory_type "bogus_type"');
+    expect(textContent(result)).toContain("Supported types are: semantic, episodic, working, procedural, identity");
+  });
+
+  it("xmemo_memory_list passes valid memory_type to search API and details", async () => {
+    fetchMock.mockResolvedValueOnce(
+      mockResponse({
+        results: [
+          {
+            id: "mem-episodic-1",
+            content: "Episodic content",
+            path: "history/session-1",
+            memory_type: "episodic",
+          },
+        ],
+      }),
+    );
+
+    const { tools } = createApi({ apiKey: "key" });
+    const result = await tools.get("xmemo_memory_list")!.execute("tc-1", {
+      query: "session",
+      memory_type: "episodic",
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(requestUrl(0, fetchMock.mock.calls)).toContain("memory_type=episodic");
+    expect(textContent(result)).toContain("mem-episodic-1");
+    expect((result.details as any)?.memory_type).toBe("episodic");
+  });
+
+  it("xmemo_memory_list debug trace outputs filters with memory_type, candidate count, and cache freshness", async () => {
+    fetchMock.mockResolvedValueOnce(
+      mockResponse({
+        results: [
+          {
+            id: "mem-semantic-1",
+            content: "Semantic knowledge item",
+            path: "kb/semantic",
+            memory_type: "semantic",
+          },
+        ],
+      }),
+    );
+
+    const { tools } = createApi({ apiKey: "key" });
+    const result = await tools.get("xmemo_memory_list")!.execute("tc-1", {
+      query: "knowledge",
+      memory_type: "semantic",
+      debug: true,
+    });
+
+    const text = textContent(result);
+    expect(text).toContain("--- Debug Trace ---");
+    expect(text).toContain('"memory_type": "semantic"');
+    expect(text).toContain('"totalCandidates": 1');
+    expect(text).toContain('"fromCache": false');
+    expect(text).toContain('"isFresh": true');
+
+    const trace = (result.details as any)?.trace;
+    expect(trace?.filters?.memory_type).toBe("semantic");
+    expect(trace?.totalCandidates).toBe(1);
+    expect(trace?.fromCache).toBe(false);
+    expect(trace?.isFresh).toBe(true);
+  });
 });
 

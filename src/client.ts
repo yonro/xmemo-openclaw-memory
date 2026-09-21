@@ -64,6 +64,7 @@ export type XMemoSearchMemoryRequest = {
   bucket?: string;
   scope?: string | null;
   team_id?: string | null;
+  memory_type?: string;
   max_items?: number;
   threshold?: number;
 };
@@ -592,6 +593,7 @@ export class XMemoClient {
       bucket: request.bucket,
       scope: request.scope,
       team_id: request.team_id,
+      memory_type: request.memory_type,
       limit: request.max_items,
       threshold: request.threshold,
     });

@@ -317,6 +317,11 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
 
         const trace: RetrievalTrace = {
           originalQuery: query,
+          filters: {
+            bucket: cfg.readBucket,
+            scope: cfg.readScope ?? null,
+            teamId: cfg.teamId ?? null,
+          },
           strategies: [],
         };
 
@@ -484,6 +489,10 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
         const effectiveIsFresh = anyFromCache
           ? ((l1FromCache && !l1IsFresh) || (l2FromCache && !l2IsFresh) ? false : true)
           : true;
+
+        trace.fromCache = anyFromCache;
+        trace.isFresh = effectiveIsFresh;
+        trace.totalCandidates = finalItems.length;
 
         if (finalItems.length === 0) {
           const cachePrefix = anyFromCache
@@ -1058,7 +1067,12 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
         path: Type.Optional(Type.String({ description: "Path/category hint" })),
         maxResults: optionalPositiveInteger("Max results (default: 20)"),
         debug: Type.Optional(Type.Boolean({ description: "Return retrieval trace (default: false)" })),
-        memory_type: Type.Optional(Type.String({ description: "Filter by memory type" })),
+        memory_type: Type.Optional(
+          Type.String({
+            description: "Filter by memory type (semantic, episodic, working, procedural, identity)",
+            enum: ["semantic", "episodic", "working", "procedural", "identity"],
+          }),
+        ),
         full: Type.Optional(Type.Boolean({ description: "Return full content without truncation (default: false)" })),
         maxChars: Type.Optional(Type.Integer({ description: "Max characters per snippet when truncating (default: 500, max: 100000)", minimum: 1, maximum: 100000 })),
       }),
@@ -1082,6 +1096,30 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
         const full = typeof raw.full === "boolean" ? raw.full : false;
         const maxChars = typeof raw.maxChars === "number" && raw.maxChars > 0 ? raw.maxChars : 500;
 
+        const rawMemoryType = typeof raw.memory_type === "string" ? raw.memory_type.trim() : undefined;
+        let memoryType: string | undefined = undefined;
+        if (rawMemoryType !== undefined && rawMemoryType !== "") {
+          const lowerType = rawMemoryType.toLowerCase();
+          const VALID_MEMORY_TYPES = new Set(["semantic", "episodic", "working", "procedural", "identity"]);
+          if (!VALID_MEMORY_TYPES.has(lowerType)) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Invalid memory_type "${rawMemoryType}". Supported types are: ${Array.from(VALID_MEMORY_TYPES).join(", ")}.`,
+                },
+              ],
+              details: {
+                error: "invalid_argument",
+                field: "memory_type",
+                value: rawMemoryType,
+                validTypes: Array.from(VALID_MEMORY_TYPES),
+              },
+            };
+          }
+          memoryType = lowerType;
+        }
+
         if (!query && !path) {
           return {
             content: [
@@ -1103,6 +1141,12 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
 
         const trace: RetrievalTrace = {
           originalQuery: queryVal,
+          filters: {
+            memory_type: memoryType,
+            bucket: cfg.readBucket,
+            scope: cfg.readScope ?? null,
+            teamId: cfg.teamId ?? null,
+          },
           strategies: [],
         };
         if (path) trace.pathHint = path;
@@ -1142,6 +1186,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
               bucket: cfg.readBucket,
               scope: cfg.readScope ?? null,
               teamId: cfg.teamId ?? null,
+              memory_type: memoryType,
               maxItems: maxResults,
               path: candidatePath,
             }, signal);
@@ -1158,7 +1203,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
 
             const unifiedItems = memories.map((m, index) => {
               const id = m.id || "";
-              const score = typeof m.score === "number" ? m.score : Math.max(0.5, 0.8 - index * 0.05);
+              const score = typeof m.score === "number" ? m.score : Math.max(0.5, 0.95 - index * 0.05);
               const snippet = m.content;
               const bucket = m.bucket ?? cfg.bucket;
               const getPath = m.path ? `${m.path}/${id}` : `${bucket}/${id}`;
@@ -1185,6 +1230,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
               path: candidatePath,
               count: unifiedItems.length,
               fromCache,
+              isFresh,
             });
 
             // Stop at the first candidate path that returns matches.
@@ -1201,6 +1247,9 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
         }
 
         const rankedItems = dedupeAndRank(Array.from(resultsMap.values()), queryVal, targetPath);
+        trace.fromCache = globalFromCache;
+        trace.isFresh = globalIsFresh;
+        trace.totalCandidates = rankedItems.length;
 
         if (rankedItems.length === 0) {
           let emptyText =
@@ -1222,6 +1271,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
               count: 0,
               fromCache: globalFromCache,
               isFresh: globalIsFresh,
+              memory_type: memoryType,
               ...(debug ? { trace } : {}),
             },
           };
@@ -1249,6 +1299,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
             count: rankedItems.length,
             fromCache: globalFromCache,
             isFresh: globalIsFresh,
+            memory_type: memoryType,
             ids: rankedItems.map((item) => item.id),
             full,
             maxChars,

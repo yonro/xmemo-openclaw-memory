@@ -379,6 +379,41 @@ An empty semantic search result does not always prove absence. Retry with:
 - `xmemo_memory_list` for path-oriented browsing
 - `debug: true` for query expansion and tracing
 
+## Memory Operations & Contract Specification
+
+### Precise Read vs. Search
+
+| Feature | `xmemo_memory_get` | `memory_search` / `xmemo_memory_list` |
+| :--- | :--- | :--- |
+| **Purpose** | Authoritative single-memory retrieval | Heuristic discovery & exploration |
+| **Resolution** | Direct `/explain` endpoint projection | Multi-strategy L1 semantic recall + L2 search |
+| **Fallback** | Authoritative only; **never** falls back to `results[0]` or stale search cache | Falls back to transient offline cache during network outages |
+| **Failure Mode** | Fails closed on not-found, deleted, or unauthorized | Returns empty or degraded notification |
+
+### Supported References
+
+- **Explicit UUID**: `id: "31ca3aa2-d058-4da8-8dae-5a341e305d61"`
+- **Canonical Path**: `path: "openclaw/31ca3aa2-d058-4da8-8dae-5a341e305d61"` or `path: "openclaw/docs/31ca3aa2-d058-4da8-8dae-5a341e305d61"`
+- **Validation**: Path traversal (`../`), null bytes, or malformed IDs fail fast before any network request is issued.
+
+### Line Ranges & EOF Pagination
+
+- `from`: 1-based start line (default: 1).
+- `lines`: Maximum lines to return.
+- If `from > totalLines`, the tool returns a typed `range_out_of_bounds` error indicating `totalLines` and the requested line.
+- `truncated`: Only `true` when unread lines remain after the current slice (`startIndex + returnedLines < totalLines`), eliminating false EOF truncation.
+
+### Cache & Offline Failure Semantics
+
+- **Transient-Only Fallback**: Stale cache is returned **only** on transient infrastructure failures (network loss, timeouts, HTTP 5xx, HTTP 429).
+- **Deterministic Rejection**: HTTP 401 Unauthorized, HTTP 403 Forbidden, HTTP 404 Not Found, and `AbortError` **never** serve cached content, ensuring revoked permissions or deleted memories do not leak.
+- **Degradation Transparency**: When operating from cache, tool response text explicitly prefixes `[Degraded / Offline Cache: fromCache=true, isFresh=...]`, and `details` exposes `{ fromCache: true, isFresh: boolean }`.
+- **Mutation Invalidation**: Successful `memory_store`, `xmemo_memory_update`, `memory_forget`, or `xmemo_restart_snapshot_restore` operations immediately purge affected local cache entries for the matching bucket, scope, and team, while preserving queued outbox writes.
+
+### Ledger & Audit Permission Prerequisites
+
+- `xmemo_ledger_summary` and `xmemo_audit_events` require specialized account permissions (e.g. `ledger:read`, `audit:read`). Standard memory tokens lacking these scopes return HTTP 401/403 by design.
+
 ## Migration from another memory provider
 
 Selecting `xmemo-memory` replaces the active backend. Existing memories in

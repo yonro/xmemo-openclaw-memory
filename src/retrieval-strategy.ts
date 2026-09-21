@@ -2,12 +2,22 @@ export type RetrievalTrace = {
   originalQuery: string;
   pathHint?: string;
   agentHint?: string;
+  filters?: {
+    memory_type?: string;
+    bucket?: string;
+    scope?: string | null;
+    teamId?: string | null;
+  };
+  fromCache?: boolean;
+  isFresh?: boolean;
+  totalCandidates?: number;
   strategies: Array<{
     name: string;
     query?: string;
     path?: string;
     count: number;
     fromCache?: boolean;
+    isFresh?: boolean;
     error?: string;
   }>;
 };

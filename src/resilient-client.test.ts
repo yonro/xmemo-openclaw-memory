@@ -326,4 +326,48 @@ describe("ResilientXMemoClient read cache policy", () => {
       }),
     ).toBeNull();
   });
+
+  it("isolates cache entries by memory_type parameter", async () => {
+    const cache = new XMemoLocalCache(cacheDir);
+    cache.putCachedRecall(
+      "search",
+      "planning",
+      {
+        query: "planning",
+        bucket: "%",
+        scope: null,
+        teamId: null,
+        memory_type: "semantic",
+        maxItems: 10,
+      },
+      { results: [{ id: "semantic-result", content: "Semantic plan" }] },
+    );
+    cache.putCachedRecall(
+      "search",
+      "planning",
+      {
+        query: "planning",
+        bucket: "%",
+        scope: null,
+        teamId: null,
+        memory_type: "episodic",
+        maxItems: 10,
+      },
+      { results: [{ id: "episodic-result", content: "Episodic plan" }] },
+    );
+
+    fetchMock.mockRejectedValue(new TypeError("fetch failed: offline"));
+    const client = buildClient(cacheDir);
+
+    const semanticRes = await client.searchMemory("planning", { memory_type: "semantic" });
+    expect(semanticRes.fromCache).toBe(true);
+    expect((semanticRes.result as any).results[0].id).toBe("semantic-result");
+
+    const episodicRes = await client.searchMemory("planning", { memory_type: "episodic" });
+    expect(episodicRes.fromCache).toBe(true);
+    expect((episodicRes.result as any).results[0].id).toBe("episodic-result");
+
+    // Unfiltered search without memory_type has no cache entry and fails transiently
+    await expect(client.searchMemory("planning", {})).rejects.toThrow("fetch failed: offline");
+  });
 });
