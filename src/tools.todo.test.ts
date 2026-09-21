@@ -148,6 +148,67 @@ describe("xmemo_todo_list tool", () => {
     expect(requestInit(0, fetchMock.mock.calls).body).toBe("{}");
   });
 
+  it("passes due_at in reminder create request when provided", async () => {
+    fetchMock.mockResolvedValue(
+      mockResponse({
+        reminder: {
+          id: "todo-2",
+          item_kind: "reminder",
+          item_status: "open",
+          due_at: "2026-12-31T23:59:59Z",
+        },
+      }, 201),
+    );
+
+    registerXMemoTools(mockApi());
+    const result = await tools.get("xmemo_todo_create")!.execute("call-2", {
+      content: "future deadline task",
+      due_at: "2026-12-31T23:59:59Z",
+    });
+
+    expect(result).toMatchObject({
+      content: [{ type: "text", text: "Created XMemo reminder todo-2: future deadline task" }],
+      details: { action: "created", id: "todo-2" },
+    });
+
+    const init = requestInit(0, fetchMock.mock.calls);
+    const body = JSON.parse(init.body as string);
+    expect(body.due_at).toBe("2026-12-31T23:59:59Z");
+    expect(body.content).toBe("future deadline task");
+  });
+
+  it("normalizes status aliases correctly in xmemo_todo_list", async () => {
+    fetchMock.mockResolvedValue(mockResponse({ reminders: [] }));
+    registerXMemoTools(mockApi());
+    const tool = tools.get("xmemo_todo_list")!;
+
+    // "pending" -> "open"
+    await tool.execute("call-alias-1", { status: "pending" });
+    let url = new URL(requestUrl(0, fetchMock.mock.calls));
+    expect(url.searchParams.get("item_status")).toBe("open");
+
+    // "all" -> "%"
+    await tool.execute("call-alias-2", { status: "all" });
+    url = new URL(requestUrl(1, fetchMock.mock.calls));
+    expect(url.searchParams.get("item_status")).toBe("%");
+
+    // "done" -> "completed"
+    await tool.execute("call-alias-3", { status: "done" });
+    url = new URL(requestUrl(2, fetchMock.mock.calls));
+    expect(url.searchParams.get("item_status")).toBe("completed");
+  });
+
+  it("handles empty reminders list gracefully", async () => {
+    fetchMock.mockResolvedValue(mockResponse({ reminders: [] }));
+    registerXMemoTools(mockApi());
+    const result = await tools.get("xmemo_todo_list")!.execute("call-empty", { status: "open" });
+
+    expect(result).toMatchObject({
+      content: [{ type: "text", text: "No XMemo reminders found." }],
+      details: { count: 0 },
+    });
+  });
+
   it("unwraps timeline event envelopes and returns the event id", async () => {
     fetchMock.mockResolvedValue(
       mockResponse({
