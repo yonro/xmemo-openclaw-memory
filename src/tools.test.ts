@@ -709,5 +709,91 @@ describe("Retrieval Robustness Tests", () => {
     const result = await tools.get("xmemo_memory_get")!.execute("tc-1", {});
     expect(textContent(result)).toContain("Either id or path is required for xmemo_memory_get");
   });
+
+  it("xmemo_memory_get does not return unrelated results[0] when path does not match", async () => {
+    fetchMock.mockResolvedValueOnce(
+      mockResponse({
+        results: [
+          {
+            id: "unrelated-id-1",
+            content: "Unrelated content",
+            path: "some/other/path",
+          },
+        ],
+      }),
+    );
+
+    const { tools } = createApi({ apiKey: "key" });
+    const result = await tools.get("xmemo_memory_get")!.execute("tc-1", {
+      path: "nonexistent/path.md",
+    });
+
+    expect(textContent(result)).toContain("Memory not found for path=\"nonexistent/path.md\"");
+    expect((result.details as any)?.error).toBe("not_found");
+  });
+
+  it("xmemo_memory_get correctly marks truncated as false when reaching EOF", async () => {
+    fetchMock.mockResolvedValueOnce(
+      mockResponse({
+        id: "doc-exact",
+        content: "line1\nline2\nline3",
+        path: "exact/doc",
+      }),
+    );
+
+    const { tools } = createApi({ apiKey: "key" });
+    const result = await tools.get("xmemo_memory_get")!.execute("tc-1", {
+      id: "doc-exact",
+      from: 2,
+      lines: 2,
+    });
+
+    const details = result.details as any;
+    expect(details.truncated).toBe(false);
+    expect(details.lines).toBe(2);
+  });
+
+  it("xmemo_memory_list outputs debug trace in text when debug=true", async () => {
+    fetchMock.mockResolvedValueOnce(
+      mockResponse({
+        results: [
+          {
+            id: "mem-trace-1",
+            content: "Trace memory content",
+            path: "test/trace",
+          },
+        ],
+      }),
+    );
+
+    const { tools } = createApi({ apiKey: "key" });
+    const result = await tools.get("xmemo_memory_list")!.execute("tc-1", {
+      query: "trace",
+      debug: true,
+    });
+
+    const text = textContent(result);
+    expect(text).toContain("--- Debug Trace ---");
+    expect(text).toContain("L2_search");
+  });
+
+  it("xmemo_memory_update returns clean not_found message on 404/500 failure", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ detail: "Failed to update memory." }), {
+        status: 500,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const { tools } = createApi({ apiKey: "key" });
+    const result = await tools.get("xmemo_memory_update")!.execute("tc-1", {
+      id: "nonexistent-id-99999",
+      content: "new content",
+    });
+
+    const text = textContent(result);
+    expect(text).toContain("Memory not found for id \"nonexistent-id-99999\"");
+    expect((result.details as any)?.error).toBe("not_found");
+  });
 });
 

@@ -66,6 +66,7 @@ describe("xmemo_todo_list tool", () => {
       }),
     );
 
+
     registerXMemoTools(mockApi());
     const tool = tools.get("xmemo_todo_list");
     expect(tool).toBeDefined();
@@ -75,7 +76,7 @@ describe("xmemo_todo_list tool", () => {
       content: [
         {
           type: "text",
-          text: "XMemo reminders:\n\n1. task one\n2. task two (due 2026-06-20T00:00:00Z)",
+          text: "XMemo reminders:\n\n1. [id: r-1] [open] task one\n2. [id: r-2] [open] task two (due 2026-06-20T00:00:00Z)",
         },
       ],
       details: { count: 2 },

@@ -133,7 +133,10 @@ export type XMemoReminder = {
   id: string;
   content: string;
   status?: string;
+  item_status?: string;
   due_at?: string;
+  bucket?: string;
+  scope?: string | null;
 };
 
 export type XMemoReminderListResponse = {

@@ -193,4 +193,42 @@ describe("XMemoSearchManager", () => {
     expect(status.provider).toBe("xmemo-memory");
     expect((status.custom as Record<string, unknown>).configured).toBe(true);
   });
+
+  it("rejects path traversal in readFile", async () => {
+    const client = new XMemoClient("https://xmemo.dev", "key", "openclaw", "instance");
+    const manager = new XMemoSearchManager(client, createConfig());
+    await expect(manager.readFile({ relPath: "../etc/passwd" })).rejects.toThrow("Path traversal not allowed");
+  });
+
+  it("throws not found when search results do not match path exactly", async () => {
+    // When search returns unrelated results, readFile must not fall back to results[0] or join
+    fetchMock.mockResolvedValue(
+      mockResponse({
+        results: [
+          { id: "unrelated-1", content: "unrelated memory content", path: "other/path" },
+        ],
+      }),
+    );
+    const client = new XMemoClient("https://xmemo.dev", "key", "openclaw", "instance");
+    const manager = new XMemoSearchManager(client, createConfig());
+    await expect(manager.readFile({ relPath: "foobar.md" })).rejects.toThrow("Memory not found for path: foobar.md");
+  });
+
+  it("marks truncated as false when reading to end of file", async () => {
+    fetchMock.mockResolvedValue(
+      mockResponse({
+        id: "mem-3",
+        content: "line1\nline2\nline3",
+        path: "openclaw",
+      }),
+    );
+    const client = new XMemoClient("https://xmemo.dev", "key", "openclaw", "instance");
+    const manager = new XMemoSearchManager(client, createConfig());
+    // from=2, lines=2 reads lines 2 and 3 of 3-line doc -> reaches EOF -> truncated should be false
+    const result = await manager.readFile({ relPath: "openclaw/mem-3", from: 2, lines: 2 });
+    expect(result.text).toBe("line2\nline3");
+    expect(result.from).toBe(2);
+    expect(result.lines).toBe(2);
+    expect(result.truncated).toBe(false);
+  });
 });

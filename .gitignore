@@ -9,3 +9,6 @@ dist/
 *.tgz
 reports/
 .claude/
+
+# Local planning documents
+plans/

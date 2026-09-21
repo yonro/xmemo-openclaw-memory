@@ -8,6 +8,9 @@ import type {
 import type { XMemoClient, XMemoRecallContextItem } from "./client.js";
 import type { XMemoMemoryConfig } from "./config.js";
 
+const UUID_REGEX =
+  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
 function memoryIdFromPath(relPath: string): string | undefined {
   // Accept paths like "bucket/id", "bucket/scope/id", or just "id".
   // XMemo ids may be UUIDs or arbitrary strings; take the final non-empty segment.
@@ -99,43 +102,34 @@ export class XMemoSearchManager implements MemorySearchManager {
       return { text: "", path: relPath, truncated: false, from: 1, lines: 0 };
     }
 
-    const id = memoryIdFromPath(relPath);
-    let text: string;
-    let path = relPath;
+    if (relPath.includes("..")) {
+      throw new Error(`Path traversal not allowed: ${relPath}`);
+    }
 
-    if (id) {
+    const trimmed = relPath.trim();
+    const id = memoryIdFromPath(trimmed);
+    const isUuid = id ? UUID_REGEX.test(id) : false;
+    let text: string | undefined;
+    let path = trimmed;
+
+    // Only attempt direct getMemory if id exists and is a UUID or doesn't end with .md
+    if (id && (isUuid || !trimmed.endsWith(".md"))) {
       try {
         const memory = await this.client.getMemory(id, signal);
-        text = memory.content;
-        path = memory.path ?? relPath;
+        if (typeof memory?.content === "string") {
+          text = memory.content;
+          path = memory.path ?? trimmed;
+        }
       } catch (err) {
-        // Fallback to searchMemory if direct getMemory failed (e.g. document-backed path)
-        const response = await this.client.searchMemory(
-          {
-            query: relPath,
-            path: relPath,
-            bucket: this.config.readBucket,
-            scope: this.config.readScope ?? null,
-            team_id: this.config.teamId ?? null,
-            max_items: 10,
-          },
-          signal,
-        );
-        const match =
-          response.results.find((r) => r.path === relPath) ??
-          response.results.find((r) => r.id === id) ??
-          response.results.find((r) => r.path?.endsWith(relPath) || relPath.endsWith(r.path || "")) ??
-          response.results[0];
-
-        if (!match) throw err;
-        text = match.content;
-        path = match.path ?? relPath;
+        // Fallback to searchMemory if direct getMemory failed
       }
-    } else {
+    }
+
+    if (text === undefined) {
       const response = await this.client.searchMemory(
         {
-          query: relPath,
-          path: relPath,
+          query: id || trimmed,
+          path: trimmed,
           bucket: this.config.readBucket,
           scope: this.config.readScope ?? null,
           team_id: this.config.teamId ?? null,
@@ -143,7 +137,16 @@ export class XMemoSearchManager implements MemorySearchManager {
         },
         signal,
       );
-      text = response.results.map((r) => r.content).join("\n\n---\n\n");
+      const match =
+        (id ? response.results.find((r) => r.id === id) : undefined) ??
+        response.results.find((r) => r.path === trimmed || r.path === trimmed.toLowerCase()) ??
+        response.results.find((r) => r.path?.endsWith("/" + trimmed) || trimmed.endsWith("/" + r.path));
+
+      if (!match || typeof match.content !== "string") {
+        throw new Error(`Memory not found for path: ${trimmed}`);
+      }
+      text = match.content;
+      path = match.path ?? trimmed;
     }
 
     this.connected = true;
@@ -151,14 +154,15 @@ export class XMemoSearchManager implements MemorySearchManager {
 
     const allLines = text.split("\n");
     const startFrom = Math.max(1, from ?? 1);
-    const lineCount = lines ?? allLines.length;
+    const lineCount = typeof lines === "number" ? Math.max(0, lines) : allLines.length;
     const sliced = allLines.slice(startFrom - 1, startFrom - 1 + lineCount);
     const resultText = sliced.join("\n");
+    const isTruncated = (startFrom - 1 + sliced.length) < allLines.length;
 
     return {
       text: resultText,
       path,
-      truncated: sliced.length < allLines.length,
+      truncated: isTruncated,
       from: startFrom,
       lines: sliced.length,
     };
