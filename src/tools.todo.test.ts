@@ -84,6 +84,28 @@ describe("xmemo_todo_list tool", () => {
 
     const url = new URL(requestUrl(0, fetchMock.mock.calls));
     expect(url.searchParams.get("item_status")).toBe("open");
+    expect(url.searchParams.get("bucket")).toBe("openclaw");
+  });
+
+  it("passes custom bucket and scope when provided to xmemo_todo_list", async () => {
+    fetchMock.mockResolvedValue(
+      mockResponse({
+        reminders: [],
+      }),
+    );
+
+    registerXMemoTools(mockApi());
+    const tool = tools.get("xmemo_todo_list");
+    await tool!.execute("call-2", {
+      status: "open",
+      bucket: "custom-bucket",
+      scope: "custom-scope",
+    });
+
+    const url = new URL(requestUrl(0, fetchMock.mock.calls));
+    expect(url.searchParams.get("bucket")).toBe("custom-bucket");
+    expect(url.searchParams.get("scope")).toBe("custom-scope");
+    expect(url.searchParams.get("item_status")).toBe("open");
   });
 
   it("unwraps reminder create envelopes and returns the created id", async () => {

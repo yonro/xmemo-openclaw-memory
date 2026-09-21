@@ -777,9 +777,77 @@ describe("Retrieval Robustness Tests", () => {
     expect(text).toContain("L2_search");
   });
 
-  it("xmemo_memory_update returns clean not_found message on 404/500 failure", async () => {
+  it("xmemo_memory_get rejects path traversal in path parameter", async () => {
+    const { tools } = createApi({ apiKey: "key" });
+    const result = await tools.get("xmemo_memory_get")!.execute("tc-1", {
+      path: "../etc/passwd",
+    });
+    expect(textContent(result)).toContain("Path traversal not allowed");
+    expect((result.details as any)?.error).toBe("invalid_path");
+  });
+
+  it("xmemo_memory_get returns range_out_of_bounds when startFrom > totalLines", async () => {
     fetchMock.mockResolvedValueOnce(
-      new Response(JSON.stringify({ detail: "Failed to update memory." }), {
+      mockResponse({
+        id: "doc-short",
+        content: "line1\nline2",
+        path: "short/doc",
+      }),
+    );
+
+    const { tools } = createApi({ apiKey: "key" });
+    const result = await tools.get("xmemo_memory_get")!.execute("tc-1", {
+      id: "doc-short",
+      from: 10,
+    });
+
+    expect(textContent(result)).toContain("Requested line 10 is out of bounds");
+    expect((result.details as any)?.error).toBe("range_out_of_bounds");
+    expect((result.details as any)?.totalLines).toBe(2);
+    expect((result.details as any)?.from).toBe(10);
+  });
+
+  it("xmemo_memory_get does not fallback to search on 401 auth error", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ detail: "Unauthorized" }), {
+        status: 401,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const { tools } = createApi({ apiKey: "key" });
+    const result = await tools.get("xmemo_memory_get")!.execute("tc-1", {
+      id: "auth-fail-id",
+    });
+
+    expect((result.details as any)?.errorType).toBe("auth");
+    expect((result.details as any)?.status).toBe(401);
+    // Crucially: only 1 fetch call was made (direct explain), no second search call
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("xmemo_memory_update returns clean not_found message on 404 failure", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ detail: "Memory 'doc-404' not found." }), {
+        status: 404,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const { tools } = createApi({ apiKey: "key" });
+    const result = await tools.get("xmemo_memory_update")!.execute("tc-1", {
+      id: "doc-404",
+      content: "new content",
+    });
+
+    const text = textContent(result);
+    expect(text).toContain('Memory not found for id "doc-404"');
+    expect((result.details as any)?.error).toBe("not_found");
+  });
+
+  it("xmemo_memory_update does not mask 500 as not_found", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ detail: "Internal Server Error: Database failure." }), {
         status: 500,
         headers: { "content-type": "application/json" },
       }),
@@ -787,13 +855,13 @@ describe("Retrieval Robustness Tests", () => {
 
     const { tools } = createApi({ apiKey: "key" });
     const result = await tools.get("xmemo_memory_update")!.execute("tc-1", {
-      id: "nonexistent-id-99999",
+      id: "doc-500",
       content: "new content",
     });
 
     const text = textContent(result);
-    expect(text).toContain("Memory not found for id \"nonexistent-id-99999\"");
-    expect((result.details as any)?.error).toBe("not_found");
+    expect(text).toContain("XMemo memory tool failed");
+    expect((result.details as any)?.error).toContain("500");
   });
 });
 

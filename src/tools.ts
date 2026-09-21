@@ -561,12 +561,27 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
               truncated: result.truncated,
             },
           };
-        } catch (error) {
-          // Distinguish transient failures (network/timeout) from permanent ones (404 not found)
-          if (error instanceof XMemoClientError && error.status === 404) {
+        } catch (error: any) {
+          // Distinguish permanent client errors from transient failures
+          if (
+            (error instanceof XMemoClientError && error.status === 404) ||
+            (error instanceof Error && error.message.includes("Memory not found"))
+          ) {
             return {
               content: [{ type: "text", text: `Memory not found at path: ${relPath}. It may have been deleted or the ID is incorrect.` }],
               details: { error: "not_found", path: relPath },
+            };
+          }
+          if (error instanceof Error && error.message.includes("Path traversal not allowed")) {
+            return {
+              content: [{ type: "text", text: error.message }],
+              details: { error: "invalid_path", path: relPath },
+            };
+          }
+          if (error instanceof Error && error.message.includes("out of bounds")) {
+            return {
+              content: [{ type: "text", text: error.message }],
+              details: { error: "range_out_of_bounds", path: relPath },
             };
           }
           return buildUnavailableResult(error);
@@ -844,13 +859,21 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
         else if (statusVal === "pending" || statusVal === "todo" || statusVal === "active" || statusVal === "uncompleted") statusVal = "open";
         else if (statusVal === "done" || statusVal === "finish" || statusVal === "finished") statusVal = "completed";
 
-        const targetBucket = typeof raw.bucket === "string" && raw.bucket.trim() ? raw.bucket.trim() : (cfg.readBucket || "%");
+        const targetBucket =
+          typeof raw.bucket === "string" && raw.bucket.trim()
+            ? raw.bucket.trim()
+            : cfg.bucket;
+
+        const targetScope =
+          typeof raw.scope === "string" && raw.scope.trim()
+            ? raw.scope.trim()
+            : (targetBucket === cfg.bucket ? (cfg.scope ?? null) : (cfg.readScope ?? null));
 
         try {
           const { reminders } = await client.listReminders(
             {
               bucket: targetBucket,
-              scope: targetBucket === cfg.bucket ? (cfg.scope ?? null) : null,
+              scope: targetScope,
               item_status: statusVal,
             },
             signal,
@@ -1229,6 +1252,18 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           };
         }
 
+        if (path && path.split(/[/\\]/).some((s) => s.trim() === "..")) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Path traversal not allowed: ${path}`,
+              },
+            ],
+            details: { error: "invalid_path", path },
+          };
+        }
+
         try {
           let text: string | undefined;
           let matchedPath: string | undefined = path || undefined;
@@ -1246,13 +1281,16 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
                 matchedPath = memory.path ?? path;
                 matchedId = memory.id;
               }
-            } catch {
+            } catch (err: any) {
+              if (err?.status === 401 || err?.status === 403 || err?.name === "AbortError") {
+                throw err;
+              }
               // Direct getMemory failed or 404/405; will fall back to searchMemory below
             }
           }
 
           // 2. If not found by direct id or only path was provided, search via resilient.searchMemory
-          if (!text) {
+          if (text === undefined) {
             const queryTarget = effectiveId || path || id;
             const searchRes = await resilient.searchMemory(
               queryTarget,
@@ -1279,14 +1317,14 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
               (path ? results.find((r) => r.path === path || r.path?.toLowerCase() === path.toLowerCase()) : undefined) ??
               (path ? results.find((r) => r.path?.endsWith("/" + path) || path.endsWith("/" + r.path)) : undefined);
 
-            if (match && match.content) {
+            if (match && typeof match.content === "string") {
               text = match.content;
               matchedPath = match.path ?? path;
               matchedId = match.id;
             }
           }
 
-          if (!text) {
+          if (text === undefined) {
             const lookupDesc = [id ? `id="${id}"` : "", path ? `path="${path}"` : ""].filter(Boolean).join(" ");
             return {
               content: [
@@ -1301,10 +1339,26 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
 
           const allLines = text.split("\n");
           const startFrom = Math.max(1, typeof raw.from === "number" ? raw.from : 1);
+          if (text.length > 0 && startFrom > allLines.length) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Requested line ${startFrom} is out of bounds (document has ${allLines.length} lines).`,
+                },
+              ],
+              details: {
+                error: "range_out_of_bounds",
+                totalLines: allLines.length,
+                from: startFrom,
+              },
+            };
+          }
+
           const lineCount = typeof raw.lines === "number" ? Math.max(0, raw.lines) : allLines.length;
-          const sliced = allLines.slice(startFrom - 1, startFrom - 1 + lineCount);
+          const sliced = text.length === 0 ? [] : allLines.slice(startFrom - 1, startFrom - 1 + lineCount);
           const resultText = sliced.join("\n");
-          const isTruncated = (startFrom - 1 + sliced.length) < allLines.length;
+          const isTruncated = text.length === 0 ? false : (startFrom - 1 + sliced.length) < allLines.length;
 
           const displayPath = matchedPath || matchedId || "memory";
           const formattedText = formatMemoryReadResult(displayPath, resultText);
@@ -1390,10 +1444,6 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
         } catch (error: any) {
           if (
             error?.status === 404 ||
-            (error instanceof XMemoClientError &&
-              error.status === 500 &&
-              (error.message?.includes("Failed to update memory") ||
-                error.message?.includes("Internal Server Error"))) ||
             error?.message?.toLowerCase()?.includes("not found")
           ) {
             return {

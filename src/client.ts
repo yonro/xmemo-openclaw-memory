@@ -603,10 +603,24 @@ export class XMemoClient {
 
   async getMemory(id: string, signal?: AbortSignal): Promise<XMemoMemory> {
     try {
-      return await this.request<XMemoMemory>(`/v1/memories/${encodeURIComponent(id)}`, {
-        method: "GET",
-        signal,
-      });
+      const explain = await this.request<any>(
+        `/v1/memories/${encodeURIComponent(id)}/explain?include_embedding=false`,
+        { method: "GET", signal },
+      );
+      if (explain && typeof explain.content === "string") {
+        return {
+          id: explain.id || explain.memory_id || id,
+          content: explain.content,
+          path: explain.path,
+          bucket: explain.bucket,
+          scope: explain.scope,
+          memory_type: explain.memory_type,
+          status: explain.status,
+          updated_at: explain.updated_at,
+          created_at: explain.created_at,
+        };
+      }
+      throw new XMemoClientError("Memory not found", 404);
     } catch (error) {
       // Only fall back to search-by-id when the direct GET endpoint is missing or
       // unavailable (404/405). Auth, timeout, and server errors should surface as-is.
@@ -624,7 +638,7 @@ export class XMemoClient {
         signal,
       );
       const match = search.results.find((r) => r.id === id);
-      if (match) {
+      if (match && typeof match.content === "string") {
         return {
           id: match.id,
           content: match.content,

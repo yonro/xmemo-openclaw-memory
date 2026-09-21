@@ -102,7 +102,8 @@ export class XMemoSearchManager implements MemorySearchManager {
       return { text: "", path: relPath, truncated: false, from: 1, lines: 0 };
     }
 
-    if (relPath.includes("..")) {
+    const hasTraversal = relPath.split(/[/\\]/).some((s) => s.trim() === "..");
+    if (hasTraversal) {
       throw new Error(`Path traversal not allowed: ${relPath}`);
     }
 
@@ -120,7 +121,10 @@ export class XMemoSearchManager implements MemorySearchManager {
           text = memory.content;
           path = memory.path ?? trimmed;
         }
-      } catch (err) {
+      } catch (err: any) {
+        if (err?.status === 401 || err?.status === 403 || err?.name === "AbortError") {
+          throw err;
+        }
         // Fallback to searchMemory if direct getMemory failed
       }
     }
@@ -154,10 +158,13 @@ export class XMemoSearchManager implements MemorySearchManager {
 
     const allLines = text.split("\n");
     const startFrom = Math.max(1, from ?? 1);
+    if (text.length > 0 && startFrom > allLines.length) {
+      throw new Error(`Requested line ${startFrom} is out of bounds (document has ${allLines.length} lines)`);
+    }
     const lineCount = typeof lines === "number" ? Math.max(0, lines) : allLines.length;
-    const sliced = allLines.slice(startFrom - 1, startFrom - 1 + lineCount);
+    const sliced = text.length === 0 ? [] : allLines.slice(startFrom - 1, startFrom - 1 + lineCount);
     const resultText = sliced.join("\n");
-    const isTruncated = (startFrom - 1 + sliced.length) < allLines.length;
+    const isTruncated = text.length === 0 ? false : (startFrom - 1 + sliced.length) < allLines.length;
 
     return {
       text: resultText,
