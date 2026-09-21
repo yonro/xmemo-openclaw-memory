@@ -16,3 +16,7 @@ plans/
 # Plan documents (local working artifacts per owner instruction)
 PLAN.md
 RETRIEVAL_ROBUSTNESS_PLAN.md
+
+# Evidence reports and runners (local artifacts per owner instruction)
+docs/evidence/
+scripts/evidence-*.mjs
