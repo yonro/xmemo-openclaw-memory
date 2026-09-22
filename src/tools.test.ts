@@ -1152,5 +1152,140 @@ describe("Retrieval Robustness Tests", () => {
     expect(trace?.fromCache).toBe(false);
     expect(trace?.isFresh).toBe(true);
   });
+
+  describe("xmemo_ledger_monthly_summary", () => {
+    it("returns configuration error when API key is not configured", async () => {
+      const emptyDir = mkdtempSync(join(tmpdir(), "xmemo-empty-"));
+      try {
+        vi.stubEnv("XMEMO_KEY", undefined);
+        vi.stubEnv("MEMORY_OS_API_KEY", undefined);
+        vi.stubEnv("MEMORY_OS_MCP_TOKEN", undefined);
+        vi.stubEnv("XMEMO_CONFIG_HOME", emptyDir);
+        vi.stubEnv("LOCALAPPDATA", emptyDir);
+
+        const { tools } = createApi();
+        const result = await tools.get("xmemo_ledger_monthly_summary")!.execute("tc-1", {});
+
+        expect(textContent(result)).toContain("XMemo is not configured. Set XMEMO_KEY to enable ledger summary.");
+        expect((result.details as any)?.errorType).toBe("not_configured");
+      } finally {
+        rmSync(emptyDir, { recursive: true, force: true });
+      }
+    });
+
+    it("fetches multi-month summary via POST /v1/skill/operations and formats lines", async () => {
+      fetchMock.mockResolvedValueOnce(
+        mockResponse({
+          ok: true,
+          operation: "ledger-summary",
+          result: {
+            summary: [
+              { month: "2026-09", expense_total: 450, net_total: -450, transaction_count: 5, currency: "CNY" },
+              { month: "2026-08", expense_total: 320.5, net_total: -320.5, transaction_count: 2, currency: "CNY" },
+            ],
+          },
+        }),
+      );
+
+      const { tools } = createApi({ apiKey: "key" });
+      const result = await tools.get("xmemo_ledger_monthly_summary")!.execute("tc-1", {
+        months: 6,
+        currency: "CNY",
+      });
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(requestUrl(0, fetchMock.mock.calls)).toBe("https://xmemo.dev/v1/skill/operations");
+      const init = requestInit(0, fetchMock.mock.calls);
+      expect(init.method).toBe("POST");
+      expect(JSON.parse(String(init.body))).toEqual({
+        operation: "ledger-summary",
+        arguments: {
+          months: 6,
+          currency: "CNY",
+        },
+      });
+
+      const text = textContent(result);
+      expect(text).toContain("XMemo Ledger Monthly Summary (2 months):");
+      expect(text).toContain("- 2026-09 (CNY): Expense: 450 CNY | Net: -450 CNY | 5 txs");
+      expect(text).toContain("- 2026-08 (CNY): Expense: 320.5 CNY | Net: -320.5 CNY | 2 txs");
+      expect((result.details as any)?.count).toBe(2);
+    });
+
+    it("formats single-month summary when top-level total and count are returned", async () => {
+      fetchMock.mockResolvedValueOnce(
+        mockResponse({
+          ok: true,
+          operation: "ledger-summary",
+          result: {
+            total: 1200,
+            count: 8,
+            currency: "USD",
+            month: 9,
+            year: 2026,
+          },
+        }),
+      );
+
+      const { tools } = createApi({ apiKey: "key" });
+      const result = await tools.get("xmemo_ledger_monthly_summary")!.execute("tc-1", {
+        month: 9,
+        year: 2026,
+      });
+
+      const text = textContent(result);
+      expect(text).toContain("XMemo ledger summary for 2026-09: 1200 USD across 8 transactions.");
+      expect((result.details as any)?.total).toBe(1200);
+      expect((result.details as any)?.count).toBe(8);
+    });
+
+    it("returns clean message when no transactions found for the requested period", async () => {
+      fetchMock.mockResolvedValueOnce(
+        mockResponse({
+          ok: true,
+          operation: "ledger-summary",
+          result: {
+            summary: [],
+          },
+        }),
+      );
+
+      const { tools } = createApi({ apiKey: "key" });
+      const result = await tools.get("xmemo_ledger_monthly_summary")!.execute("tc-1", {
+        months: 3,
+      });
+
+      const text = textContent(result);
+      expect(text).toBe("No XMemo ledger transactions found for the requested period.");
+      expect((result.details as any)?.count).toBe(0);
+    });
+
+    it("does NOT downgrade to cache on 403 Forbidden and prompts user to grant ledger:read", async () => {
+      fetchMock.mockResolvedValueOnce(
+        mockResponse(
+          {
+            detail: "Forbidden: missing required scope 'ledger:read'",
+          },
+          403,
+        ),
+      );
+
+      const { tools } = createApi({ apiKey: "key" });
+      const result = await tools.get("xmemo_ledger_monthly_summary")!.execute("tc-1", {
+        months: 6,
+      });
+
+      const text = textContent(result);
+      expect(text).toContain("Permission denied (403)");
+      expect(text).toContain("The 'ledger:read' scope is required");
+      expect(text).toContain("Please re-authorize or issue an API key with ledger:read scope");
+
+      const details = result.details as any;
+      expect(details.errorType).toBe("auth");
+      expect(details.status).toBe(403);
+      expect(details.requires_scope).toBe("ledger:read");
+      expect(details.cached).toBeUndefined();
+    });
+  });
 });
 

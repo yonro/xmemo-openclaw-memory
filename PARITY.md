@@ -48,7 +48,7 @@
 | **记忆多维统计** | ❌ **无对应工具** | `memory_stats` | `stats` | 🔴 缺失 | 插件缺少 `GET /v1/memories/stats` 分组、时间与类型统计工具。 |
 | **近期活动流** | ❌ **无对应工具** | `memory_activity` | `activity` | 🔴 缺失 | 插件缺少查询增删改审计活动流的工具。 |
 | **账本交易列表** | ❌ **无对应工具** | `list_ledger_transactions` | `ledger-list` | 🔴 缺失 | 插件目前完全无法列出具体流水与关联 ID。 |
-| **账本月度汇总** | `xmemo_ledger_monthly_summary` | `get_monthly_ledger_summary` | `ledger-summary` | 🟡 语义差异 | 插件传 `month`/`year`（单月）；服务端/技能传 `months`（近 N 月滑动窗口）。且插件走历史 `/v1/me/*` 路由。 |
+| **账本月度汇总** | `xmemo_ledger_monthly_summary` | `get_monthly_ledger_summary` | `ledger-summary` | 🟢 对齐 | 插件已迁移至 `POST /v1/skill/operations` (`ledger-summary`)，主参数对齐 `months`，保留 `month`/`year` 兼容映射；403 明确提示重授 `ledger:read`，不降级缓存。 |
 | **记录新增支出** | ❌ **无对应工具** | `add_expense` | `expense-add` | ⚪️ 规划中 | 技能与服务端已具备写入能力，插件作为读取优先侧暂缓。 |
 | **待办事项创建** | `xmemo_todo_create` (Ext) | `create_memory_todo` / `create_reminder` | `todo-add` | 🟢 对齐 | 支持 `content` 与 `due_at`。 |
 | **待办事项列表** | `xmemo_todo_list` (Ext) | `list_memory_todos` / `todo_list` | `todo-list` | 🟡 参数差异 | 插件使用 `status` (`open`/`completed`)；服务端使用 `item_status`，且插件缺少 `limit` 和 `due_before`。 |
@@ -168,16 +168,12 @@
 - **技能 CLI** (`xmemo-skill.mjs`):
   - 命令: `node scripts/xmemo-skill.mjs ledger-summary [--months <n>] [--currency <c>] [--type <t>]`
   - 路由: `POST /v1/skill/operations` with `{ operation: "ledger-summary", arguments: { months, currency, transaction_type } }`
-- **插件现有签名** (`src/tools.ts:1715`):
-  ```typescript
-  name: "xmemo_ledger_monthly_summary",
-  parameters: Type.Object({
-    month: Type.Optional(Type.Integer({ description: "Month (1-12)" })),
-    year: Type.Optional(Type.Integer({ description: "Year" })),
-    currency: Type.Optional(Type.String({ description: "Currency code (e.g. CNY)" })),
-  })
-  ```
-- **核查结论**: 存在参数语义倒错（服务端以滑动窗口 `months` 为主；插件以固定单月 `month` + `year` 为主），且插件底层调用待升级至 `/v1/skill/operations`。
+- **插件实现** (`src/tools.ts`, `src/client.ts`):
+  - 路由: `POST /v1/skill/operations` with `{ operation: "ledger-summary", arguments: { months, currency, transaction_type } }`
+  - 参数对齐: 主参数对齐为 `months` (1-24，默认 6)，支持 `currency` 与 `transaction_type`。严格白名单过滤。
+  - 向后兼容: 兼容保留 `month` 与 `year` 入参，内部平滑映射至 rolling months。
+  - 403 行为: 当服务端返回 403 Forbidden 或提示缺少 `ledger:read` scope 时，绝不降级至本地缓存，立即向用户明确提示重新授权并勾选 `ledger:read` 权限。
+- **核查结论**: 🟢 已通过 P0 修复对齐。路由已脱离 `/v1/me/ledger/monthly-summary` 会话面，支持独立 API token，鉴权与参数策略完整对齐。
 
 ---
 

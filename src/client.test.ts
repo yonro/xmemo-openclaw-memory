@@ -253,4 +253,108 @@ describe("XMemoClient", () => {
     );
     expect(requestInit(0, fetchMock.mock.calls).method).toBe("GET");
   });
+
+  describe("getLedgerMonthlySummary (skill operations migration)", () => {
+    it("posts to /v1/skill/operations with default months: 6 and unwraps wrapped result", async () => {
+      fetchMock.mockResolvedValue(
+        mockResponse({
+          ok: true,
+          operation: "ledger-summary",
+          result: {
+            summary: [
+              { month: "2026-09", total: 150.5, count: 3, currency: "CNY" },
+              { month: "2026-08", total: 200, count: 4, currency: "CNY" },
+            ],
+          },
+        }),
+      );
+      const client = new XMemoClient("https://xmemo.dev", "key", "openclaw", "instance");
+      const summary = await client.getLedgerMonthlySummary();
+
+      expect(requestUrl(0, fetchMock.mock.calls)).toBe("https://xmemo.dev/v1/skill/operations");
+      const init = requestInit(0, fetchMock.mock.calls);
+      expect(init.method).toBe("POST");
+      expect(JSON.parse(String(init.body))).toEqual({
+        operation: "ledger-summary",
+        arguments: {
+          months: 6,
+        },
+      });
+
+      expect(summary.summary).toHaveLength(2);
+      expect(summary.summary?.[0]?.month).toBe("2026-09");
+      expect(summary.summary?.[0]?.total).toBe(150.5);
+    });
+
+    it("strictly allow-lists outbound parameters and sanitizes casing and range", async () => {
+      fetchMock.mockResolvedValue(
+        mockResponse({
+          ok: true,
+          operation: "ledger-summary",
+          result: {
+            summary: [],
+          },
+        }),
+      );
+      const client = new XMemoClient("https://xmemo.dev", "key", "openclaw", "instance");
+      await client.getLedgerMonthlySummary({
+        months: 99, // Should clamp to 24
+        currency: " cny ", // Should trim and uppercase
+        transaction_type: " Expense ", // Should trim and lowercase
+        ...({ unexpected_field: "should_not_pass", owner_id: "leak" } as any),
+      });
+
+      const init = requestInit(0, fetchMock.mock.calls);
+      const body = JSON.parse(String(init.body));
+      expect(body).toEqual({
+        operation: "ledger-summary",
+        arguments: {
+          months: 24,
+          currency: "CNY",
+          transaction_type: "expense",
+        },
+      });
+      expect(body.arguments.unexpected_field).toBeUndefined();
+      expect(body.arguments.owner_id).toBeUndefined();
+    });
+
+    it("unwraps raw unwrapped payload directly", async () => {
+      fetchMock.mockResolvedValue(
+        mockResponse({
+          total: 500,
+          count: 10,
+          currency: "USD",
+          month: 9,
+          year: 2026,
+        }),
+      );
+      const client = new XMemoClient("https://xmemo.dev", "key", "openclaw", "instance");
+      const summary = await client.getLedgerMonthlySummary({ months: 3 });
+
+      expect(summary.total).toBe(500);
+      expect(summary.count).toBe(10);
+      expect(summary.currency).toBe("USD");
+    });
+
+    it("maps legacy month and year to rolling months window", async () => {
+      fetchMock.mockResolvedValue(
+        mockResponse({
+          ok: true,
+          operation: "ledger-summary",
+          result: { summary: [] },
+        }),
+      );
+      const client = new XMemoClient("https://xmemo.dev", "key", "openclaw", "instance");
+      await client.getLedgerMonthlySummary({
+        month: 8,
+        year: 2026,
+      });
+
+      const init = requestInit(0, fetchMock.mock.calls);
+      const body = JSON.parse(String(init.body));
+      expect(typeof body.arguments.months).toBe("number");
+      expect(body.arguments.months).toBeGreaterThanOrEqual(1);
+      expect(body.arguments.months).toBeLessThanOrEqual(24);
+    });
+  });
 });

@@ -205,16 +205,32 @@ export type XMemoRestartRestoreResponse = {
 };
 
 export type XMemoLedgerMonthlySummaryParams = {
+  months?: number;
   month?: number;
   year?: number;
   currency?: string;
+  transaction_type?: string;
+};
+
+export type XMemoMonthlyLedgerItem = {
+  month: string;
+  currency: string;
+  expense_total?: string | number;
+  income_total?: string | number;
+  net_total?: string | number;
+  transaction_count?: number;
+  total?: string | number;
+  count?: number;
+  [key: string]: unknown;
 };
 
 export type XMemoLedgerMonthlySummary = {
-  month: string;
-  currency: string;
-  total: number;
-  count: number;
+  month?: string;
+  currency?: string;
+  total?: number;
+  count?: number;
+  summary?: XMemoMonthlyLedgerItem[];
+  [key: string]: unknown;
 };
 
 export type XMemoAuditEvent = {
@@ -267,6 +283,19 @@ function unwrapTimelineEvent(response: XMemoTimelineEventEnvelope): XMemoTimelin
     result?: XMemoTimelineEvent;
   };
   return envelope.event ?? envelope.timeline_event ?? envelope.result ?? (response as XMemoTimelineEvent);
+}
+
+function unwrapLedgerMonthlySummary(response: unknown): XMemoLedgerMonthlySummary {
+  if (
+    response &&
+    typeof response === "object" &&
+    "result" in response &&
+    response.result &&
+    typeof response.result === "object"
+  ) {
+    return response.result as XMemoLedgerMonthlySummary;
+  }
+  return (response ?? {}) as XMemoLedgerMonthlySummary;
 }
 
 // ---------------------------------------------------------------------------
@@ -782,15 +811,46 @@ export class XMemoClient {
     params?: XMemoLedgerMonthlySummaryParams,
     signal?: AbortSignal,
   ): Promise<XMemoLedgerMonthlySummary> {
-    const query = this.buildSearchParams({
-      month: params?.month,
-      year: params?.year,
-      currency: params?.currency,
-    });
-    return this.request<XMemoLedgerMonthlySummary>(`/v1/me/ledger/monthly-summary${query}`, {
-      method: "GET",
+    const args: Record<string, unknown> = {};
+
+    let effectiveMonths: number | undefined;
+    if (typeof params?.months === "number" && Number.isInteger(params.months)) {
+      effectiveMonths = params.months;
+    } else if (typeof params?.month === "number" || typeof params?.year === "number") {
+      const now = new Date();
+      const targetYear = typeof params?.year === "number" ? params.year : now.getFullYear();
+      const targetMonth = typeof params?.month === "number" ? params.month : now.getMonth() + 1;
+      const diff = (now.getFullYear() - targetYear) * 12 + (now.getMonth() + 1 - targetMonth);
+      effectiveMonths = Math.max(1, Math.min(24, diff + 1));
+    } else {
+      effectiveMonths = 6;
+    }
+
+    if (effectiveMonths !== undefined) {
+      args.months = Math.max(1, Math.min(24, effectiveMonths));
+    }
+    if (typeof params?.currency === "string" && params.currency.trim()) {
+      args.currency = params.currency.trim().toUpperCase();
+    }
+    if (typeof params?.transaction_type === "string" && params.transaction_type.trim()) {
+      args.transaction_type = params.transaction_type.trim().toLowerCase();
+    }
+
+    const payload = {
+      operation: "ledger-summary",
+      arguments: args,
+    };
+
+    const res = await this.request<unknown>("/v1/skill/operations", {
+      method: "POST",
+      body: JSON.stringify(payload),
+      headers: {
+        "Content-Type": "application/json",
+      },
       signal,
     });
+
+    return unwrapLedgerMonthlySummary(res);
   }
 
   async getAuditEvents(

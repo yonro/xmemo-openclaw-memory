@@ -1713,9 +1713,18 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
       label: "XMemo Ledger Monthly Summary",
       description: "Fetch a monthly summary from the XMemo ledger.",
       parameters: Type.Object({
-        month: Type.Optional(Type.Integer({ description: "Month (1-12)" })),
-        year: Type.Optional(Type.Integer({ description: "Year" })),
+        months: Type.Optional(
+          Type.Integer({
+            description: "Number of rolling months to summarize (1-24, default: 6)",
+            default: 6,
+          }),
+        ),
+        month: Type.Optional(Type.Integer({ description: "Specific calendar month (1-12, legacy alias)" })),
+        year: Type.Optional(Type.Integer({ description: "Specific calendar year (legacy alias)" })),
         currency: Type.Optional(Type.String({ description: "Currency code (e.g. CNY)" })),
+        transaction_type: Type.Optional(
+          Type.String({ description: "Filter by transaction type (e.g. expense, income)" }),
+        ),
       }),
       async execute(_toolCallId, params, signal) {
         const client = buildClient(api);
@@ -1724,31 +1733,101 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
             content: [
               { type: "text", text: "XMemo is not configured. Set XMEMO_KEY to enable ledger summary." },
             ],
-            details: { unavailable: true },
+            details: { unavailable: true, errorType: "not_configured" },
           };
         }
 
         const raw = asToolParamsRecord(params);
-        const now = new Date();
         try {
           const summary = await client.getLedgerMonthlySummary(
             {
-              month: typeof raw.month === "number" ? raw.month : now.getMonth() + 1,
-              year: typeof raw.year === "number" ? raw.year : now.getFullYear(),
+              months: typeof raw.months === "number" ? raw.months : undefined,
+              month: typeof raw.month === "number" ? raw.month : undefined,
+              year: typeof raw.year === "number" ? raw.year : undefined,
               currency: typeof raw.currency === "string" ? raw.currency : undefined,
+              transaction_type: typeof raw.transaction_type === "string" ? raw.transaction_type : undefined,
             },
             signal,
           );
-          return {
-            content: [
-              {
-                type: "text",
-                text: `XMemo ledger summary for ${summary.month}: ${summary.total} ${summary.currency} across ${summary.count} transactions.`,
+
+          if (Array.isArray(summary.summary) && summary.summary.length > 0) {
+            const lines = summary.summary.map((item) => {
+              const monthStr = item.month || "(unknown)";
+              const curr = item.currency || summary.currency || "CNY";
+              const exp = item.expense_total !== undefined ? `Expense: ${item.expense_total} ${curr}` : null;
+              const inc = item.income_total !== undefined ? `Income: ${item.income_total} ${curr}` : null;
+              const net = item.net_total !== undefined ? `Net: ${item.net_total} ${curr}` : null;
+              const total = item.total !== undefined ? `Total: ${item.total} ${curr}` : null;
+              const countNum = item.transaction_count ?? item.count;
+              const count = countNum !== undefined ? `${countNum} txs` : "";
+              const parts = [total, exp, inc, net, count].filter(Boolean);
+              return `- ${monthStr} (${curr}): ${parts.join(" | ")}`;
+            });
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `XMemo Ledger Monthly Summary (${summary.summary.length} month${summary.summary.length === 1 ? "" : "s"}):\n${lines.join("\n")}`,
+                },
+              ],
+              details: {
+                ...summary,
+                count: summary.count ?? summary.summary.length,
               },
-            ],
-            details: summary,
+            };
+          }
+
+          if (summary.total !== undefined || summary.count !== undefined) {
+            const total = summary.total ?? 0;
+            const count = summary.count ?? 0;
+            const curr = summary.currency ?? "CNY";
+            let monthStr: string;
+            if (summary.year && summary.month) {
+              monthStr = `${summary.year}-${String(summary.month).padStart(2, "0")}`;
+            } else if (typeof summary.month === "string" && summary.month.includes("-")) {
+              monthStr = summary.month;
+            } else if (raw.month) {
+              const y = raw.year ?? new Date().getFullYear();
+              monthStr = `${y}-${String(raw.month).padStart(2, "0")}`;
+            } else if (summary.month !== undefined) {
+              monthStr = String(summary.month);
+            } else {
+              monthStr = "current period";
+            }
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `XMemo ledger summary for ${monthStr}: ${total} ${curr} across ${count} transaction${count === 1 ? "" : "s"}.`,
+                },
+              ],
+              details: summary,
+            };
+          }
+
+          return {
+            content: [{ type: "text", text: "No XMemo ledger transactions found for the requested period." }],
+            details: {
+              ...summary,
+              count: summary.count ?? (Array.isArray(summary.summary) ? summary.summary.length : 0),
+            },
           };
         } catch (error) {
+          if (
+            (error instanceof XMemoClientError && error.status === 403) ||
+            (error instanceof Error && error.message.includes("403"))
+          ) {
+            const msg = "XMemo ledger summary failed: Permission denied (403). The 'ledger:read' scope is required. Please re-authorize or issue an API key with ledger:read scope.";
+            return {
+              content: [{ type: "text", text: msg }],
+              details: {
+                error: error instanceof Error ? error.message : String(error),
+                errorType: "auth",
+                status: 403,
+                requires_scope: "ledger:read",
+              },
+            };
+          }
           return buildErrorResult(error);
         }
       },
