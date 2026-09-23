@@ -331,6 +331,7 @@
     "recallMaxTokens": {
       "label": "Recall Max Tokens",
       "help": "Maximum token budget for the recalled context package.",
+      "sensitive": false,
       "advanced": true,
       "placeholder": "12000"
     }

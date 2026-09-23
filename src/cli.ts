@@ -229,8 +229,11 @@ export type DeviceLoginOptions = {
   scopes?: string[];
   loginTimeoutMs?: number;
   pollTimeoutMs?: number;
+  /** @deprecated Browser auto-open has been removed for security reasons. Please open the authorization URL manually. */
   openBrowser?: boolean;
   dryRun?: boolean;
+  fetchFn?: typeof fetch;
+  sleepFn?: (ms: number) => Promise<void>;
 };
 
 export async function requestDeviceLoginStart(
@@ -319,33 +322,16 @@ export async function pollDeviceLoginToken(
   throw new Error("Device authorization expired before approval was received.");
 }
 
-export function tryOpenBrowser(url: string): void {
-  try {
-    const cmd =
-      process.platform === "darwin"
-        ? `open "${url}"`
-        : process.platform === "win32"
-        ? `start "" "${url}"`
-        : `xdg-open "${url}"`;
-    import("node:child_process")
-      .then(({ exec }) => {
-        exec(cmd, () => {});
-      })
-      .catch(() => {});
-  } catch {
-    // Best-effort
-  }
-}
-
 export async function runDeviceLoginCommand(
   api: OpenClawPluginApi,
   opts: DeviceLoginOptions = {},
 ): Promise<string | undefined> {
   const cfg = resolveXMemoMemoryConfig(api.config);
   const baseUrl = opts.baseUrl || cfg.baseUrl || "https://xmemo.dev";
+  const fetchFn = opts.fetchFn ?? fetch;
 
   console.log(`Requesting authorization from ${baseUrl}...`);
-  const start = await requestDeviceLoginStart(baseUrl, opts.scopes);
+  const start = await requestDeviceLoginStart(baseUrl, opts.scopes, fetchFn);
 
   const verifyUrl = start.verification_uri_complete || start.verification_uri;
   console.log("\n" + "=".repeat(64));
@@ -357,15 +343,13 @@ export async function runDeviceLoginCommand(
   console.log("Waiting for confirmation in browser... (Press Ctrl+C to cancel)");
   console.log("=".repeat(64) + "\n");
 
-  if (opts.openBrowser !== false) {
-    tryOpenBrowser(verifyUrl);
-  }
-
   const token = await pollDeviceLoginToken(
     baseUrl,
     start.device_code,
     start,
     opts.pollTimeoutMs ?? opts.loginTimeoutMs,
+    fetchFn,
+    opts.sleepFn,
   );
 
   if (opts.dryRun) {
@@ -421,7 +405,7 @@ export function registerXMemoCli(api: OpenClawPluginApi): void {
         .option("--token <token>", "XMemo API key or token")
         .option("--stdin", "Read the XMemo API key from stdin")
         .option("--env <name>", "Use an environment SecretRef instead of storing a plaintext key")
-        .option("--no-open", "Do not automatically launch the browser")
+        .option("--no-open", "Do not automatically launch the browser (deprecated)")
         .option("--scopes <scopes>", "Comma-separated scopes")
         .option("--base-url <url>", "XMemo service URL override")
         .option("--dry-run", "Show what would change without writing config")
@@ -447,7 +431,7 @@ export function registerXMemoCli(api: OpenClawPluginApi): void {
               await runDeviceLoginCommand(api, {
                 baseUrl: opts.baseUrl,
                 scopes,
-                openBrowser: opts.open !== false,
+                openBrowser: false,
                 dryRun: opts.dryRun,
               });
             } catch (error) {

@@ -2,13 +2,14 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   applyXMemoKeyConfig,
   buildXMemoEnvCredential,
   pollDeviceLoginToken,
   requestDeviceLoginStart,
   resolveKeyCredentialFromInput,
+  runDeviceLoginCommand,
   saveXMemoSharedCredential,
   saveXMemoKeyConfig,
   type XMemoKeyCredential,
@@ -252,6 +253,73 @@ describe("xmemo CLI key config helpers", () => {
           async () => {},
         ),
       ).rejects.toThrow("Device authorization failed: User rejected login");
+    });
+
+    it("runDeviceLoginCommand logs verifyUrl and user_code without invoking child processes or auto-opening browser", async () => {
+      const logs: string[] = [];
+      const logSpy = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+        logs.push(args.map(String).join(" "));
+      });
+
+      const mockFetch = async (input: unknown) => {
+        const urlStr = String(input);
+        if (urlStr.endsWith("/api/v1/auth/device/start")) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              device_code: "dev_test_abc",
+              user_code: "CODE-XYZ-123",
+              verification_uri: "https://xmemo.dev/device-login",
+              verification_uri_complete: "https://xmemo.dev/device-login?user_code=CODE-XYZ-123",
+              expires_in: 300,
+              interval: 1,
+            }),
+          } as Response;
+        }
+        if (urlStr.endsWith("/api/v1/auth/device/token")) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              access_token: "xmemo_test_device_token",
+            }),
+          } as Response;
+        }
+        throw new Error(`Unexpected url: ${urlStr}`);
+      };
+
+      const mockApi = {
+        config: {},
+      } as unknown as Parameters<typeof runDeviceLoginCommand>[0];
+
+      try {
+        const token = await runDeviceLoginCommand(mockApi, {
+          dryRun: true,
+          fetchFn: mockFetch as unknown as typeof fetch,
+          sleepFn: async () => {},
+        });
+
+        expect(token).toBe("xmemo_test_device_token");
+
+        const combinedOutput = logs.join("\n");
+        expect(combinedOutput).toContain("https://xmemo.dev/device-login?user_code=CODE-XYZ-123");
+        expect(combinedOutput).toContain("CODE-XYZ-123");
+        expect(combinedOutput).toContain("Open this URL in your browser");
+        expect(combinedOutput).toContain("Confirm the code in your browser");
+
+        // Verify tryOpenBrowser is completely removed and cli.ts has zero child_process references
+        const cliModule = await import("./cli.js");
+        expect((cliModule as Record<string, unknown>).tryOpenBrowser).toBeUndefined();
+
+        const cliSource = readFileSync(new URL("./cli.ts", import.meta.url), "utf-8");
+        expect(cliSource).not.toContain("child_process");
+        expect(cliSource).not.toContain("tryOpenBrowser");
+        expect(cliSource).not.toContain("exec(");
+        expect(cliSource).not.toContain("spawn(");
+      } finally {
+        logSpy.mockRestore();
+      }
     });
   });
 });
