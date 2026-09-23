@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.18] - 2026-09-23
+
+### Security
+
+- **移除 login 时自动打开浏览器**: 此前把服务端返回的授权 URL 拼进 shell 命令执行，存在命令注入风险（1.0.16/1.0.17 受影响）。彻底移除 `node:child_process` 依赖，改为仅在控制台打印授权链接与验证码供用户手动打开。
+- **保留 `--no-open` 兼容参数**: `--no-open` 选项保留为无操作兼容参数，避免既有脚本报错。
+
+### Fixed
+
+- **配置敏感属性修正**: `openclaw.plugin.json` 中的 `recallMaxTokens` 显式设置 `"sensitive": false`，防止平台命名模式将其误标为敏感凭证。
+
 ## [1.0.17] - 2026-09-23
 
 ### Fixed
