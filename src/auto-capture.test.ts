@@ -176,6 +176,89 @@ describe("xmemo auto-capture", () => {
     expect(JSON.parse(String(requestInit(2, fetchMock.mock.calls).body)).idempotency_key).toBe(firstKey);
   });
 
+  it("resumes a pending capture after history compaction with the same key", async () => {
+    fetchMock
+      .mockResolvedValueOnce(mockResponse({ error: "temporarily unavailable" }, 503))
+      .mockImplementation(async () => mockResponse({ id: "mem-1" }));
+    const pending = { role: "user", content: "I prefer dark mode" };
+
+    await capture([
+      { role: "user", content: "hello" },
+      { role: "assistant", content: "hi" },
+      pending,
+    ]);
+    const firstKey = idempotencyKey(0, fetchMock.mock.calls);
+
+    await capture([pending, { role: "assistant", content: "ok" }]);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(String(requestInit(1, fetchMock.mock.calls).body)).content).toBe(pending.content);
+    expect(idempotencyKey(1, fetchMock.mock.calls)).toBe(firstKey);
+  });
+
+  it("keeps the idempotency key after a lost response and history compaction", async () => {
+    fetchMock
+      .mockRejectedValueOnce(new TypeError("fetch failed: response lost"))
+      .mockImplementation(async () => mockResponse({ id: "mem-1" }));
+    const pending = { role: "user", content: "I prefer dark mode" };
+
+    await capture([
+      { role: "user", content: "hello" },
+      { role: "assistant", content: "hi" },
+      pending,
+    ]);
+    const firstKey = idempotencyKey(0, fetchMock.mock.calls);
+
+    await capture([pending, { role: "assistant", content: "ok" }]);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(idempotencyKey(1, fetchMock.mock.calls)).toBe(firstKey);
+  });
+
+  it("skips permanent 4xx failures visibly and continues with later captures", async () => {
+    fetchMock.mockImplementation(async (_url: unknown, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as { content: string };
+      return body.content.startsWith("POISON")
+        ? mockResponse({ error: "invalid" }, 400)
+        : mockResponse({ id: "mem-1" });
+    });
+    const messages = [{ role: "user", content: "POISON I prefer x" }];
+
+    await capture(messages);
+    for (let index = 0; index < 5; index += 1) {
+      messages.push({ role: "user", content: "I prefer item " + index });
+      await capture([...messages]);
+    }
+
+    const bodies = fetchMock.mock.calls.map((_, index) =>
+      JSON.parse(String(requestInit(index, fetchMock.mock.calls).body)).content as string,
+    );
+    expect(bodies.filter((content) => content.startsWith("I prefer item"))).toHaveLength(5);
+    const terminalSkip = logs
+      .map((entry) => (entry.level === "warn" ? JSON.parse(entry.message) as Record<string, unknown> : null))
+      .find((entry) => entry?.event === "xmemo_auto_capture_terminal_skip");
+    expect(terminalSkip).toMatchObject({
+      status: 400,
+    });
+    expect(terminalSkip?.terminal_skip_count).toEqual(expect.any(Number));
+    expect(terminalSkip?.terminal_skip_count as number).toBeGreaterThan(0);
+    expect(terminalSkip?.idempotency_key).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("logs authentication failures distinctly while keeping the capture pending", async () => {
+    fetchMock.mockResolvedValue(mockResponse({ error: "unauthorized" }, 401));
+
+    await capture([{ role: "user", content: "I prefer dark mode" }]);
+
+    const warning = logs.find((entry) => entry.level === "warn");
+    expect(warning).toBeDefined();
+    expect(JSON.parse(warning!.message)).toMatchObject({
+      event: "xmemo_auto_capture_auth_blocked",
+      status: 401,
+      retryable: true,
+    });
+  });
+
   it("keeps the idempotency key stable after a session cursor is reset", async () => {
     const messages = [{ role: "user", content: "I prefer dark mode" }];
     fetchMock.mockImplementation(async () => mockResponse({ id: "mem-1" }));
@@ -215,13 +298,29 @@ describe("xmemo auto-capture", () => {
     ]);
   });
 
-  it("rejects negated, quoted, and temporary capture requests", async () => {
+  it("rejects negated, quoted, and temporary capture requests in English and Chinese", async () => {
     await capture([
       { role: "user", content: "请不要保存这件事，我喜欢深色模式。" },
       { role: "user", content: "朋友说：“请记住我喜欢深色模式。”" },
       { role: "user", content: "今天临时需要深色模式，请记住到今天结束。" },
       { role: "user", content: "我需要一辆车。" },
       { role: "user", content: "Please don't save this: I prefer dark mode." },
+    ]);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects Japanese and Korean negated, quoted, and temporary capture requests", async () => {
+    await capture([
+      { role: "user", content: "これは保存しないでください。ダークモードが好みです。" },
+      { role: "user", content: "これは記録しないで。今後はダークモードを使って。" },
+      { role: "user", content: "友人は「ダークモードが好みです」と言いました。" },
+      { role: "user", content: "今日だけダークモードを使ってください。今後はこの設定を覚えて。" },
+      { role: "user", content: "이건 기억하지 마세요. 저는 다크 모드를 좋아해요." },
+      { role: "user", content: "저장하지 마세요. 앞으로 다크 모드를 사용해 주세요." },
+      { role: "user", content: "이건 잊어 줘. 저는 다크 모드를 좋아해요." },
+      { role: "user", content: "친구는 \"저는 다크 모드를 좋아해요\"라고 했어요." },
+      { role: "user", content: "오늘만 다크 모드를 사용해 주세요. 앞으로 이 설정을 기억해 주세요." },
     ]);
 
     expect(fetchMock).not.toHaveBeenCalled();

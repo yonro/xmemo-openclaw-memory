@@ -7,22 +7,26 @@
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/memory-core-host-runtime-core";
 import { createHash } from "node:crypto";
-import { XMemoClient } from "./client.js";
+import { XMemoClient, XMemoClientError } from "./client.js";
 import { resolveXMemoMemoryConfig, type XMemoMemoryConfig } from "./config.js";
 import { resolveLivePluginConfigObject } from "./openclaw-compat.js";
 
 type AutoCaptureCursor = {
   nextIndex: number;
   lastMessageFingerprint?: string;
+  lastMessageId?: string;
+  lastMessageOccurrence?: number;
   nextTextIndex?: number;
 };
 
 type AutoCapturePosition = {
   messageIndex: number;
   textIndex: number;
+  messageOccurrence: number;
 };
 
 const CURSORS = new Map<string, AutoCaptureCursor>();
+let terminalCaptureSkipCount = 0;
 
 const LEADING_TIMESTAMP_RE = /^\[[A-Za-z]{3} \d{4}-\d{2}-\d{2} \d{2}:\d{2}[^\]]*\] */;
 const MEDIA_ATTACHED_RE = /\[media attached(?:\s+\d+\/\d+)?:[^\]]*\]/gi;
@@ -51,7 +55,7 @@ const MEMORY_TRIGGERS = [
 ];
 
 const NEGATED_CAPTURE_RE =
-  /\b(?:don't|do not|please don't)\s+(?:remember|save|store|keep this)\b|(?:不要(?:再)?(?:保存|记录|記錄|记住|記下)|别(?:保存|记录|記錄|记|記)|請勿(?:保存|記錄|記)|请勿(?:保存|记录|记))/iu;
+  /\b(?:don't|do not|please don't)\s+(?:remember|save|store|keep this)\b|(?:不要(?:再)?(?:保存|记录|記錄|记住|記下)|别(?:保存|记录|記錄|记|記)|請勿(?:保存|記錄|記)|请勿(?:保存|记录|记))|(?:保存|記錄|記録|記憶)しないで(?:ください)?|覚えないで(?:ください)?|(?:기억|저장|기록)하지\s*마(?:세요)?|잊어\s*(?:줘|버려)/iu;
 const TEMPORARY_REQUEST_RE =
   /\b(?:temporary|temporarily|for now|just for now|only today|for today)\b|(?:今天|今日).{0,12}(?:临时|暫時|暂时)|(?:临时|暫時|暂时).{0,12}(?:需要|要用|要|使用)|(?:今日だけ|一時的に|とりあえず|오늘만|임시로|일시적으로)/iu;
 const QUOTED_TEXT_RE = /"[^"\n]*"|'[^'\n]*'|“[^”]*”|‘[^’]*’|「[^」]*」|『[^』]*』|《[^》]*》/gu;
@@ -73,6 +77,76 @@ function messageFingerprint(message: unknown): string {
   } catch {
     return `${String(obj.role)}:${String(obj.content)}`;
   }
+}
+
+function messageId(message: unknown): string | undefined {
+  const obj = asRecord(message);
+  if (!obj) {
+    return undefined;
+  }
+  for (const key of ["id", "messageId", "message_id"]) {
+    const value = obj[key];
+    if (typeof value === "string" && value.length > 0) {
+      return key + ":" + value;
+    }
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return key + ":" + value;
+    }
+  }
+  return undefined;
+}
+
+function messageOccurrence(
+  messages: unknown[],
+  index: number,
+  fingerprint = messageFingerprint(messages[index]),
+): number {
+  let occurrence = 0;
+  for (let previous = 0; previous < index; previous += 1) {
+    if (messageFingerprint(messages[previous]) === fingerprint) {
+      occurrence += 1;
+    }
+  }
+  return occurrence;
+}
+
+function findCursorMessageIndex(messages: unknown[], cursor: AutoCaptureCursor): number {
+  if (cursor.lastMessageId) {
+    const byId = messages.findIndex((message) => messageId(message) === cursor.lastMessageId);
+    if (byId >= 0) {
+      return byId;
+    }
+  }
+  if (!cursor.lastMessageFingerprint) {
+    return -1;
+  }
+
+  const matches: number[] = [];
+  for (let index = 0; index < messages.length; index += 1) {
+    if (messageFingerprint(messages[index]) === cursor.lastMessageFingerprint) {
+      matches.push(index);
+    }
+  }
+  if (matches.length === 0) {
+    return -1;
+  }
+  if (cursor.lastMessageOccurrence !== undefined) {
+    if (matches[cursor.lastMessageOccurrence] !== undefined) {
+      return matches[cursor.lastMessageOccurrence];
+    }
+    // History compaction can remove earlier duplicate messages. For a pending
+    // candidate, prefer the surviving matching message so the write is retried.
+    if (cursor.nextTextIndex !== undefined) {
+      return matches[matches.length - 1];
+    }
+  }
+  if (cursor.nextTextIndex === undefined && cursor.nextIndex > 0) {
+    const previous = cursor.nextIndex - 1;
+    if (messageFingerprint(messages[previous]) === cursor.lastMessageFingerprint) {
+      return previous;
+    }
+  }
+  return matches[matches.length - 1];
 }
 
 function extractUserTextContent(message: unknown): string[] {
@@ -104,33 +178,31 @@ function resolveStartPosition(
   cursor: AutoCaptureCursor | undefined,
 ): AutoCapturePosition {
   if (!cursor) {
-    return { messageIndex: 0, textIndex: 0 };
+    return { messageIndex: 0, textIndex: 0, messageOccurrence: 0 };
   }
   if (cursor.lastMessageFingerprint && cursor.nextIndex > 0) {
-    if (
-      cursor.nextTextIndex !== undefined &&
-      cursor.nextIndex < messages.length &&
-      messageFingerprint(messages[cursor.nextIndex]) === cursor.lastMessageFingerprint
-    ) {
-      return { messageIndex: cursor.nextIndex, textIndex: cursor.nextTextIndex };
+    const index = findCursorMessageIndex(messages, cursor);
+    if (index >= 0) {
+      const pending = cursor.nextTextIndex !== undefined;
+      return {
+        messageIndex: pending ? index : index + 1,
+        textIndex: pending ? cursor.nextTextIndex ?? 0 : 0,
+        messageOccurrence:
+          pending
+            ? cursor.lastMessageOccurrence ?? messageOccurrence(messages, index)
+            : messageOccurrence(messages, index + 1),
+      };
     }
-    if (
-      cursor.nextTextIndex === undefined &&
-      messageFingerprint(messages[cursor.nextIndex - 1]) === cursor.lastMessageFingerprint
-    ) {
-      return { messageIndex: cursor.nextIndex, textIndex: 0 };
-    }
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      if (messageFingerprint(messages[index]) === cursor.lastMessageFingerprint) {
-        return { messageIndex: index + 1, textIndex: 0 };
-      }
-    }
-    return { messageIndex: 0, textIndex: 0 };
+    return { messageIndex: 0, textIndex: 0, messageOccurrence: 0 };
   }
   if (cursor.nextIndex <= messages.length) {
-    return { messageIndex: cursor.nextIndex, textIndex: 0 };
+    return {
+      messageIndex: cursor.nextIndex,
+      textIndex: 0,
+      messageOccurrence: messageOccurrence(messages, cursor.nextIndex),
+    };
   }
-  return { messageIndex: 0, textIndex: 0 };
+  return { messageIndex: 0, textIndex: 0, messageOccurrence: 0 };
 }
 
 function sanitizeForCapture(text: string): string {
@@ -227,19 +299,38 @@ function captureIdempotencyKey(
   agentInstanceId: string,
   cursorKey: string | undefined,
   message: unknown,
-  messageIndex: number,
+  occurrence: number,
   textIndex: number,
 ): string {
+  const stableId = messageId(message);
+  const identity = stableId
+    ? "id:" + stableId
+    : "fingerprint:" + messageFingerprint(message) + "\0" + occurrence;
   return createHash("sha256")
     .update("openclaw-auto-capture\0")
     .update(agentInstanceId)
     .update("\0")
     .update(cursorKey ?? "")
     .update("\0")
-    .update(messageFingerprint(message))
-    .update(`\0${messageIndex}`)
+    .update(identity)
     .update(`\0${textIndex}`)
     .digest("hex");
+}
+
+type CaptureFailure =
+  | { kind: "permanent"; status: number }
+  | { kind: "auth"; status: 401 | 403 }
+  | { kind: "retryable"; status?: number };
+
+function classifyCaptureFailure(error: unknown): CaptureFailure {
+  const status = error instanceof XMemoClientError ? error.status : undefined;
+  if (status === 401 || status === 403) {
+    return { kind: "auth", status };
+  }
+  if (status !== undefined && status >= 400 && status < 500 && status !== 408 && status !== 429) {
+    return { kind: "permanent", status };
+  }
+  return { kind: "retryable", status };
 }
 
 function detectCategory(text: string): string {
@@ -325,6 +416,11 @@ export function registerXMemoAutoCapture(api: OpenClawPluginApi): void {
     for (let index = startPosition.messageIndex; index < event.messages.length; index += 1) {
       const message = event.messages[index];
       const fingerprint = messageFingerprint(message);
+      const occurrence =
+        index === startPosition.messageIndex
+          ? startPosition.messageOccurrence
+          : messageOccurrence(event.messages, index, fingerprint);
+      const stableId = messageId(message);
       const textBlocks = extractUserTextContent(message);
       const firstTextIndex = index === startPosition.messageIndex ? startPosition.textIndex : 0;
 
@@ -345,6 +441,8 @@ export function registerXMemoAutoCapture(api: OpenClawPluginApi): void {
             CURSORS.set(cursorKey, {
               nextIndex: index,
               lastMessageFingerprint: fingerprint,
+              lastMessageId: stableId,
+              lastMessageOccurrence: occurrence,
               nextTextIndex: textIndex,
             });
           }
@@ -354,6 +452,13 @@ export function registerXMemoAutoCapture(api: OpenClawPluginApi): void {
         capturableSeen += 1;
 
         const category = detectCategory(sanitized);
+        const idempotencyKey = captureIdempotencyKey(
+          cfg.agentInstanceId,
+          cursorKey,
+          message,
+          occurrence,
+          textIndex,
+        );
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 10_000);
         try {
@@ -371,16 +476,41 @@ export function registerXMemoAutoCapture(api: OpenClawPluginApi): void {
               source: "openclaw-auto-capture",
               metadata: { category },
             },
-            captureIdempotencyKey(cfg.agentInstanceId, cursorKey, message, index, textIndex),
+            idempotencyKey,
             controller.signal,
           );
           stored += 1;
         } catch (err) {
-          api.logger.warn(`xmemo-memory: auto-capture store failed: ${String(err)}`);
+          const failure = classifyCaptureFailure(err);
+          if (failure.kind === "permanent") {
+            terminalCaptureSkipCount += 1;
+            api.logger.warn(
+              JSON.stringify({
+                event: "xmemo_auto_capture_terminal_skip",
+                status: failure.status,
+                idempotency_key: idempotencyKey,
+                terminal_skip_count: terminalCaptureSkipCount,
+              }),
+            );
+            continue;
+          }
+          api.logger.warn(
+            JSON.stringify({
+              event:
+                failure.kind === "auth"
+                  ? "xmemo_auto_capture_auth_blocked"
+                  : "xmemo_auto_capture_retry_deferred",
+              status: failure.status ?? null,
+              idempotency_key: idempotencyKey,
+              retryable: true,
+            }),
+          );
           if (cursorKey) {
             CURSORS.set(cursorKey, {
               nextIndex: index,
               lastMessageFingerprint: fingerprint,
+              lastMessageId: stableId,
+              lastMessageOccurrence: occurrence,
               nextTextIndex: textIndex,
             });
           }
@@ -395,6 +525,8 @@ export function registerXMemoAutoCapture(api: OpenClawPluginApi): void {
         CURSORS.set(cursorKey, {
           nextIndex: index + 1,
           lastMessageFingerprint: fingerprint,
+          lastMessageId: stableId,
+          lastMessageOccurrence: occurrence,
         });
       }
       if (stoppedAtPendingCapture) break;
