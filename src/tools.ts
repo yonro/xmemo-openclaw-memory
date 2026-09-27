@@ -4,7 +4,6 @@ import { Type } from "typebox";
 import {
   XMemoClient,
   XMemoClientError,
-  globalBreaker,
   type XMemoReminderRequest,
   type XMemoTimelineEventRequest,
   type XMemoUpdateMemoryRequest,
@@ -14,6 +13,7 @@ import { XMemoLocalCache } from "./local-cache.js";
 import { escapeMemoryForPrompt } from "./memory-text.js";
 import { asToolParamsRecord } from "./openclaw-compat.js";
 import { ResilientXMemoClient } from "./resilient-client.js";
+import { classifyMemorySearchFailure, filterMemorySearchItems } from "./search-policy.js";
 import { XMemoSearchManager } from "./search-manager.js";
 import { setXMemoStatusProvider } from "./prompt-section.js";
 import {
@@ -93,42 +93,19 @@ function buildErrorResult(error: unknown): AgentToolResult<unknown> {
   };
 }
 
-type XMemoFailureErrorType =
-  | "not_configured"
-  | "auth"
-  | "request"
-  | "timeout"
-  | "network"
-  | "unavailable"
-  | "unknown";
-
-function classifyXMemoError(error: unknown): { errorType: XMemoFailureErrorType; status?: number } {
-  if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) {
-    return { errorType: "timeout" };
-  }
-  if (
-    error instanceof Error &&
-    /fetch|network|ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|UND_ERR/i.test(error.message)
-  ) {
-    return { errorType: "network" };
-  }
-  if (error instanceof XMemoClientError && error.status !== undefined) {
-    if (error.status === 401 || error.status === 403) {
-      return { errorType: "auth", status: error.status };
-    }
-    if (error.status >= 400 && error.status < 500) {
-      return { errorType: "request", status: error.status };
-    }
-    return { errorType: "unavailable", status: error.status };
-  }
-  return { errorType: "unknown" };
-}
-
-function buildUnavailableResult(error: unknown): AgentToolResult<unknown> {
-  const { errorType, status } = classifyXMemoError(error);
+function buildUnavailableResult(
+  error: unknown,
+  breakerState: "closed" | "open" | "half-open" = "closed",
+): AgentToolResult<unknown> {
+  const { errorType, status } = classifyMemorySearchFailure(error);
   const statusSuffix = status !== undefined ? ` ${status}` : "";
-  const breakerState = globalBreaker.state;
   const breakerNote = breakerState === "open" ? " Circuit breaker is open; retries paused." : "";
+  if (errorType === "cancelled") {
+    return {
+      content: [{ type: "text", text: "XMemo memory operation was cancelled." }],
+      details: { unavailable: false, errorType, breakerState },
+    };
+  }
   if (errorType === "request") {
     return {
       content: [
@@ -206,7 +183,7 @@ function parseUpdateMemoryId(
 
 function formatMemorySearchResults(
   query: string,
-  results: Array<{ score: number; snippet: string; path?: string }>,
+  results: Array<{ score: number; scoreKnown: boolean; snippet: string; path?: string }>,
   cacheMeta?: { fromCache: boolean; isFresh: boolean },
 ): string {
   const cacheNotice = cacheMeta?.fromCache
@@ -217,7 +194,8 @@ function formatMemorySearchResults(
   }
   const lines = results.map((r, i) => {
     const pathNote = r.path ? ` (path: ${r.path})` : "";
-    return `${i + 1}. [${(r.score * 100).toFixed(0)}%]${pathNote} ${escapeMemoryForPrompt(r.snippet)}`;
+    const scoreLabel = r.scoreKnown ? `[${(r.score * 100).toFixed(0)}%]` : "[score unknown]";
+    return `${i + 1}. ${scoreLabel}${pathNote} ${escapeMemoryForPrompt(r.snippet)}`;
   });
   return [
     `<xmemo-memories query="${escapeMemoryForPrompt(query)}">`,
@@ -316,6 +294,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
         query: Type.String({ description: "Search query" }),
         maxResults: optionalPositiveInteger("Max results (default: 8)"),
         minResults: Type.Optional(Type.Integer({ description: "Min results threshold for L2 fallback (default: 3)", minimum: 1 })),
+        minScore: Type.Optional(Type.Number({ description: "Minimum real XMemo similarity score (0-1); unknown scores are excluded", minimum: 0, maximum: 1 })),
         debug: Type.Optional(Type.Boolean({ description: "Return retrieval trace (default: false)" })),
       }),
       async execute(_toolCallId, params, signal) {
@@ -337,6 +316,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
         const query = typeof raw.query === "string" ? raw.query.trim() : "";
         const maxResults = typeof raw.maxResults === "number" ? raw.maxResults : cfg.recallMaxItems;
         const minResults = typeof raw.minResults === "number" ? raw.minResults : 3;
+        const minScore = typeof raw.minScore === "number" && Number.isFinite(raw.minScore) ? raw.minScore : undefined;
         const debug = typeof raw.debug === "boolean" ? raw.debug : false;
 
         if (!query) {
@@ -352,6 +332,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
             bucket: cfg.readBucket,
             scope: cfg.readScope ?? null,
             teamId: cfg.teamId ?? null,
+            ...(minScore !== undefined ? { minScore } : {}),
           },
           strategies: [],
         };
@@ -363,6 +344,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
         type UnifiedResult = {
           id: string;
           score: number;
+          scoreKnown: boolean;
           snippet: string;
           path?: string;
           bucket: string;
@@ -383,6 +365,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
             maxItems: maxResults,
             maxTokens: cfg.recallMaxTokens,
             preferWorking: true,
+            minScore,
           }, signal);
 
           l1FromCache = fromCache;
@@ -394,14 +377,9 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           const items = response?.items ?? [];
           const contextFallbacks = contextTextSections(response?.context_text);
 
-          l1Items = items
-            .filter((item) => {
-              const status = stringField(item, "status");
-              return !status || status.toLowerCase() !== "deleted";
-            })
-            .map((item, index) => {
+          l1Items = filterMemorySearchItems(items, minScore)
+            .map(({ index, item, score, scoreKnown }) => {
               const id = stringField(item, "id") || "";
-              const score = typeof item.score === "number" ? item.score : Math.max(0.5, 0.95 - index * 0.05);
               const snippet = memorySearchSnippet(item, contextFallbacks[index]);
               const bucket = stringField(item, "bucket") ?? cfg.bucket;
               const itemPath = stringField(item, "path");
@@ -409,6 +387,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
               return {
                 id,
                 score,
+                scoreKnown,
                 snippet,
                 path: getPath,
                 bucket,
@@ -425,7 +404,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
             fromCache,
           });
         } catch (error: any) {
-          return buildUnavailableResult(error);
+          return buildUnavailableResult(error, resilient.circuitBreakerState);
         }
 
         let finalItems = [...l1Items];
@@ -450,6 +429,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
                 status: "active",
                 maxItems: maxResults,
                 path: candidatePath,
+                minScore,
               }, signal);
 
               if (fromCache) {
@@ -462,17 +442,16 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
               } | null;
               const memories = response?.results ?? [];
 
-              const l2Items = memories
-                .filter((m) => !m.status || m.status.toLowerCase() !== "deleted")
-                .map((m, index) => {
+              const l2Items = filterMemorySearchItems(memories, minScore)
+                .map(({ item: m, score, scoreKnown }) => {
                   const id = m.id || "";
-                  const score = typeof m.score === "number" ? m.score : Math.max(0.5, 0.8 - index * 0.05);
                   const snippet = m.content;
                   const bucket = m.bucket ?? cfg.bucket;
                   const getPath = m.path ? `${m.path}/${id}` : `${bucket}/${id}`;
                   return {
                     id,
                     score,
+                    scoreKnown,
                     snippet,
                     path: getPath,
                     bucket,
@@ -499,6 +478,10 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
               // Stop at the first candidate path that returns matches.
               if (l2Items.length > 0) break;
             } catch (error: any) {
+              const failure = classifyMemorySearchFailure(error);
+              if (failure.errorType === "auth" || failure.errorType === "timeout" || failure.errorType === "cancelled") {
+                return buildUnavailableResult(error, resilient.circuitBreakerState);
+              }
               trace.strategies.push({
                 name: "L2_search",
                 query,
@@ -557,6 +540,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
 
         const searchResults = finalItems.map(item => ({
           score: item.score,
+          scoreKnown: item.scoreKnown,
           snippet: item.snippet,
           path: item.path,
         }));
@@ -669,7 +653,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
               details: { error: "range_error", code: "range_error", path: relPath },
             };
           }
-          return buildUnavailableResult(error);
+          return buildUnavailableResult(error, resilient.circuitBreakerState);
         }
       },
     },
@@ -1534,7 +1518,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
             },
           };
         } catch (error) {
-          return buildUnavailableResult(error);
+          return buildUnavailableResult(error, resilient.circuitBreakerState);
         }
       },
     },

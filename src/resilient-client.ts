@@ -10,7 +10,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { XMemoClient, XMemoClientError, globalBreaker } from "./client.js";
+import { XMemoClient, XMemoClientError } from "./client.js";
 import { XMemoLocalCache } from "./local-cache.js";
 import type { XMemoMemoryConfig } from "./config.js";
 
@@ -96,6 +96,10 @@ export class ResilientXMemoClient {
     return this.client;
   }
 
+  get circuitBreakerState() {
+    return this.client.circuitBreakerState;
+  }
+
   /** Start periodic recovery and replay, including an immediate first pass. */
   startOutboxSync(options?: { intervalMs?: number; staleLockTimeoutMs?: number }): void {
     if (options?.intervalMs !== undefined) {
@@ -136,6 +140,7 @@ export class ResilientXMemoClient {
       maxItems?: number;
       maxTokens?: number;
       preferWorking?: boolean;
+      minScore?: number;
     },
     signal?: AbortSignal,
   ): Promise<{ result: unknown; fromCache: boolean; isFresh: boolean }> {
@@ -146,6 +151,7 @@ export class ResilientXMemoClient {
       teamId: params.teamId !== undefined ? params.teamId : (this.config.teamId ?? null),
       maxItems: params.maxItems ?? this.config.recallMaxItems,
       maxTokens: params.maxTokens ?? this.config.recallMaxTokens,
+      minScore: params.minScore,
     };
 
     // Keep cache available only as a fallback. Recall results can be partial, so
@@ -163,6 +169,7 @@ export class ResilientXMemoClient {
           max_items: params.maxItems ?? this.config.recallMaxItems,
           max_tokens: params.maxTokens ?? this.config.recallMaxTokens,
           prefer_working: params.preferWorking ?? true,
+          threshold: params.minScore,
         },
         signal,
       );
@@ -202,6 +209,7 @@ export class ResilientXMemoClient {
       status?: string;
       maxItems?: number;
       path?: string;
+      minScore?: number;
     },
     signal?: AbortSignal,
   ): Promise<{ result: unknown; fromCache: boolean; isFresh: boolean }> {
@@ -214,6 +222,7 @@ export class ResilientXMemoClient {
       ...(params.status ? { status: params.status } : {}),
       maxItems: params.maxItems ?? 10,
       path: params.path,
+      minScore: params.minScore,
     };
 
     // Keep cache available only as a fallback. Search results can be partial, so
@@ -231,6 +240,7 @@ export class ResilientXMemoClient {
           status: params.status,
           max_items: params.maxItems ?? 10,
           path: params.path,
+          threshold: params.minScore,
         },
         signal,
       );
@@ -271,7 +281,7 @@ export class ResilientXMemoClient {
     const idempotencyKey = randomUUID();
 
     // Check circuit breaker
-    if (globalBreaker.isOpen()) {
+    if (this.client.isCircuitOpen()) {
       return this._enqueueWrite(operation, endpoint, method, payload, idempotencyKey, "Circuit breaker is open");
     }
 
@@ -328,7 +338,7 @@ export class ResilientXMemoClient {
       if (pending.length === 0) return { synced: 0, failed: 0 };
 
       for (const record of pending) {
-        if (globalBreaker.isOpen()) break;
+        if (this.client.isCircuitOpen()) break;
         if (!this.cache.lockForProcessing(record.id)) continue;
 
         try {
@@ -354,7 +364,7 @@ export class ResilientXMemoClient {
           this._recordFailure(error);
           failed++;
 
-          if (globalBreaker.state === "open") break;
+          if (this.client.circuitBreakerState === "open") break;
         }
       }
     } finally {
@@ -397,7 +407,7 @@ export class ResilientXMemoClient {
   } {
     return {
       status: this._status,
-      breakerState: globalBreaker.state,
+      breakerState: this.client.circuitBreakerState,
       lastError: this._lastError,
       cacheStats: this.cache.getStats(),
     };
@@ -407,7 +417,7 @@ export class ResilientXMemoClient {
    * Generate a system-prompt-style status line for graceful degradation.
    */
   getPromptStatusLine(): string {
-    const state = globalBreaker.state;
+    const state = this.client.circuitBreakerState;
     if (this._status === "online" && state === "closed") {
       const queueNote = this._outboxStatusNote(this.cache.getStats());
       return `XMemo status: online. Memory recall and writes are operational.${queueNote}`;
@@ -501,7 +511,7 @@ export class ResilientXMemoClient {
 
   private _recordFailure(error: unknown): void {
     this._lastError = error instanceof Error ? error.message : String(error);
-    if (globalBreaker.state === "open") {
+    if (this.client.circuitBreakerState === "open") {
       this._status = "offline";
     } else {
       this._status = "degraded";
@@ -510,7 +520,7 @@ export class ResilientXMemoClient {
 
   private _triggerOutboxSync(): void {
     // Fire-and-forget background sync
-    if (globalBreaker.isOpen()) return;
+    if (this.client.isCircuitOpen()) return;
     void this.syncOutbox().catch(() => {});
   }
 

@@ -7,6 +7,7 @@ export type RetrievalTrace = {
     bucket?: string;
     scope?: string | null;
     teamId?: string | null;
+    minScore?: number;
   };
   fromCache?: boolean;
   isFresh?: boolean;

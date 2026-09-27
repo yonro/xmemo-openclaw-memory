@@ -156,7 +156,7 @@ describe("ResilientXMemoClient read cache policy", () => {
     }));
     writeFileSync(join(cacheDir, "write-outbox.json"), JSON.stringify({ version: 1, records }), "utf8");
     const client = buildClient(cacheDir);
-    vi.spyOn(globalBreaker, "isOpen").mockReturnValue(true);
+    vi.spyOn(client.rawClient, "isCircuitOpen").mockReturnValue(true);
 
     const result = await client.resilientWrite("remember", "/v1/remember", "POST", { content: "new" }, async () => ({}));
 

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { XMemoClient } from "./client.js";
+import { globalBreaker, XMemoClient } from "./client.js";
 
 function mockResponse(body: unknown, status = 200, headers?: Record<string, string>): Response {
   return new Response(status === 204 ? undefined : JSON.stringify(body), {
@@ -20,12 +20,92 @@ describe("XMemoClient", () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
+    globalBreaker.recordSuccess();
     fetchMock = vi.fn();
     global.fetch = fetchMock as unknown as typeof fetch;
   });
 
   afterEach(() => {
+    globalBreaker.recordSuccess();
+    vi.useRealTimers();
     vi.restoreAllMocks();
+  });
+
+  it("counts one terminal HTTP failure once per logical request", async () => {
+    fetchMock.mockResolvedValue(mockResponse({}, 503));
+    const client = new XMemoClient("https://breaker-count.invalid", "fake-key", "openclaw", "instance");
+
+    await expect(client.replayWrite("/v1/remember", "POST", {}, "fake-idempotency")).rejects.toThrow("failed (503)");
+
+    expect(globalBreaker.consecutiveFailures).toBe(1);
+  });
+
+  it("isolates breakers by authorization context and admits one half-open probe", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    fetchMock
+      .mockResolvedValueOnce(mockResponse({}, 503))
+      .mockResolvedValueOnce(mockResponse({}, 503))
+      .mockResolvedValueOnce(mockResponse({}, 503))
+      .mockResolvedValueOnce(mockResponse({}, 503))
+      .mockResolvedValueOnce(mockResponse({}, 503))
+      .mockResolvedValueOnce(mockResponse({ id: "other-auth" }))
+      .mockResolvedValueOnce(mockResponse({ id: "other-service" }));
+
+    const client = new XMemoClient("https://breaker-scope.invalid", "fake-key-a", "openclaw", "instance");
+    for (let index = 0; index < 5; index++) {
+      await expect(client.remember({ content: `failure ${index}` })).rejects.toThrow("failed (503)");
+    }
+    expect(client.circuitBreakerState).toBe("open");
+
+    const otherAuthorization = new XMemoClient("https://breaker-scope.invalid", "fake-key-b", "openclaw", "instance");
+    await expect(otherAuthorization.remember({ content: "other auth context" })).resolves.toMatchObject({ id: "other-auth" });
+    expect(otherAuthorization.circuitBreakerState).toBe("closed");
+    const otherService = new XMemoClient("https://another-service.invalid", "fake-key-a", "openclaw", "instance");
+    await expect(otherService.remember({ content: "other service" })).resolves.toMatchObject({ id: "other-service" });
+    expect(otherService.circuitBreakerState).toBe("closed");
+
+    await vi.advanceTimersByTimeAsync(120_000);
+    let releaseProbe!: (response: Response) => void;
+    fetchMock.mockImplementationOnce(() => new Promise<Response>((resolve) => { releaseProbe = resolve; }));
+    const probe = client.remember({ content: "half-open probe" });
+    expect(client.circuitBreakerState).toBe("half-open");
+    expect(fetchMock).toHaveBeenCalledTimes(8);
+
+    const duplicateClient = new XMemoClient("https://breaker-scope.invalid", "fake-key-a", "another-agent", "other-instance");
+    await expect(duplicateClient.remember({ content: "second probe" })).rejects.toThrow("circuit breaker is open");
+    expect(fetchMock).toHaveBeenCalledTimes(8);
+
+    releaseProbe(mockResponse({ id: "probe-ok" }));
+    await expect(probe).resolves.toMatchObject({ id: "probe-ok" });
+    expect(client.circuitBreakerState).toBe("closed");
+  });
+
+  it("uses jittered retry delays and honors Retry-After on transient reads", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const client = new XMemoClient("https://retry-jitter.invalid", "fake-key", "openclaw", "instance");
+    fetchMock.mockResolvedValueOnce(mockResponse({}, 503)).mockResolvedValueOnce(mockResponse({ items: [] }));
+
+    const jitteredRetry = client.recallContext({ query: "jitter" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(249);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(jitteredRetry).resolves.toMatchObject({ items: [] });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    fetchMock.mockReset();
+    fetchMock
+      .mockResolvedValueOnce(mockResponse({}, 429, { "retry-after": "2" }))
+      .mockResolvedValueOnce(mockResponse({ items: [] }));
+    const retryAfter = client.recallContext({ query: "retry-after" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(retryAfter).resolves.toMatchObject({ items: [] });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("sends X-API-Key by default", async () => {

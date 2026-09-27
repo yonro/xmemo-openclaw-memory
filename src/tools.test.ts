@@ -235,14 +235,15 @@ describe("memory_search failure-open", () => {
     expect(textContent(result)).toContain("unavailable (network)");
   });
 
-  it("returns structured timeout failure on AbortError", async () => {
+  it("returns structured cancellation failure on AbortError", async () => {
     const abort = new Error("The operation was aborted");
     abort.name = "AbortError";
     fetchMock.mockRejectedValue(abort);
     const { tools } = createApi({ apiKey: "key" });
     const result = await tools.get("memory_search")!.execute("tc-1", { query: "hello" });
 
-    expect(result.details).toMatchObject({ unavailable: true, errorType: "timeout" });
+    expect(result.details).toMatchObject({ unavailable: false, errorType: "cancelled" });
+    expect(textContent(result)).toContain("operation was cancelled");
   });
 
   it("redacts the api key from failure messages", async () => {
@@ -472,6 +473,7 @@ describe("xmemo_restart_snapshot_restore tool", () => {
 
   afterEach(() => {
     globalBreaker.recordSuccess();
+    vi.useRealTimers();
     vi.restoreAllMocks();
   });
 
@@ -510,7 +512,111 @@ describe("Retrieval Robustness Tests", () => {
 
   afterEach(() => {
     globalBreaker.recordSuccess();
+    vi.useRealTimers();
     vi.restoreAllMocks();
+  });
+
+  it("uses the host search deleted/minScore policy and labels missing scores as unknown", async () => {
+    fetchMock.mockResolvedValueOnce(
+      mockResponse({
+        items: [
+          { id: "deleted", content: "stale", status: "deleted", score: 0.99 },
+          { id: "below", content: "low score", score: 0.1 },
+          { id: "above", content: "high score", score: 0.95 },
+          { id: "unknown", content: "no score" },
+        ],
+      }),
+    );
+    const { tools } = createApi({ apiKey: "key" });
+
+    const filtered = await tools.get("memory_search")!.execute("tc-min-score", {
+      query: "hello",
+      minResults: 1,
+      minScore: 0.9,
+    });
+
+    expect(filtered.details).toMatchObject({ ids: ["above"] });
+    expect(textContent(filtered)).toContain("[95%]");
+    expect(textContent(filtered)).not.toContain("stale");
+    expect(textContent(filtered)).not.toContain("low score");
+    expect(JSON.parse(String(requestInit(0, fetchMock.mock.calls).body))).toMatchObject({ threshold: 0.9 });
+
+    fetchMock.mockResolvedValueOnce(mockResponse({ items: [{ id: "unknown", content: "score is absent" }] }));
+    const unknownScore = await tools.get("memory_search")!.execute("tc-unknown-score", {
+      query: "unknown score",
+      minResults: 1,
+    });
+    expect(textContent(unknownScore)).toContain("[score unknown]");
+    expect(textContent(unknownScore)).not.toContain("[95%]");
+  });
+
+  it("applies minScore to a cached fallback using the same search policy", async () => {
+    vi.useFakeTimers();
+    fetchMock.mockResolvedValueOnce(
+      mockResponse({
+        items: [
+          { id: "deleted-cache", content: "stale cached item", status: "deleted", score: 0.99 },
+          { id: "below-cache", content: "low cached item", score: 0.2 },
+          { id: "above-cache", content: "high cached item", score: 0.95 },
+          { id: "unknown-cache", content: "score absent" },
+        ],
+      }),
+    );
+    const { tools } = createApi({ apiKey: "key" });
+    const first = await tools.get("memory_search")!.execute("tc-cached-threshold", {
+      query: "cached threshold",
+      minResults: 1,
+      minScore: 0.9,
+    });
+    expect(first.details).toMatchObject({ ids: ["above-cache"] });
+
+    fetchMock.mockRejectedValue(new TypeError("fetch failed"));
+    const fallbackPromise = tools.get("memory_search")!.execute("tc-cached-threshold-offline", {
+      query: "cached threshold",
+      minResults: 1,
+      minScore: 0.9,
+    });
+    await vi.advanceTimersByTimeAsync(5_000);
+    const fallback = await fallbackPromise;
+
+    expect(fallback.details).toMatchObject({ ids: ["above-cache"], fromCache: true });
+    expect(textContent(fallback)).toContain("high cached item");
+    expect(textContent(fallback)).not.toContain("stale cached item");
+    expect(textContent(fallback)).not.toContain("low cached item");
+    expect(textContent(fallback)).not.toContain("score absent");
+  });
+
+  it("preserves auth failure semantics when the keyword tier receives 401 or 403", async () => {
+    for (const status of [401, 403]) {
+      fetchMock.mockReset();
+      fetchMock
+        .mockResolvedValueOnce(mockResponse({ items: [] }))
+        .mockResolvedValueOnce(mockResponse({ error: "authorization rejected" }, status));
+      const { tools } = createApi({ apiKey: "key" });
+
+      const result = await tools.get("memory_search")!.execute(`tc-l2-auth-${status}`, {
+        query: "missing memory",
+        minResults: 1,
+      });
+
+      expect(result.details).toMatchObject({ unavailable: true, errorType: "auth", status });
+      expect(textContent(result)).not.toContain("No matching XMemo memories");
+    }
+  });
+
+  it("returns the same timeout classification for memory_search as the host manager", async () => {
+    vi.useFakeTimers();
+    fetchMock.mockImplementation(() => Promise.resolve(mockResponse({ error: "request timed out" }, 504)));
+    const { tools } = createApi({ apiKey: "key" });
+    const pending = tools.get("memory_search")!.execute("tc-timeout", {
+      query: "slow request",
+      minResults: 1,
+    });
+    await vi.advanceTimersByTimeAsync(5_000);
+    const result = await pending;
+
+    expect(result.details).toMatchObject({ unavailable: true, errorType: "timeout", status: 504 });
+    expect(textContent(result)).not.toContain("No matching XMemo memories");
   });
 
   it("memory_search calls recallContext first, and runs L2 searchMemory when minResults is not met", async () => {

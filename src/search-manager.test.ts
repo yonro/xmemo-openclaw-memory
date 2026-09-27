@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { XMemoClient } from "./client.js";
+import { globalBreaker, XMemoClient } from "./client.js";
 import { XMemoSearchManager } from "./search-manager.js";
 
 function mockResponse(body: unknown, status = 200, headers?: Record<string, string>): Response {
@@ -20,11 +20,14 @@ function requestInit(callIndex: number, calls: unknown[][]): RequestInit {
 let fetchMock: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
+  globalBreaker.recordSuccess();
   fetchMock = vi.fn();
   global.fetch = fetchMock as unknown as typeof fetch;
 });
 
 afterEach(() => {
+  globalBreaker.recordSuccess();
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -62,6 +65,73 @@ function createConfig(
 }
 
 describe("XMemoSearchManager", () => {
+  it("filters deleted and below-threshold results without inventing missing similarity scores", async () => {
+    fetchMock.mockResolvedValue(
+      mockResponse({
+        items: [
+          { id: "deleted", content: "stale", path: "openclaw", status: "deleted", score: 0.99 },
+          { id: "below", content: "low score", path: "openclaw", score: 0.1 },
+          { id: "above", content: "high score", path: "openclaw", score: 0.95 },
+          { id: "unknown", content: "no score", path: "openclaw" },
+        ],
+      }),
+    );
+    const client = new XMemoClient("https://xmemo.dev", "key", "openclaw", "instance");
+    const manager = new XMemoSearchManager(client, createConfig());
+
+    const thresholdResults = await manager.search("hello", { minScore: 0.9 });
+    expect(thresholdResults.map((result) => result.path)).toEqual(["openclaw/above"]);
+    expect(thresholdResults[0]).toMatchObject({ score: 0.95, scoreKnown: true });
+    expect(JSON.parse(String(requestInit(0, fetchMock.mock.calls).body))).toMatchObject({ threshold: 0.9 });
+
+    fetchMock.mockResolvedValueOnce(mockResponse({ items: [{ id: "unknown", content: "no score", path: "openclaw" }] }));
+    const unknownScore = await manager.search("unknown score");
+    expect(unknownScore[0]).toMatchObject({ score: 0, scoreKnown: false });
+  });
+
+  it("declares memory-only source support and does not search when sessions are the only requested source", async () => {
+    const client = new XMemoClient("https://xmemo.dev", "key", "openclaw", "instance");
+    const manager = new XMemoSearchManager(client, createConfig());
+
+    await expect(manager.search("hello", { sessionKey: "session-1", sources: ["sessions"] })).resolves.toEqual([]);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect((manager.status().custom as Record<string, unknown>).searchCapabilities).toMatchObject({
+      supportedSources: ["memory"],
+      sessionKeyFilter: "unsupported",
+    });
+  });
+
+  it.each([401, 403])("classifies %i authorization failures consistently and preserves the HTTP status", async (status) => {
+    fetchMock.mockResolvedValue(mockResponse({ error: "authorization rejected" }, status));
+    const manager = new XMemoSearchManager(
+      new XMemoClient("https://xmemo.dev", "key", "openclaw", "instance"),
+      createConfig(),
+    );
+
+    await expect(manager.search("hello")).rejects.toMatchObject({ status });
+    expect((manager.status().custom as Record<string, unknown>).lastError).toContain(`auth (${status})`);
+  });
+
+  it("classifies timeout and cancellation on the host search path", async () => {
+    vi.useFakeTimers();
+    fetchMock.mockImplementation(() => Promise.resolve(mockResponse({ error: "timed out" }, 504)));
+    const manager = new XMemoSearchManager(
+      new XMemoClient("https://xmemo.dev", "key", "openclaw", "instance"),
+      createConfig(),
+    );
+    const timedOut = expect(manager.search("slow request")).rejects.toMatchObject({ status: 504 });
+    await vi.advanceTimersByTimeAsync(5_000);
+    await timedOut;
+    expect((manager.status().custom as Record<string, unknown>).lastError).toContain("timeout (504)");
+
+    const abort = new Error("request aborted");
+    abort.name = "AbortError";
+    fetchMock.mockRejectedValueOnce(abort);
+    await expect(manager.search("cancelled request")).rejects.toBe(abort);
+    expect((manager.status().custom as Record<string, unknown>).lastError).toContain("cancelled:");
+  });
+
   it("returns empty results when client is not configured", async () => {
     const client = new XMemoClient("https://xmemo.dev", "", "openclaw", "instance");
     const manager = new XMemoSearchManager(client, createConfig());

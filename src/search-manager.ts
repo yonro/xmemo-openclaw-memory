@@ -7,6 +7,7 @@ import type {
 } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
 import type { XMemoClient, XMemoRecallContextItem } from "./client.js";
 import type { XMemoMemoryConfig } from "./config.js";
+import { classifyMemorySearchFailure, filterMemorySearchItems, XMEMO_SEARCH_CAPABILITIES } from "./search-policy.js";
 
 const UUID_REGEX =
   /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
@@ -49,6 +50,10 @@ export class XMemoSearchManager implements MemorySearchManager {
     if (!this.client.isConfigured()) {
       return [];
     }
+    // XMemo indexes durable memory only; it cannot apply the host's sessionKey filter or search sessions.
+    if (opts.sources !== undefined && !opts.sources.includes("memory")) {
+      return [];
+    }
 
     try {
       const response = await this.client.recallContext(
@@ -60,6 +65,7 @@ export class XMemoSearchManager implements MemorySearchManager {
           max_items: opts.maxResults ?? this.config.recallMaxItems,
           max_tokens: this.config.recallMaxTokens,
           prefer_working: true,
+          threshold: opts.minScore,
         },
         opts.signal,
       );
@@ -67,21 +73,23 @@ export class XMemoSearchManager implements MemorySearchManager {
       this.connected = true;
       this.lastError = undefined;
 
-      return (response.items ?? []).map((item: XMemoRecallContextItem, index: number) => {
-        const score = item.score ?? Math.max(0.5, 0.95 - index * 0.05);
+      return filterMemorySearchItems(response.items ?? [], opts.minScore).map(({ item, score, scoreKnown }) => {
         const path = resultPath(item, this.config.bucket);
         return {
           path,
           startLine: 1,
           endLine: 1,
           score,
+          scoreKnown,
           snippet: item.content ?? item.snippet ?? "",
           source: "memory" as const,
-        };
+        } as MemorySearchResult & { scoreKnown: boolean };
       });
     } catch (error) {
       this.connected = false;
-      this.lastError = error instanceof Error ? error.message : String(error);
+      const failure = classifyMemorySearchFailure(error);
+      const status = failure.status === undefined ? "" : ` (${failure.status})`;
+      this.lastError = `${failure.errorType}${status}: ${error instanceof Error ? error.message : String(error)}`;
       throw error;
     }
   }
@@ -212,6 +220,7 @@ export class XMemoSearchManager implements MemorySearchManager {
         readScope: this.config.readScope,
         configured: this.client.isConfigured(),
         connected: this.connected ?? false,
+        searchCapabilities: XMEMO_SEARCH_CAPABILITIES,
         ...(this.lastError ? { lastError: this.lastError } : {}),
       },
     };

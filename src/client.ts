@@ -2,6 +2,7 @@
 // No local vector store or embedding model is required.
 
 import type { XMemoAuthMode } from "./config.js";
+import { createHash } from "node:crypto";
 
 export type XMemoRememberRequest = {
   content: string;
@@ -305,17 +306,20 @@ function unwrapLedgerMonthlySummary(response: unknown): XMemoLedgerMonthlySummar
 const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_INITIAL_DELAY_MS = 500;
 const DEFAULT_BACKOFF_FACTOR = 2;
+const MAX_RETRY_DELAY_MS = 30_000;
+const MAX_RETRY_AFTER_MS = 60 * 60_000;
 const BREAKER_THRESHOLD = 5;
 const BREAKER_COOLDOWN_MS = 120_000;
+const BREAKER_MAX_COOLDOWN_MS = 15 * 60_000;
 
 function isTransientStatus(status: number): boolean {
-  return status >= 500 || status === 429;
+  return status >= 500 || status === 429 || status === 408;
 }
 
 function isTransientError(error: unknown): boolean {
   if (error instanceof Error) {
     if (error.name === "AbortError") return false; // caller-initiated abort
-    if (/fetch|network|ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|UND_ERR/i.test(error.message)) {
+    if (error.name === "TimeoutError" || /fetch|network|ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|UND_ERR|timeout|timed out/i.test(error.message)) {
       return true;
     }
   }
@@ -323,6 +327,22 @@ function isTransientError(error: unknown): boolean {
     return isTransientStatus(error.status);
   }
   return false;
+}
+
+function parseRetryAfterMs(value: string | null): number | undefined {
+  if (!value) return undefined;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.min(seconds * 1000, MAX_RETRY_AFTER_MS);
+  }
+  const dateMs = Date.parse(value);
+  if (!Number.isFinite(dateMs)) return undefined;
+  return Math.min(Math.max(0, dateMs - Date.now()), MAX_RETRY_AFTER_MS);
+}
+
+function jitteredRetryDelay(baseDelayMs: number, retryAfterMs?: number): number {
+  const jittered = Math.floor(baseDelayMs * (0.5 + Math.random()));
+  return Math.max(jittered, retryAfterMs ?? 0);
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -343,45 +363,140 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-/**
- * Simple circuit breaker shared across all XMemoClient instances in a process.
- * Opens after BREAKER_THRESHOLD consecutive transient failures, auto-resets
- * after BREAKER_COOLDOWN_MS.
- */
+type CircuitBreakerState = "closed" | "open" | "half-open";
+
+type CircuitBreakerPermit = { probe: boolean };
+
+/** A per-service/auth breaker with one concurrent half-open probe. */
 class CircuitBreaker {
   private consecutiveFailures = 0;
   private openUntil = 0;
+  private halfOpenProbeInFlight = false;
+  private openCycles = 0;
+
+  get state(): CircuitBreakerState {
+    if (this.consecutiveFailures < BREAKER_THRESHOLD) return "closed";
+    return Date.now() < this.openUntil ? "open" : "half-open";
+  }
+
+  get failures(): number {
+    return this.consecutiveFailures;
+  }
 
   isOpen(): boolean {
-    if (this.consecutiveFailures < BREAKER_THRESHOLD) return false;
-    if (Date.now() >= this.openUntil) {
-      // Half-open: allow one probe
-      this.consecutiveFailures = 0;
-      return false;
-    }
-    return true;
+    return this.state === "open" || (this.state === "half-open" && this.halfOpenProbeInFlight);
   }
 
-  recordSuccess(): void {
+  acquire(): CircuitBreakerPermit | null {
+    const state = this.state;
+    if (state === "open") return null;
+    if (state === "half-open") {
+      if (this.halfOpenProbeInFlight) return null;
+      this.halfOpenProbeInFlight = true;
+      return { probe: true };
+    }
+    return { probe: false };
+  }
+
+  recordSuccess(_permit: CircuitBreakerPermit): void {
     this.consecutiveFailures = 0;
+    this.openUntil = 0;
+    this.halfOpenProbeInFlight = false;
+    this.openCycles = 0;
   }
 
-  recordFailure(): void {
+  recordFailure(permit: CircuitBreakerPermit, retryAfterMs?: number): void {
+    const state = this.state;
     this.consecutiveFailures++;
-    if (this.consecutiveFailures >= BREAKER_THRESHOLD) {
-      this.openUntil = Date.now() + BREAKER_COOLDOWN_MS;
+    if (permit.probe || state === "half-open") {
+      this.open(retryAfterMs);
+      return;
+    }
+    if (this.consecutiveFailures >= BREAKER_THRESHOLD && state !== "open") {
+      this.open(retryAfterMs);
+    } else if (state === "open" && retryAfterMs !== undefined) {
+      this.openUntil = Math.max(this.openUntil, Date.now() + retryAfterMs);
     }
   }
 
-  get state(): "closed" | "open" | "half-open" {
-    if (this.consecutiveFailures < BREAKER_THRESHOLD) return "closed";
-    if (Date.now() >= this.openUntil) return "half-open";
-    return "open";
+  release(permit: CircuitBreakerPermit): void {
+    if (permit.probe) this.halfOpenProbeInFlight = false;
+  }
+
+  reset(): void {
+    this.consecutiveFailures = 0;
+    this.openUntil = 0;
+    this.halfOpenProbeInFlight = false;
+    this.openCycles = 0;
+  }
+
+  private open(retryAfterMs?: number): void {
+    this.consecutiveFailures = Math.max(this.consecutiveFailures, BREAKER_THRESHOLD);
+    this.halfOpenProbeInFlight = false;
+    this.openCycles++;
+    const baseDelay = Math.min(BREAKER_COOLDOWN_MS * 2 ** (this.openCycles - 1), BREAKER_MAX_COOLDOWN_MS);
+    const jittered = Math.floor(baseDelay * (0.8 + Math.random() * 0.4));
+    this.openUntil = Date.now() + Math.max(jittered, retryAfterMs ?? 0);
   }
 }
 
-/** Process-global breaker so all tool calls share the same failure counter. */
-const globalBreaker = new CircuitBreaker();
+/**
+ * Registry shared by clients, with one independent breaker per service and auth
+ * context. The aggregate methods remain for test reset/diagnostic compatibility.
+ */
+class CircuitBreakerRegistry {
+  private readonly byContext = new Map<string, CircuitBreaker>();
+
+  forContext(baseUrl: string, authMode: XMemoAuthMode, apiKey: string): CircuitBreaker {
+    const service = normalizedServiceAddress(baseUrl);
+    const credential = createHash("sha256").update(apiKey).digest("hex");
+    const key = createHash("sha256").update(`${service}\0${authMode}\0${credential}`).digest("hex");
+    let breaker = this.byContext.get(key);
+    if (!breaker) {
+      breaker = new CircuitBreaker();
+      this.byContext.set(key, breaker);
+    }
+    return breaker;
+  }
+
+  get state(): CircuitBreakerState {
+    const states = Array.from(this.byContext.values(), (breaker) => breaker.state);
+    if (states.includes("open")) return "open";
+    if (states.includes("half-open")) return "half-open";
+    return "closed";
+  }
+
+  get consecutiveFailures(): number {
+    return Array.from(this.byContext.values()).reduce((total, breaker) => total + breaker.failures, 0);
+  }
+
+  isOpen(): boolean {
+    return Array.from(this.byContext.values()).some((breaker) => breaker.isOpen());
+  }
+
+  /** Reset every context between tests; not used by production request paths. */
+  recordSuccess(): void {
+    for (const breaker of this.byContext.values()) breaker.reset();
+  }
+
+  recordFailure(): void {
+    const legacy = this.forContext("https://legacy-breaker.invalid", "api-key", "");
+    const permit = legacy.acquire();
+    if (permit) legacy.recordFailure(permit);
+  }
+}
+
+function normalizedServiceAddress(baseUrl: string): string {
+  try {
+    const url = new URL(baseUrl);
+    url.hash = "";
+    return `${url.protocol.toLowerCase()}//${url.host.toLowerCase()}${url.pathname.replace(/\/+$/, "")}${url.search}`;
+  } catch {
+    return baseUrl.trim().replace(/\/+$/, "");
+  }
+}
+
+const globalBreaker = new CircuitBreakerRegistry();
 
 export { globalBreaker };
 
@@ -406,16 +521,28 @@ export class XMemoClientError extends Error {
 }
 
 export class XMemoClient {
+  private readonly breaker: CircuitBreaker;
+
   constructor(
     private readonly baseUrl: string,
     private readonly apiKey: string,
     private readonly agentId: string,
     private readonly agentInstanceId: string,
     private readonly authMode: XMemoAuthMode = "api-key",
-  ) {}
+  ) {
+    this.breaker = globalBreaker.forContext(baseUrl, authMode, apiKey);
+  }
 
   isConfigured(): boolean {
     return Boolean(this.apiKey);
+  }
+
+  get circuitBreakerState(): CircuitBreakerState {
+    return this.breaker.state;
+  }
+
+  isCircuitOpen(): boolean {
+    return this.breaker.isOpen();
   }
 
   private headers(): Record<string, string> {
@@ -434,8 +561,8 @@ export class XMemoClient {
   }
 
   private async request<T>(pathname: string, options: RequestInit = {}): Promise<T> {
-    // Check circuit breaker before attempting the request.
-    if (globalBreaker.isOpen()) {
+    const permit = this.breaker.acquire();
+    if (!permit) {
       throw new XMemoClientError(
         "XMemo circuit breaker is open — service temporarily unavailable",
         503,
@@ -448,103 +575,84 @@ export class XMemoClient {
       (options.method === "POST" && pathname === "/v1/recall/context");
 
     const maxAttempts = isRead ? DEFAULT_MAX_ATTEMPTS : 1;
-    let delay = DEFAULT_INITIAL_DELAY_MS;
+    let backoffMs = DEFAULT_INITIAL_DELAY_MS;
     let lastError: unknown;
+    let retryAfterMs: number | undefined;
 
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      try {
-        const url = `${this.baseUrl}${pathname}`;
-        const response = await fetch(url, {
-          ...options,
-          headers: {
-            ...this.headers(),
-            ...(options.headers as Record<string, string> | undefined),
-          },
-        });
+    try {
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+          const url = `${this.baseUrl}${pathname}`;
+          const response = await fetch(url, {
+            ...options,
+            headers: {
+              ...this.headers(),
+              ...(options.headers as Record<string, string> | undefined),
+            },
+          });
 
-        if (!response.ok) {
-          const text = await response.text().catch(() => "unknown error");
-          const rawMessage = `XMemo ${pathname} failed (${response.status}): ${text}`;
-          const error = new XMemoClientError(
-            redactErrorMessage(rawMessage, this.apiKey),
-            response.status,
+          if (!response.ok) {
+            const text = await response.text().catch(() => "unknown error");
+            const error = new XMemoClientError(
+              redactErrorMessage(`XMemo ${pathname} failed (${response.status}): ${text}`, this.apiKey),
+              response.status,
+              pathname,
+            );
+
+            if (isTransientStatus(response.status)) {
+              retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"));
+              if (attempt < maxAttempts) {
+                await sleep(jitteredRetryDelay(backoffMs, retryAfterMs), options.signal as AbortSignal | undefined);
+                backoffMs = Math.min(backoffMs * DEFAULT_BACKOFF_FACTOR, MAX_RETRY_DELAY_MS);
+                continue;
+              }
+            }
+            throw error;
+          }
+
+          const contentType = response.headers.get("content-type") ?? "";
+          const result = contentType.includes("application/json") ? await response.json() as T : {} as T;
+          this.breaker.recordSuccess(permit);
+          return result;
+        } catch (error) {
+          lastError = error;
+          if (options.signal?.aborted || (error instanceof Error && error.name === "AbortError")) {
+            throw error;
+          }
+
+          if (isTransientError(error) && attempt < maxAttempts) {
+            await sleep(jitteredRetryDelay(backoffMs, retryAfterMs), options.signal as AbortSignal | undefined);
+            backoffMs = Math.min(backoffMs * DEFAULT_BACKOFF_FACTOR, MAX_RETRY_DELAY_MS);
+            continue;
+          }
+          if (error instanceof XMemoClientError) throw error;
+
+          const message = error instanceof Error ? error.message : String(error);
+          throw new XMemoClientError(
+            redactErrorMessage(`XMemo ${pathname} failed: ${message}`, this.apiKey),
+            undefined,
             pathname,
           );
-
-          // Retry on transient HTTP status for read operations
-          if (isTransientStatus(response.status) && attempt < maxAttempts) {
-            lastError = error;
-            await sleep(delay, options.signal as AbortSignal | undefined);
-            delay *= DEFAULT_BACKOFF_FACTOR;
-            continue;
-          }
-
-          // Record transient failure for circuit breaker
-          if (isTransientStatus(response.status)) {
-            globalBreaker.recordFailure();
-          }
-
-          throw error;
         }
-
-        // Success
-        globalBreaker.recordSuccess();
-
-        const contentType = response.headers.get("content-type") ?? "";
-        if (contentType.includes("application/json")) {
-          return (await response.json()) as T;
-        }
-        return {} as T;
-      } catch (error) {
-        lastError = error;
-
-        // Don't retry caller-initiated aborts
-        if (error instanceof Error && error.name === "AbortError") {
-          throw error;
-        }
-
-        // Already a classified XMemoClientError from the !response.ok path above
-        if (error instanceof XMemoClientError) {
-          if (isTransientError(error) && attempt < maxAttempts) {
-            await sleep(delay, options.signal as AbortSignal | undefined);
-            delay *= DEFAULT_BACKOFF_FACTOR;
-            continue;
-          }
-          if (isTransientError(error)) {
-            globalBreaker.recordFailure();
-          }
-          throw error;
-        }
-
-        // Network-level errors (fetch failed, DNS, connection refused, etc.)
-        if (isTransientError(error) && attempt < maxAttempts) {
-          await sleep(delay, options.signal as AbortSignal | undefined);
-          delay *= DEFAULT_BACKOFF_FACTOR;
-          continue;
-        }
-
-        // Final attempt or non-transient
-        if (isTransientError(error)) {
-          globalBreaker.recordFailure();
-        }
-
-        const message = error instanceof Error ? error.message : String(error);
-        throw new XMemoClientError(
-          redactErrorMessage(`XMemo ${pathname} failed: ${message}`, this.apiKey),
-          undefined,
-          pathname,
-        );
       }
-    }
 
-    // Should not reach here, but satisfy the type checker
-    if (lastError instanceof XMemoClientError) throw lastError;
-    const msg = lastError instanceof Error ? lastError.message : String(lastError);
-    throw new XMemoClientError(
-      redactErrorMessage(`XMemo ${pathname} failed after ${maxAttempts} attempts: ${msg}`, this.apiKey),
-      undefined,
-      pathname,
-    );
+      if (lastError instanceof XMemoClientError) throw lastError;
+      const message = lastError instanceof Error ? lastError.message : String(lastError);
+      throw new XMemoClientError(
+        redactErrorMessage(`XMemo ${pathname} failed after ${maxAttempts} attempts: ${message}`, this.apiKey),
+        undefined,
+        pathname,
+      );
+    } catch (error) {
+      if (options.signal?.aborted || (error instanceof Error && error.name === "AbortError")) {
+        this.breaker.release(permit);
+      } else if (isTransientError(error)) {
+        this.breaker.recordFailure(permit, retryAfterMs);
+      } else {
+        this.breaker.release(permit);
+      }
+      throw error;
+    }
   }
 
   private buildSearchParams(
