@@ -48,6 +48,8 @@ function buildClient(cacheDir: string, cfg = config()): ResilientXMemoClient {
   return new ResilientXMemoClient(raw, cfg, new XMemoLocalCache(cacheDir));
 }
 
+const cacheIdentity = { agentId: "openclaw", agentInstanceId: "instance", authMode: "api-key" };
+
 describe("ResilientXMemoClient read cache policy", () => {
   let cacheDir: string;
   let fetchMock: ReturnType<typeof vi.fn>;
@@ -76,6 +78,7 @@ describe("ResilientXMemoClient read cache policy", () => {
         teamId: null,
         maxItems: 8,
         maxTokens: 1500,
+        ...cacheIdentity,
       },
       { items: [{ id: "cached", content: "cached partial result" }] },
     );
@@ -193,6 +196,7 @@ describe("ResilientXMemoClient read cache policy", () => {
         teamId: null,
         maxItems: 8,
         maxTokens: 1500,
+        ...cacheIdentity,
       },
       { items: [{ id: "cached", content: "cached fallback result" }] },
     );
@@ -218,6 +222,7 @@ describe("ResilientXMemoClient read cache policy", () => {
         scope: null,
         teamId: null,
         maxItems: 10,
+        ...cacheIdentity,
       },
       { results: [{ id: "cached", content: "cached partial result" }] },
     );
@@ -246,6 +251,7 @@ describe("ResilientXMemoClient read cache policy", () => {
         teamId: null,
         maxItems: 8,
         maxTokens: 1500,
+        ...cacheIdentity,
       },
       { items: [{ id: "cached", content: "cached secret data" }] },
     );
@@ -270,6 +276,7 @@ describe("ResilientXMemoClient read cache policy", () => {
         teamId: null,
         maxItems: 8,
         maxTokens: 1500,
+        ...cacheIdentity,
       },
       { items: [{ id: "cached", content: "cached team secret" }] },
     );
@@ -293,6 +300,7 @@ describe("ResilientXMemoClient read cache policy", () => {
         scope: null,
         teamId: null,
         maxItems: 10,
+        ...cacheIdentity,
       },
       { results: [{ id: "cached", content: "cached secret" }] },
     );
@@ -301,6 +309,64 @@ describe("ResilientXMemoClient read cache policy", () => {
     await expect(
       buildClient(cacheDir).searchMemory("secret", {}),
     ).rejects.toThrow("failed (403)");
+  });
+
+  it.each([401, 403])("requires reauthorization after %i and blocks later offline cache fallback", async (status) => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    try {
+      fetchMock.mockResolvedValueOnce(mockResponse({ results: [{ id: "private", content: "private memory" }] }));
+      const client = buildClient(cacheDir);
+      await client.searchMemory("private memory", {});
+
+      fetchMock.mockResolvedValueOnce(mockResponse({ error: "unauthorized" }, status));
+      await expect(client.searchMemory("private memory", {})).rejects.toThrow(`failed (${status})`);
+      expect(client.getStatusSummary()).toMatchObject({
+        reauthorizationRequired: true,
+        cacheStats: { cacheEntries: 0 },
+      });
+      expect(client.getPromptStatusLine()).toContain("reauthorization required");
+
+      fetchMock.mockRejectedValue(new TypeError("fetch failed: offline"));
+      const offlineRequest = client.searchMemory("private memory", {});
+      const settledRequest = offlineRequest.then(
+        (value) => ({ ok: true as const, value }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+      await vi.advanceTimersByTimeAsync(10_000);
+      const settled = await settledRequest;
+      expect(settled.ok).toBe(false);
+      expect(client.getStatusSummary().reauthorizationRequired).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("isolates cached recalls by agent identity and auth mode", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    try {
+      fetchMock.mockResolvedValueOnce(mockResponse({ results: [{ id: "agent-a", content: "agent A only" }] }));
+      const firstIdentity = buildClient(cacheDir);
+      await firstIdentity.searchMemory("same query", {});
+
+      fetchMock.mockRejectedValue(new TypeError("fetch failed: offline"));
+      const alternateIdentities = [
+        buildClient(cacheDir, config({ agentId: "agent-b" })),
+        buildClient(cacheDir, config({ authMode: "bearer" })),
+      ];
+      for (const client of alternateIdentities) {
+        const request = client.searchMemory("same query", {});
+        const settledRequest = request.then(
+          (value) => ({ ok: true as const, value }),
+          (error: unknown) => ({ ok: false as const, error }),
+        );
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect((await settledRequest).ok).toBe(false);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("refuses to fall back to cache on cancellation (AbortError)", async () => {
@@ -314,6 +380,7 @@ describe("ResilientXMemoClient read cache policy", () => {
         scope: null,
         teamId: null,
         maxItems: 10,
+        ...cacheIdentity,
       },
       { results: [{ id: "cached", content: "cached" }] },
     );
@@ -337,6 +404,7 @@ describe("ResilientXMemoClient read cache policy", () => {
         scope: null,
         teamId: null,
         maxItems: 10,
+        ...cacheIdentity,
       },
       { results: [{ id: "cached", content: "cached" }] },
     );
@@ -358,6 +426,7 @@ describe("ResilientXMemoClient read cache policy", () => {
         scope: null,
         teamId: null,
         maxItems: 10,
+        ...cacheIdentity,
       },
       { results: [{ id: "cached", content: "cached resilient data" }] },
     );
@@ -431,6 +500,7 @@ describe("ResilientXMemoClient read cache policy", () => {
           teamId: null,
           memory_type: "semantic",
           maxItems: 10,
+          ...cacheIdentity,
         },
         { results: [{ id: "semantic-result", content: "Semantic plan" }] },
       );
@@ -444,6 +514,7 @@ describe("ResilientXMemoClient read cache policy", () => {
           teamId: null,
           memory_type: "episodic",
           maxItems: 10,
+          ...cacheIdentity,
         },
         { results: [{ id: "episodic-result", content: "Episodic plan" }] },
       );

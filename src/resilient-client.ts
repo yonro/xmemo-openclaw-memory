@@ -60,6 +60,7 @@ export class ResilientXMemoClient {
   private _status: ProviderStatus = "unknown";
   private _lastSuccessAt = 0;
   private _lastError = "";
+  private _reauthorizationRequired = false;
   private _syncInProgress = false;
   private _outboxTimer: ReturnType<typeof setTimeout> | undefined;
   private _outboxSyncStopped = true;
@@ -152,6 +153,9 @@ export class ResilientXMemoClient {
       maxItems: params.maxItems ?? this.config.recallMaxItems,
       maxTokens: params.maxTokens ?? this.config.recallMaxTokens,
       minScore: params.minScore,
+      agentId: this.config.agentId,
+      agentInstanceId: this.config.agentInstanceId,
+      authMode: this.config.authMode,
     };
 
     // Keep cache available only as a fallback. Recall results can be partial, so
@@ -188,7 +192,7 @@ export class ResilientXMemoClient {
 
       // Only allow fallback to stale cache on explicit transient failures (network error, 5xx, timeout).
       // 401/403 (auth), 404 (deterministic miss), and cancellation MUST NOT return cache fallback.
-      if (cached && isTransientError(error)) {
+      if (cached && isTransientError(error) && !this._reauthorizationRequired) {
         return { result: cached.response, fromCache: true, isFresh: cached.isFresh };
       }
 
@@ -223,6 +227,9 @@ export class ResilientXMemoClient {
       maxItems: params.maxItems ?? 10,
       path: params.path,
       minScore: params.minScore,
+      agentId: this.config.agentId,
+      agentInstanceId: this.config.agentInstanceId,
+      authMode: this.config.authMode,
     };
 
     // Keep cache available only as a fallback. Search results can be partial, so
@@ -255,7 +262,7 @@ export class ResilientXMemoClient {
 
       // Only allow fallback to stale cache on explicit transient failures (network error, 5xx, timeout).
       // 401/403 (auth), 404 (deterministic miss), and cancellation MUST NOT return cache fallback.
-      if (cached && isTransientError(error)) {
+      if (cached && isTransientError(error) && !this._reauthorizationRequired) {
         return { result: cached.response, fromCache: true, isFresh: cached.isFresh };
       }
 
@@ -378,6 +385,27 @@ export class ResilientXMemoClient {
   // Cache Management
   // -------------------------------------------------------------------------
 
+  /** Forget a memory and invalidate local recalls for the configured read space. */
+  async forgetMemory(
+    id: string,
+    request?: Parameters<XMemoClient["forgetMemory"]>[1],
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    try {
+      const result = await this.client.forgetMemory(id, request, signal);
+      this._recordSuccess();
+      this.invalidateCache({
+        bucket: this.config.readBucket,
+        scope: this.config.readScope ?? null,
+        teamId: this.config.teamId ?? null,
+      });
+      return result;
+    } catch (error) {
+      this._recordFailure(error);
+      throw error;
+    }
+  }
+
   /**
    * Invalidate cached recall/search entries for this identity/space.
    * Does not clear the write outbox or affect other accounts.
@@ -403,12 +431,14 @@ export class ResilientXMemoClient {
     status: ProviderStatus;
     breakerState: string;
     lastError: string;
+    reauthorizationRequired: boolean;
     cacheStats: ReturnType<XMemoLocalCache["getStats"]>;
   } {
     return {
       status: this._status,
       breakerState: this.client.circuitBreakerState,
       lastError: this._lastError,
+      reauthorizationRequired: this._reauthorizationRequired,
       cacheStats: this.cache.getStats(),
     };
   }
@@ -418,6 +448,10 @@ export class ResilientXMemoClient {
    */
   getPromptStatusLine(): string {
     const state = this.client.circuitBreakerState;
+    if (this._reauthorizationRequired) {
+      const queueNote = this._outboxStatusNote(this.cache.getStats());
+      return `XMemo status: reauthorization required. Refresh or reconnect the XMemo credentials before retrieving memory.${queueNote} Cached memory fallback is disabled until authorization succeeds.`;
+    }
     if (this._status === "online" && state === "closed") {
       const queueNote = this._outboxStatusNote(this.cache.getStats());
       return `XMemo status: online. Memory recall and writes are operational.${queueNote}`;
@@ -481,6 +515,7 @@ export class ResilientXMemoClient {
     this._status = "online";
     this._lastSuccessAt = Date.now();
     this._lastError = "";
+    this._reauthorizationRequired = false;
   }
 
   private _getCachedRecall(
@@ -511,6 +546,17 @@ export class ResilientXMemoClient {
 
   private _recordFailure(error: unknown): void {
     this._lastError = error instanceof Error ? error.message : String(error);
+    if (error instanceof XMemoClientError && (error.status === 401 || error.status === 403)) {
+      this._reauthorizationRequired = true;
+      // Auth rejection invalidates all recalls in this credential-scoped cache.
+      // The flag above also prevents fallback if the local cache cannot be cleared.
+      try {
+        this.cache.clearCache();
+      } catch (cacheError) {
+        const detail = cacheError instanceof Error ? cacheError.message : String(cacheError);
+        this._lastError += `; cached recalls could not be cleared: ${detail}`;
+      }
+    }
     if (this.client.circuitBreakerState === "open") {
       this._status = "offline";
     } else {

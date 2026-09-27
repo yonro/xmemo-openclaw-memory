@@ -13,7 +13,11 @@ import { XMemoLocalCache } from "./local-cache.js";
 import { escapeMemoryForPrompt } from "./memory-text.js";
 import { asToolParamsRecord } from "./openclaw-compat.js";
 import { ResilientXMemoClient } from "./resilient-client.js";
-import { classifyMemorySearchFailure, filterMemorySearchItems } from "./search-policy.js";
+import {
+  classifyMemorySearchFailure,
+  filterMemorySearchItems,
+  type MemorySearchFailureType,
+} from "./search-policy.js";
 import { XMemoSearchManager } from "./search-manager.js";
 import { setXMemoStatusProvider } from "./prompt-section.js";
 import {
@@ -207,6 +211,87 @@ function formatMemorySearchResults(
   ].join("\n");
 }
 
+type SearchStage = "L1_recall" | "L2_search";
+type SearchPartialFailure = {
+  stage: SearchStage;
+  errorType: MemorySearchFailureType;
+  status?: number;
+};
+type SearchDisplayItem = { score: number; scoreKnown: boolean; snippet: string; path?: string };
+
+function searchFailure(stage: SearchStage, error: unknown): SearchPartialFailure {
+  const failure = classifyMemorySearchFailure(error);
+  return {
+    stage,
+    errorType: failure.errorType,
+    ...(failure.status !== undefined ? { status: failure.status } : {}),
+  };
+}
+
+function searchFailureLabel(failure: SearchPartialFailure): string {
+  const stage = failure.stage === "L1_recall" ? "semantic recall" : "keyword search";
+  return `${stage} ${failure.errorType}${failure.status !== undefined ? ` ${failure.status}` : ""}`;
+}
+
+function partialSearchNotice(failures: SearchPartialFailure[]): string {
+  return `Partial XMemo results: ${failures.map(searchFailureLabel).join("; ")} failed. Coverage is incomplete.`;
+}
+
+function estimateSearchTokens(text: string): number {
+  // Conservative local estimate for the merged response; the server still
+  // applies its own tokenizer to the L1 request.
+  return Math.ceil(Buffer.byteLength(text, "utf8") / 3);
+}
+
+function fitSearchResultsToBudget(
+  query: string,
+  items: SearchDisplayItem[],
+  maxResults: number,
+  maxTokens: number,
+  cacheMeta: { fromCache: boolean; isFresh: boolean },
+  partialNotice?: string,
+): { items: SearchDisplayItem[]; text: string; estimatedTokens: number; truncated: boolean } {
+  const limit = Math.max(1, Math.floor(maxTokens));
+  const candidateLimit = Math.max(1, Math.floor(maxResults));
+  const candidates = items.slice(0, candidateLimit);
+  const selected: SearchDisplayItem[] = [];
+  let truncated = items.length > candidates.length;
+  const render = (results: SearchDisplayItem[]) => {
+    const formatted = formatMemorySearchResults(query, results, cacheMeta);
+    return partialNotice ? `${partialNotice}\n\n${formatted}` : formatted;
+  };
+
+  for (const item of candidates) {
+    const fullCandidate = [...selected, item];
+    if (estimateSearchTokens(render(fullCandidate)) <= limit) {
+      selected.push(item);
+      continue;
+    }
+
+    truncated = true;
+    const characters = Array.from(item.snippet);
+    const marker = "… [truncated to the configured retrieval token budget]";
+    let low = 0;
+    let high = characters.length;
+    let best: SearchDisplayItem | undefined;
+    while (low <= high) {
+      const middle = Math.floor((low + high) / 2);
+      const partialItem = { ...item, snippet: `${characters.slice(0, middle).join("")}${marker}` };
+      if (estimateSearchTokens(render([...selected, partialItem])) <= limit) {
+        best = partialItem;
+        low = middle + 1;
+      } else {
+        high = middle - 1;
+      }
+    }
+    if (best) selected.push(best);
+    break;
+  }
+
+  const text = render(selected);
+  return { items: selected, text, estimatedTokens: estimateSearchTokens(text), truncated };
+}
+
 function stringField(record: Record<string, unknown>, key: string): string | undefined {
   const value = record[key];
   return typeof value === "string" && value.trim() ? value : undefined;
@@ -355,6 +440,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
         let l1Items: UnifiedResult[] = [];
         let l1FromCache = false;
         let l1IsFresh = true;
+        const partialFailures: SearchPartialFailure[] = [];
 
         // L1: Semantic recall
         try {
@@ -403,8 +489,18 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
             count: l1Items.length,
             fromCache,
           });
-        } catch (error: any) {
-          return buildUnavailableResult(error, resilient.circuitBreakerState);
+        } catch (error: unknown) {
+          const failure = searchFailure("L1_recall", error);
+          trace.strategies.push({
+            name: "L1_recall",
+            query,
+            count: 0,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          if (failure.errorType === "auth" || failure.errorType === "request" || failure.errorType === "cancelled") {
+            return buildUnavailableResult(error, resilient.circuitBreakerState);
+          }
+          partialFailures.push(failure);
         }
 
         let finalItems = [...l1Items];
@@ -421,6 +517,10 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           // the keyword tier.
           const pathCandidates = pathHint ? [pathHint, undefined] : [undefined];
           for (const candidatePath of pathCandidates) {
+            if (signal?.aborted) {
+              partialFailures.push({ stage: "L2_search", errorType: "cancelled" });
+              break;
+            }
             try {
               const { result, fromCache, isFresh } = await resilient.searchMemory(query, {
                 bucket: cfg.readBucket,
@@ -477,18 +577,20 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
 
               // Stop at the first candidate path that returns matches.
               if (l2Items.length > 0) break;
-            } catch (error: any) {
-              const failure = classifyMemorySearchFailure(error);
-              if (failure.errorType === "auth" || failure.errorType === "timeout" || failure.errorType === "cancelled") {
-                return buildUnavailableResult(error, resilient.circuitBreakerState);
-              }
+            } catch (error: unknown) {
+              const failure = searchFailure("L2_search", error);
               trace.strategies.push({
                 name: "L2_search",
                 query,
                 path: candidatePath,
                 count: 0,
-                error: error.message || String(error),
+                error: error instanceof Error ? error.message : String(error),
               });
+              if (failure.errorType === "auth") {
+                return buildUnavailableResult(error, resilient.circuitBreakerState);
+              }
+              partialFailures.push(failure);
+              if (failure.errorType === "cancelled") break;
             }
           }
 
@@ -519,6 +621,26 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
         trace.totalCandidates = finalItems.length;
 
         if (finalItems.length === 0) {
+          if (partialFailures.length > 0) {
+            const labels = partialFailures.map(searchFailureLabel).join("; ");
+            return {
+              content: [{
+                type: "text",
+                text: `XMemo search is incomplete: ${labels} failed. No absence conclusion can be drawn. Try again later.`,
+              }],
+              details: {
+                count: 0,
+                unavailable: true,
+                partialFailure: true,
+                errorType: partialFailures[0].errorType,
+                ...(partialFailures[0].status !== undefined ? { status: partialFailures[0].status } : {}),
+                failures: partialFailures,
+                fromCache: anyFromCache,
+                isFresh: effectiveIsFresh,
+                ...(debug ? { trace } : {}),
+              },
+            };
+          }
           const cachePrefix = anyFromCache
             ? `[Degraded / Offline Cache: fromCache=true, isFresh=${effectiveIsFresh}] `
             : "";
@@ -545,18 +667,53 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           path: item.path,
         }));
 
-        const text = formatMemorySearchResults(query, searchResults, {
-          fromCache: anyFromCache,
-          isFresh: effectiveIsFresh,
-        });
+        const notice = partialFailures.length > 0 ? partialSearchNotice(partialFailures) : undefined;
+        const boundedResults = fitSearchResultsToBudget(
+          query,
+          searchResults,
+          maxResults,
+          cfg.recallMaxTokens,
+          { fromCache: anyFromCache, isFresh: effectiveIsFresh },
+          notice,
+        );
+        if (boundedResults.items.length === 0) {
+          return {
+            content: [{
+              type: "text",
+              text: `XMemo search found ${finalItems.length} candidates, but the configured retrieval token budget is too small to include them.`,
+            }],
+            details: {
+              count: 0,
+              partialFailure: partialFailures.length > 0,
+              failures: partialFailures,
+              fromCache: anyFromCache,
+              isFresh: effectiveIsFresh,
+              tokenBudget: {
+                limit: cfg.recallMaxTokens,
+                estimatedTokens: boundedResults.estimatedTokens,
+                candidateCount: finalItems.length,
+                truncated: true,
+              },
+              ...(debug ? { trace } : {}),
+            },
+          };
+        }
 
         return {
-          content: [{ type: "text", text }],
+          content: [{ type: "text", text: boundedResults.text }],
           details: {
-            count: finalItems.length,
+            count: boundedResults.items.length,
             fromCache: anyFromCache,
             isFresh: effectiveIsFresh,
-            ids: finalItems.map(item => item.id),
+            ids: finalItems.slice(0, boundedResults.items.length).map(item => item.id),
+            partialFailure: partialFailures.length > 0,
+            failures: partialFailures,
+            tokenBudget: {
+              limit: cfg.recallMaxTokens,
+              estimatedTokens: boundedResults.estimatedTokens,
+              candidateCount: finalItems.length,
+              truncated: boundedResults.truncated,
+            },
             ...(debug ? { trace } : {}),
           },
         };
@@ -787,8 +944,8 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
         ),
       }),
       async execute(_toolCallId, params, signal) {
-        const client = buildClient(api);
-        if (!client) {
+        const resilient = buildResilientClient(api);
+        if (!resilient) {
           return {
             content: [
               {
@@ -810,9 +967,8 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           };
         }
 
-        const cfg = resolveXMemoMemoryConfig(api.config);
         try {
-          await client.forgetMemory(
+          await resilient.forgetMemory(
             parsed.id,
             {
               mode: (typeof raw.mode === "string" ? raw.mode : "soft_delete") as
@@ -823,14 +979,6 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
             },
             signal,
           );
-
-          // Invalidate affected recall/search cache in the same identity and space
-          const resilient = buildResilientClient(api);
-          resilient?.invalidateCache({
-            bucket: cfg.bucket,
-            scope: cfg.scope ?? null,
-            teamId: cfg.teamId ?? null,
-          });
 
           return {
             content: [{ type: "text", text: `Forgotten XMemo memory ${parsed.id}.` }],

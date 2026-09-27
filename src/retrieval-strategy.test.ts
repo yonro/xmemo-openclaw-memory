@@ -28,6 +28,11 @@ describe("retrieval-strategy", () => {
       expect(hints.pathHint).toBe("Projects/Xmemo/功能改造");
     });
 
+    it("normalizes spaces around separators and preserves spaces inside path segments", () => {
+      const hints = extractRetrievalHints("Please find Projects / Xmemo / Project Plan");
+      expect(hints.pathHint).toBe("Projects/Xmemo/Project Plan");
+    });
+
     it("should extract known agent names", () => {
       const hints1 = extractRetrievalHints("created by chatgpt agent");
       expect(hints1.agentHint).toBe("chatgpt");

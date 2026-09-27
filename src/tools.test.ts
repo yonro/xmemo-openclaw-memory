@@ -231,8 +231,9 @@ describe("memory_search failure-open", () => {
     const { tools } = createApi({ apiKey: "key" });
     const result = await tools.get("memory_search")!.execute("tc-1", { query: "hello" });
 
-    expect(result.details).toMatchObject({ unavailable: true, errorType: "network" });
-    expect(textContent(result)).toContain("unavailable (network)");
+    expect(result.details).toMatchObject({ unavailable: true, partialFailure: true, errorType: "network" });
+    expect(textContent(result)).toContain("XMemo search is incomplete");
+    expect(textContent(result)).toContain("No absence conclusion can be drawn");
   });
 
   it("returns structured cancellation failure on AbortError", async () => {
@@ -244,6 +245,185 @@ describe("memory_search failure-open", () => {
 
     expect(result.details).toMatchObject({ unavailable: false, errorType: "cancelled" });
     expect(textContent(result)).toContain("operation was cancelled");
+  });
+
+  it("returns L2 matches with an incomplete marker when L1 recall fails", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    try {
+      fetchMock.mockImplementation((input: unknown) => {
+        if (String(input).includes("/v1/recall/context")) {
+          return Promise.reject(new TypeError("fetch failed: L1 offline"));
+        }
+        return Promise.resolve(mockResponse({
+          results: [{ id: "l2-only", content: "keyword result", path: "Projects/Xmemo" }],
+        }));
+      });
+      const { tools } = createApi({ apiKey: "key" });
+      const resultPromise = tools.get("memory_search")!.execute("tc-l1-partial", { query: "project plan" });
+      await vi.advanceTimersByTimeAsync(10_000);
+      const result = await resultPromise;
+
+      expect(textContent(result)).toContain("Partial XMemo results: semantic recall network failed");
+      expect(textContent(result)).toContain("keyword result");
+      expect(result.details).toMatchObject({
+        count: 1,
+        partialFailure: true,
+        failures: [{ stage: "L1_recall", errorType: "network" }],
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(4);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("preserves L1 results and reports incomplete coverage when L2 fails", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    try {
+      fetchMock.mockImplementation((input: unknown) => {
+        if (String(input).includes("/v1/recall/context")) {
+          return Promise.resolve(mockResponse({
+            items: [{ id: "l1-result", content: "semantic result stays visible", score: 0.9 }],
+          }));
+        }
+        return Promise.reject(new TypeError("fetch failed: L2 offline"));
+      });
+      const { tools } = createApi({ apiKey: "key" });
+      const resultPromise = tools.get("memory_search")!.execute("tc-l2-partial", { query: "semantic result" });
+      await vi.advanceTimersByTimeAsync(10_000);
+      const result = await resultPromise;
+
+      expect(textContent(result)).toContain("Partial XMemo results: keyword search network failed");
+      expect(textContent(result)).toContain("semantic result stays visible");
+      expect(textContent(result)).not.toContain("No matching XMemo memories");
+      expect(result.details).toMatchObject({
+        count: 1,
+        partialFailure: true,
+        failures: [{ stage: "L2_search", errorType: "network" }],
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not report no matches when L2 fails without any L1 results", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    try {
+      fetchMock.mockImplementation((input: unknown) => {
+        if (String(input).includes("/v1/recall/context")) {
+          return Promise.resolve(mockResponse({ items: [] }));
+        }
+        return Promise.reject(new TypeError("fetch failed: keyword index offline"));
+      });
+      const { tools } = createApi({ apiKey: "key" });
+      const resultPromise = tools.get("memory_search")!.execute("tc-no-false-negative", { query: "missing context" });
+      await vi.advanceTimersByTimeAsync(10_000);
+      const result = await resultPromise;
+
+      expect(textContent(result)).toContain("XMemo search is incomplete");
+      expect(textContent(result)).toContain("No absence conclusion can be drawn");
+      expect(textContent(result)).not.toContain("No matching XMemo memories");
+      expect(result.details).toMatchObject({
+        unavailable: true,
+        partialFailure: true,
+        failures: [{ stage: "L2_search", errorType: "network" }],
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("clips merged L1/L2 results to maxResults and the configured retrieval token budget", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    try {
+      fetchMock.mockImplementation((input: unknown, init?: RequestInit) => {
+        if (String(input).includes("/v1/recall/context")) {
+          const body = JSON.parse(String(init?.body ?? "{}")) as { query?: string };
+          const item = body.query === "tight budget"
+            ? { id: "tight-l1", content: "x".repeat(2_000), score: 0.9 }
+            : { id: "limit-l1", content: "short first result", score: 0.9 };
+          return Promise.resolve(mockResponse({ items: [item] }));
+        }
+        const query = new URL(String(input)).searchParams.get("query");
+        const prefix = query === "tight budget" ? "tight-l2" : "limit-l2";
+        return Promise.resolve(mockResponse({
+          results: [0, 1, 2].map((index) => ({
+            id: `${prefix}-${index}`,
+            content: query === "tight budget" ? "y".repeat(2_000) : `short result ${index}`,
+          })),
+        }));
+      });
+      const { tools } = createApi({ apiKey: "key", recallMaxTokens: 200 });
+
+      const limitedPromise = tools.get("memory_search")!.execute("tc-result-limit", {
+        query: "result limit",
+        maxResults: 2,
+      });
+      await vi.advanceTimersByTimeAsync(1_000);
+      const limited = await limitedPromise;
+      expect(limited.details).toMatchObject({
+        count: 2,
+        tokenBudget: { limit: 200, candidateCount: 4, truncated: true },
+      });
+
+      const budgetPromise = tools.get("memory_search")!.execute("tc-token-budget", {
+        query: "tight budget",
+        maxResults: 5,
+      });
+      await vi.advanceTimersByTimeAsync(1_000);
+      const budgeted = await budgetPromise;
+      expect(budgeted.details).toMatchObject({
+        partialFailure: false,
+        tokenBudget: { limit: 200, truncated: true },
+      });
+      expect((budgeted.details as any).tokenBudget.candidateCount).toBe(4);
+      expect((budgeted.details as any).tokenBudget.estimatedTokens).toBeLessThanOrEqual(200);
+      expect(textContent(budgeted)).toContain("truncated to the configured retrieval token budget");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("extracts spaced paths and sends the normalized hint to L2 search", async () => {
+    fetchMock.mockImplementation((input: unknown) => {
+      if (String(input).includes("/v1/recall/context")) {
+        return Promise.resolve(mockResponse({ items: [] }));
+      }
+      return Promise.resolve(mockResponse({
+        results: [{ id: "spaced-path", content: "path result", path: "Projects/Xmemo/Project Plan" }],
+      }));
+    });
+    const { tools } = createApi({ apiKey: "key" });
+    const result = await tools.get("memory_search")!.execute("tc-spaced-path", {
+      query: "Find Projects / Xmemo / Project Plan",
+      debug: true,
+    });
+
+    expect(textContent(result)).toContain("path result");
+    expect((result.details as any).trace.pathHint).toBe("Projects/Xmemo/Project Plan");
+    expect(new URL(requestUrl(1, fetchMock.mock.calls)).searchParams.get("path")).toBe("Projects/Xmemo/Project Plan");
+  });
+
+  it("keeps L1 results and marks L2 cancellation as incomplete", async () => {
+    const abort = new Error("request aborted");
+    abort.name = "AbortError";
+    fetchMock.mockImplementation((input: unknown) => {
+      if (String(input).includes("/v1/recall/context")) {
+        return Promise.resolve(mockResponse({
+          items: [{ id: "before-cancel", content: "already retrieved", score: 0.9 }],
+        }));
+      }
+      return Promise.reject(abort);
+    });
+    const { tools } = createApi({ apiKey: "key" });
+    const result = await tools.get("memory_search")!.execute("tc-l2-cancel", { query: "already retrieved" });
+
+    expect(textContent(result)).toContain("already retrieved");
+    expect(textContent(result)).toContain("keyword search cancelled");
+    expect(result.details).toMatchObject({ partialFailure: true, failures: [{ errorType: "cancelled" }] });
   });
 
   it("redacts the api key from failure messages", async () => {
