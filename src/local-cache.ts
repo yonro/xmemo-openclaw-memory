@@ -62,12 +62,21 @@ export const XMEMO_OUTBOX_MAX_RECORDS = 1_000;
 const LOCK_WAIT_MS = 15_000;
 const LOCK_STALE_MS = 2 * 60_000;
 
+export type XMemoLocalCacheStorageErrorKind = "read" | "parse" | "structure" | "lock";
+
 export class XMemoLocalCacheStorageError extends Error {
-  constructor(filepath: string, detail: string) {
+  readonly filepath: string;
+  readonly kind: XMemoLocalCacheStorageErrorKind;
+
+  constructor(filepath: string, kind: XMemoLocalCacheStorageErrorKind, detail: string) {
     super(`XMemo local storage error at ${filepath}: ${detail}`);
     this.name = "XMemoLocalCacheStorageError";
+    this.filepath = filepath;
+    this.kind = kind;
   }
 }
+
+export type XMemoLocalCacheOptions = { onWarning?: (message: string) => void };
 
 export class XMemoOutboxCapacityError extends Error {
   constructor(limit: number) {
@@ -142,7 +151,7 @@ function readJsonStore<T extends { version: 1 }>(
     if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
       return fallback;
     }
-    throw new XMemoLocalCacheStorageError(filepath, error instanceof Error ? error.message : String(error));
+    throw new XMemoLocalCacheStorageError(filepath, "read", error instanceof Error ? error.message : String(error));
   }
 
   let parsed: unknown;
@@ -151,15 +160,16 @@ function readJsonStore<T extends { version: 1 }>(
   } catch (error) {
     throw new XMemoLocalCacheStorageError(
       filepath,
+      "parse",
       `file is not valid JSON (${error instanceof Error ? error.message : String(error)})`,
     );
   }
   if (!isObjectRecord(parsed) || parsed.version !== 1 || !isObjectRecord(parsed[key])) {
-    throw new XMemoLocalCacheStorageError(filepath, `file has an invalid ${key} store structure`);
+    throw new XMemoLocalCacheStorageError(filepath, "structure", `file has an invalid ${key} store structure`);
   }
   for (const value of Object.values(parsed[key])) {
     if (!isObjectRecord(value)) {
-      throw new XMemoLocalCacheStorageError(filepath, `file contains an invalid ${key} record`);
+      throw new XMemoLocalCacheStorageError(filepath, "structure", `file contains an invalid ${key} record`);
     }
   }
   return parsed as T;
@@ -196,7 +206,7 @@ function withFileLock<T>(filepath: string, operation: () => T): T {
         ? (error as { code?: string }).code
         : undefined;
       if (code !== "EEXIST") {
-        throw new XMemoLocalCacheStorageError(filepath, `could not acquire file lock (${String(error)})`);
+        throw new XMemoLocalCacheStorageError(filepath, "lock", `could not acquire file lock (${String(error)})`);
       }
 
       try {
@@ -212,11 +222,11 @@ function withFileLock<T>(filepath: string, operation: () => T): T {
         if (statError && typeof statError === "object" && "code" in statError && statError.code === "ENOENT") {
           continue;
         }
-        throw new XMemoLocalCacheStorageError(filepath, `could not inspect file lock (${String(statError)})`);
+        throw new XMemoLocalCacheStorageError(filepath, "lock", `could not inspect file lock (${String(statError)})`);
       }
 
       if (Date.now() - startedAt >= LOCK_WAIT_MS) {
-        throw new XMemoLocalCacheStorageError(filepath, `timed out waiting for file lock ${lockPath}`);
+        throw new XMemoLocalCacheStorageError(filepath, "lock", `timed out waiting for file lock ${lockPath}`);
       }
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
     }
@@ -257,8 +267,16 @@ function scopedCacheDir(baseUrl: string, apiKey: string): string {
 export class XMemoLocalCache {
   private readonly cacheFile: string;
   private readonly outboxFile: string;
+  private readonly onWarning: (message: string) => void;
+  private _cacheStorageError: XMemoLocalCacheStorageError | null = null;
+  private _outboxStorageError: XMemoLocalCacheStorageError | null = null;
+  private _lastCacheWarning: string | null = null;
 
-  constructor(cacheDirOrScope?: string | { baseUrl: string; apiKey: string }) {
+  constructor(
+    cacheDirOrScope?: string | { baseUrl: string; apiKey: string },
+    options: XMemoLocalCacheOptions = {},
+  ) {
+    this.onWarning = options.onWarning ?? (() => {});
     let dir: string;
     if (typeof cacheDirOrScope === "string") {
       dir = cacheDirOrScope;
@@ -270,10 +288,21 @@ export class XMemoLocalCache {
     ensureDir(dir);
     this.cacheFile = join(dir, "recall-cache.json");
     this.outboxFile = join(dir, "write-outbox.json");
-    // Fail at construction for corrupt or unreadable persisted state instead of
-    // treating it as an empty cache/outbox and later overwriting user data.
-    this._readCache();
-    this._readOutbox();
+    // The recall cache is disposable; corrupt JSON is quarantined. Other read
+    // failures remain explicit. The outbox is authoritative for unconfirmed
+    // writes, so it is left untouched and marked unavailable instead.
+    try {
+      this._readCache();
+    } catch (error) {
+      if (!(error instanceof XMemoLocalCacheStorageError)) throw error;
+      this._cacheStorageError = error;
+    }
+    try {
+      this._readOutbox();
+    } catch (error) {
+      if (!(error instanceof XMemoLocalCacheStorageError)) throw error;
+      this._outboxStorageError = error;
+    }
   }
 
   getCachedRecall(
@@ -500,33 +529,101 @@ export class XMemoLocalCache {
     sentWrites: number;
     lastOutboxError: string | null;
     lastOutboxErrorAt: number | null;
+    cacheReadError: string | null;
+    cacheWarning: string | null;
+    outboxReadError: string | null;
   } {
-    const records = Object.values(this._readOutbox().records);
+    let records: OutboxRecord[] = [];
+    let outboxReadError: string | null = this._outboxStorageError?.message ?? null;
+    try {
+      records = Object.values(this._readOutbox().records);
+    } catch (error) {
+      outboxReadError = error instanceof Error ? error.message : String(error);
+    }
+    let cacheEntries = 0;
+    let cacheReadError: string | null = this._cacheStorageError?.message ?? null;
+    try {
+      cacheEntries = Object.keys(this._readCache().entries).length;
+    } catch (error) {
+      cacheReadError = error instanceof Error ? error.message : String(error);
+      if (error instanceof XMemoLocalCacheStorageError) this._cacheStorageError = error;
+    }
     const latestError = records
       .filter((record) => record.lastError && (record.status === "pending" || record.status === "failed"))
       .sort((left, right) => right.updatedAt - left.updatedAt)[0];
     return {
-      cacheEntries: Object.keys(this._readCache().entries).length,
+      cacheEntries,
       pendingWrites: records.filter((record) => record.status === "pending").length,
       heldWrites: records.filter((record) => record.status === "held").length,
       failedWrites: records.filter((record) => record.status === "failed").length,
       sentWrites: records.filter((record) => record.status === "sent").length,
-      lastOutboxError: latestError?.lastError ?? null,
+      lastOutboxError: latestError?.lastError ?? outboxReadError,
       lastOutboxErrorAt: latestError?.updatedAt ?? null,
+      cacheReadError,
+      cacheWarning: this._lastCacheWarning,
+      outboxReadError,
     };
   }
 
   private _readCache(): CacheStore {
-    return readJsonStore(this.cacheFile, "entries", { version: 1, entries: {} });
+    return withFileLock(this.cacheFile, () => this._readCacheLocked());
+  }
+
+  private _readCacheLocked(): CacheStore {
+    try {
+      const store = readJsonStore(this.cacheFile, "entries", { version: 1, entries: {} });
+      this._cacheStorageError = null;
+      return store;
+    } catch (error) {
+      if (!(error instanceof XMemoLocalCacheStorageError)) throw error;
+      if (error.kind !== "parse" && error.kind !== "structure") {
+        this._cacheStorageError = error;
+        throw error;
+      }
+
+      const quarantinePath = `${this.cacheFile}.corrupt-${Date.now()}-${randomUUID().slice(0, 8)}`;
+      try {
+        renameSync(this.cacheFile, quarantinePath);
+      } catch (renameError) {
+        const code = renameError && typeof renameError === "object" && "code" in renameError
+          ? (renameError as { code?: string }).code
+          : undefined;
+        if (code !== "ENOENT") {
+          const storageError = new XMemoLocalCacheStorageError(
+            this.cacheFile,
+            "read",
+            `could not quarantine corrupt cache file (${String(renameError)})`,
+          );
+          this._cacheStorageError = storageError;
+          throw storageError;
+        }
+      }
+
+      this._cacheStorageError = null;
+      this._lastCacheWarning = "XMemo recall cache was corrupt and quarantined; a fresh cache will be used.";
+      try {
+        this.onWarning(`${this._lastCacheWarning} Backup: ${quarantinePath}`);
+      } catch {
+        // Logging callbacks must not turn a recoverable cache fault into an outage.
+      }
+      return { version: 1, entries: {} };
+    }
   }
 
   private _readOutbox(): OutboxStore {
-    return readJsonStore(this.outboxFile, "records", { version: 1, records: {} });
+    try {
+      const store = readJsonStore(this.outboxFile, "records", { version: 1, records: {} });
+      this._outboxStorageError = null;
+      return store;
+    } catch (error) {
+      if (error instanceof XMemoLocalCacheStorageError) this._outboxStorageError = error;
+      throw error;
+    }
   }
 
   private _mutateCache<T>(mutator: (store: CacheStore) => { result: T; changed: boolean }): T {
     return withFileLock(this.cacheFile, () => {
-      const store = this._readCache();
+      const store = this._readCacheLocked();
       const outcome = mutator(store);
       if (outcome.changed) atomicWriteJson(this.cacheFile, store);
       return outcome.result;

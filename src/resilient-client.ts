@@ -76,8 +76,12 @@ export class ResilientXMemoClient {
       apiKey: config.apiKey ?? "",
     });
 
-    // Recover stale locks on construction
-    this.cache.recoverStaleLocks();
+    // Recovery failure is visible in status but must not prevent cloud access.
+    try {
+      this.cache.recoverStaleLocks();
+    } catch (error) {
+      this._recordFailure(error);
+    }
   }
 
   get status(): ProviderStatus {
@@ -146,7 +150,7 @@ export class ResilientXMemoClient {
 
     // Keep cache available only as a fallback. Recall results can be partial, so
     // cloud remains authoritative even when the local cache is still fresh.
-    const cached = this.cache.getCachedRecall("recall_context", query, cacheParams);
+    const cached = this._getCachedRecall("recall_context", query, cacheParams);
 
     // Try remote call
     try {
@@ -166,7 +170,7 @@ export class ResilientXMemoClient {
       this._recordSuccess();
 
       // Update cache
-      this.cache.putCachedRecall("recall_context", query, cacheParams, response);
+      this._putCachedRecall("recall_context", query, cacheParams, response);
 
       // Trigger background outbox sync on success
       this._triggerOutboxSync();
@@ -214,7 +218,7 @@ export class ResilientXMemoClient {
 
     // Keep cache available only as a fallback. Search results can be partial, so
     // cloud remains authoritative even when the local cache is still fresh.
-    const cached = this.cache.getCachedRecall("search", query, cacheParams);
+    const cached = this._getCachedRecall("search", query, cacheParams);
 
     try {
       const response = await this.client.searchMemory(
@@ -232,7 +236,7 @@ export class ResilientXMemoClient {
       );
 
       this._recordSuccess();
-      this.cache.putCachedRecall("search", query, cacheParams, response);
+      this._putCachedRecall("search", query, cacheParams, response);
       this._triggerOutboxSync();
 
       return { result: response, fromCache: false, isFresh: true };
@@ -373,7 +377,12 @@ export class ResilientXMemoClient {
     scope?: string | null;
     teamId?: string | null;
   }): number {
-    return this.cache.invalidateRecallCache(filter);
+    try {
+      return this.cache.invalidateRecallCache(filter);
+    } catch (error) {
+      this._recordFailure(error);
+      return 0;
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -464,6 +473,32 @@ export class ResilientXMemoClient {
     this._lastError = "";
   }
 
+  private _getCachedRecall(
+    operation: string,
+    query: string,
+    params: Record<string, unknown>,
+  ): { response: unknown; isFresh: boolean } | null {
+    try {
+      return this.cache.getCachedRecall(operation, query, params);
+    } catch (error) {
+      this._recordFailure(error);
+      return null;
+    }
+  }
+
+  private _putCachedRecall(
+    operation: string,
+    query: string,
+    params: Record<string, unknown>,
+    response: unknown,
+  ): void {
+    try {
+      this.cache.putCachedRecall(operation, query, params, response);
+    } catch (error) {
+      this._recordFailure(error);
+    }
+  }
+
   private _recordFailure(error: unknown): void {
     this._lastError = error instanceof Error ? error.message : String(error);
     if (globalBreaker.state === "open") {
@@ -484,7 +519,10 @@ export class ResilientXMemoClient {
     if (stats.pendingWrites > 0) notes.push(`${stats.pendingWrites} writes queued for sync`);
     if (stats.heldWrites > 0) notes.push(`${stats.heldWrites} writes are held for manual sync`);
     if (stats.failedWrites > 0) notes.push(`${stats.failedWrites} writes failed and need attention`);
-    if (stats.lastOutboxError) notes.push(`last write error: ${stats.lastOutboxError}`);
+    if (stats.lastOutboxError && !stats.outboxReadError) notes.push(`last write error: ${stats.lastOutboxError}`);
+    if (stats.outboxReadError) notes.push(`outbox storage error: ${stats.outboxReadError}`);
+    if (stats.cacheReadError) notes.push(`cache storage error: ${stats.cacheReadError}`);
+    if (stats.cacheWarning) notes.push(stats.cacheWarning);
     return notes.length > 0 ? ` ${notes.join("; ")}.` : "";
   }
 

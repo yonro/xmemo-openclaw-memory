@@ -1,18 +1,22 @@
 import type { AgentToolResult } from "openclaw/plugin-sdk/agent-core";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { globalBreaker } from "./client.js";
 import { escapeMemoryForPrompt } from "./memory-text.js";
+import { XMemoLocalCache } from "./local-cache.js";
+import { resolveXMemoMemoryConfig } from "./config.js";
+import { buildXMemoPromptSection } from "./prompt-section.js";
 import { registerXMemoTools, resetResilientClientForTesting } from "./tools.js";
 
 type ToolResult = AgentToolResult<unknown>;
 
-function createApi(config: Record<string, unknown> = {}) {
+function createApi(config: Record<string, unknown> = {}, register = true) {
   const tools = new Map<string, { execute: (...args: unknown[]) => Promise<ToolResult> }>();
   const lifecycleCleanups: Array<() => void | Promise<void>> = [];
+  const warningMessages: string[] = [];
   const api = {
     config: {
       plugins: {
@@ -35,11 +39,15 @@ function createApi(config: Record<string, unknown> = {}) {
       },
     },
     on: () => {},
-    logger: { info: () => {}, warn: () => {} },
+    logger: { info: () => {}, warn: (message: string) => warningMessages.push(message) },
     runtime: { config: { current: () => ({ plugins: {} }) } },
   };
-  registerXMemoTools(api as never);
-  return { api, tools, lifecycleCleanups };
+  if (register) registerXMemoTools(api as never);
+  return { api, tools, lifecycleCleanups, warningMessages };
+}
+
+function scopedCacheFile(cache: XMemoLocalCache, key: "cacheFile" | "outboxFile"): string {
+  return (cache as unknown as Record<string, string>)[key]!;
 }
 
 function textContent(result: ToolResult): string {
@@ -110,6 +118,59 @@ describe("memory_search failure-open", () => {
     expect(textContent(result)).toContain("No matching XMemo memories");
     expect(lifecycleCleanups).toHaveLength(1);
     await lifecycleCleanups[0]();
+  });
+
+  it("quarantines corrupt recall cache data and keeps cloud search available", async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(mockResponse({
+      items: [{ id: "memory-1", content: "cloud result", score: 0.95 }],
+    })));
+    const { api, tools, warningMessages } = createApi({ apiKey: "key" }, false);
+    const cfg = resolveXMemoMemoryConfig(api.config);
+    const cache = new XMemoLocalCache({ baseUrl: cfg.baseUrl, apiKey: cfg.apiKey! });
+    const cacheFile = scopedCacheFile(cache, "cacheFile");
+    writeFileSync(cacheFile, "{not json", "utf8");
+
+    expect(() => registerXMemoTools(api as never)).not.toThrow();
+    const result = await tools.get("memory_search")!.execute("tc-corrupt-cache", { query: "dark mode" });
+
+    expect(textContent(result)).toContain("cloud result");
+    writeFileSync(cacheFile, "{later corruption", "utf8");
+    const promptLines = buildXMemoPromptSection({ availableTools: new Set(["memory_search"]) } as never);
+    expect(promptLines.join("\n")).toContain("recall cache was corrupt and quarantined");
+    expect(existsSync(cacheFile)).toBe(false);
+    expect(readdirSync(dirname(cacheFile)).some((name) => name.startsWith("recall-cache.json.corrupt-"))).toBe(true);
+    expect(warningMessages.some((message) => message.includes("recall cache") && message.includes("quarantined"))).toBe(true);
+  });
+
+  it("preserves corrupt outbox data while search and direct writes work and queued writes fail visibly", async () => {
+    const { api, tools } = createApi({ apiKey: "key" }, false);
+    const cfg = resolveXMemoMemoryConfig(api.config);
+    const cache = new XMemoLocalCache({ baseUrl: cfg.baseUrl, apiKey: cfg.apiKey! });
+    const outboxFile = scopedCacheFile(cache, "outboxFile");
+    const originalOutbox = "{not json";
+    writeFileSync(outboxFile, originalOutbox, "utf8");
+    fetchMock.mockImplementation(() => Promise.resolve(mockResponse({
+      items: [{ id: "memory-1", content: "cloud result", score: 0.95 }],
+    })));
+
+    expect(() => registerXMemoTools(api as never)).not.toThrow();
+    const searchResult = await tools.get("memory_search")!.execute("tc-corrupt-outbox-search", { query: "dark mode" });
+    expect(textContent(searchResult)).toContain("cloud result");
+
+    const onlineWrite = await tools.get("memory_store")!.execute("tc-corrupt-outbox-online", { content: "online write" });
+    expect(textContent(onlineWrite)).toContain("Stored XMemo memory");
+
+    writeFileSync(outboxFile, JSON.stringify({ version: 1, records: {} }), "utf8");
+    buildXMemoPromptSection({ availableTools: new Set(["memory_search"]) } as never);
+    writeFileSync(outboxFile, originalOutbox, "utf8");
+    const promptLines = buildXMemoPromptSection({ availableTools: new Set(["memory_search"]) } as never);
+    expect(promptLines.join("\n")).toContain("outbox storage error");
+
+    fetchMock.mockRejectedValue(new TypeError("fetch failed"));
+    const offlineWrite = await tools.get("memory_store")!.execute("tc-corrupt-outbox-offline", { content: "offline write" });
+    expect(textContent(offlineWrite)).toContain("XMemo local storage error");
+    expect(textContent(offlineWrite)).toContain("file is not valid JSON");
+    expect(readFileSync(outboxFile, "utf8")).toBe(originalOutbox);
   });
 
   it("returns unavailable when XMemo is not configured", async () => {

@@ -264,6 +264,9 @@ describe("XMemoLocalCache", () => {
             if (output.includes("READY")) resolve();
           });
           child.once("error", reject);
+          child.once("exit", (code) => {
+            if (!output.includes("READY")) reject(new Error(`worker exited before READY (${code}): ${output}`));
+          });
         });
         const exited = new Promise<{ code: number | null; output: string }>((resolve) => {
           child.once("exit", (code) => resolve({ code, output }));
@@ -373,9 +376,16 @@ describe("XMemoLocalCache", () => {
       expect(statSync(join(cacheDir, "write-outbox.json")).mode & 0o777).toBe(0o600);
     });
 
-    it("fails closed when persisted JSON is malformed", () => {
-      writeFileSync(join(cacheDir, "write-outbox.json"), "{ broken", "utf8");
-      expect(() => new XMemoLocalCache(cacheDir)).toThrow(XMemoLocalCacheStorageError);
+    it("surfaces malformed outbox JSON and preserves the unconfirmed file", () => {
+      const corrupted = "{ broken";
+      const outboxFile = join(cacheDir, "write-outbox.json");
+      writeFileSync(outboxFile, corrupted, "utf8");
+
+      const damagedCache = new XMemoLocalCache(cacheDir);
+      expect(damagedCache.getStats().outboxReadError).toContain("file is not valid JSON");
+      expect(() => damagedCache.enqueueWrite("remember", "/v1/remember", "POST", { content: "new" }))
+        .toThrow(XMemoLocalCacheStorageError);
+      expect(readFileSync(outboxFile, "utf8")).toBe(corrupted);
     });
 
     it("keeps old failed records and visibly rejects enqueue at capacity", () => {

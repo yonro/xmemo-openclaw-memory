@@ -10,6 +10,7 @@ import {
   type XMemoUpdateMemoryRequest,
 } from "./client.js";
 import { resolveXMemoMemoryConfig } from "./config.js";
+import { XMemoLocalCache } from "./local-cache.js";
 import { escapeMemoryForPrompt } from "./memory-text.js";
 import { asToolParamsRecord } from "./openclaw-compat.js";
 import { ResilientXMemoClient } from "./resilient-client.js";
@@ -62,14 +63,24 @@ function buildResilientClient(api: OpenClawPluginApi): ResilientXMemoClient | nu
 
   _resilientClient?.stopOutboxSync();
   const client = new XMemoClient(cfg.baseUrl, cfg.apiKey, cfg.agentId, cfg.agentInstanceId, cfg.authMode);
-  _resilientClient = new ResilientXMemoClient(client, cfg);
+  const localCache = new XMemoLocalCache(
+    { baseUrl: cfg.baseUrl, apiKey: cfg.apiKey },
+    { onWarning: (message) => api.logger.warn(message) },
+  );
+  _resilientClient = new ResilientXMemoClient(client, cfg, localCache);
   _resilientClient.startOutboxSync();
   _resilientClientKey = key;
 
   // Wire up prompt status injection
-  setXMemoStatusProvider(() => ({
-    statusLine: _resilientClient!.getPromptStatusLine(),
-  }));
+  setXMemoStatusProvider(() => {
+    try {
+      return { statusLine: _resilientClient!.getPromptStatusLine() };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      api.logger.warn(`XMemo status could not read local storage: ${message}`);
+      return { statusLine: `XMemo local storage is unavailable: ${message}. Cloud memory tools remain available.` };
+    }
+  });
 
   return _resilientClient;
 }
@@ -1960,5 +1971,10 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
 
   // Start recovery at plugin registration so persisted writes do not depend on
   // a later successful foreground request to resume syncing.
-  buildResilientClient(api);
+  try {
+    buildResilientClient(api);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    api.logger.warn(`XMemo local storage could not be initialized during plugin registration: ${message}`);
+  }
 }
