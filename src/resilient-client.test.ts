@@ -417,46 +417,64 @@ describe("ResilientXMemoClient read cache policy", () => {
   });
 
   it("isolates cache entries by memory_type parameter", async () => {
-    const cache = new XMemoLocalCache(cacheDir);
-    cache.putCachedRecall(
-      "search",
-      "planning",
-      {
-        query: "planning",
-        bucket: "%",
-        scope: null,
-        teamId: null,
-        memory_type: "semantic",
-        maxItems: 10,
-      },
-      { results: [{ id: "semantic-result", content: "Semantic plan" }] },
-    );
-    cache.putCachedRecall(
-      "search",
-      "planning",
-      {
-        query: "planning",
-        bucket: "%",
-        scope: null,
-        teamId: null,
-        memory_type: "episodic",
-        maxItems: 10,
-      },
-      { results: [{ id: "episodic-result", content: "Episodic plan" }] },
-    );
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    try {
+      const cache = new XMemoLocalCache(cacheDir);
+      cache.putCachedRecall(
+        "search",
+        "planning",
+        {
+          query: "planning",
+          bucket: "%",
+          scope: null,
+          teamId: null,
+          memory_type: "semantic",
+          maxItems: 10,
+        },
+        { results: [{ id: "semantic-result", content: "Semantic plan" }] },
+      );
+      cache.putCachedRecall(
+        "search",
+        "planning",
+        {
+          query: "planning",
+          bucket: "%",
+          scope: null,
+          teamId: null,
+          memory_type: "episodic",
+          maxItems: 10,
+        },
+        { results: [{ id: "episodic-result", content: "Episodic plan" }] },
+      );
 
-    fetchMock.mockRejectedValue(new TypeError("fetch failed: offline"));
-    const client = buildClient(cacheDir);
+      fetchMock.mockRejectedValue(new TypeError("fetch failed: offline"));
+      const client = buildClient(cacheDir);
+      const runWithRetryTimers = async <T>(request: Promise<T>): Promise<T> => {
+        const settledRequest = request.then(
+          (value) => ({ ok: true as const, value }),
+          (error: unknown) => ({ ok: false as const, error }),
+        );
+        // Each read has at most two retry delays; advance beyond the maximum
+        // jittered delay without waiting on wall-clock time.
+        await vi.advanceTimersByTimeAsync(10_000);
+        const settled = await settledRequest;
+        if (!settled.ok) throw settled.error;
+        return settled.value;
+      };
 
-    const semanticRes = await client.searchMemory("planning", { memory_type: "semantic" });
-    expect(semanticRes.fromCache).toBe(true);
-    expect((semanticRes.result as any).results[0].id).toBe("semantic-result");
+      const semanticRes = await runWithRetryTimers(client.searchMemory("planning", { memory_type: "semantic" }));
+      expect(semanticRes.fromCache).toBe(true);
+      expect((semanticRes.result as any).results[0].id).toBe("semantic-result");
 
-    const episodicRes = await client.searchMemory("planning", { memory_type: "episodic" });
-    expect(episodicRes.fromCache).toBe(true);
-    expect((episodicRes.result as any).results[0].id).toBe("episodic-result");
+      const episodicRes = await runWithRetryTimers(client.searchMemory("planning", { memory_type: "episodic" }));
+      expect(episodicRes.fromCache).toBe(true);
+      expect((episodicRes.result as any).results[0].id).toBe("episodic-result");
 
-    // Unfiltered search without memory_type has no cache entry and fails transiently
-    await expect(client.searchMemory("planning", {})).rejects.toThrow("fetch failed: offline");
+      // Unfiltered search without memory_type has no cache entry and fails transiently
+      await expect(runWithRetryTimers(client.searchMemory("planning", {}))).rejects.toThrow("fetch failed: offline");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
