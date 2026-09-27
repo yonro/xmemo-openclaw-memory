@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { globalBreaker, XMemoClient } from "./client.js";
+import { createXMemoMemoryRuntime } from "./runtime.js";
 import { XMemoSearchManager } from "./search-manager.js";
 
 function mockResponse(body: unknown, status = 200, headers?: Record<string, string>): Response {
@@ -65,6 +67,64 @@ function createConfig(
 }
 
 describe("XMemoSearchManager", () => {
+  it("uses the trusted runtime agent id while keeping read filters configured", async () => {
+    fetchMock
+      .mockResolvedValueOnce(mockResponse({ items: [] }))
+      .mockResolvedValueOnce(mockResponse({ items: [] }));
+    const cfg = {
+      plugins: {
+        entries: {
+          "xmemo-memory": {
+            config: {
+              apiKey: "key",
+              agentId: "configured-agent",
+              readBucket: "read-bucket",
+              readScope: "read-scope",
+              teamId: "read-team",
+            },
+          },
+        },
+      },
+    } as OpenClawConfig;
+    const runtime = createXMemoMemoryRuntime({} as never);
+
+    for (const agentId of ["agent-a", "agent-b"]) {
+      const { manager } = await runtime.getMemorySearchManager({ cfg, agentId });
+      await manager?.search("project notes", { sessionKey: `session-${agentId}` });
+    }
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.map((_, index) =>
+      (requestInit(index, fetchMock.mock.calls).headers as Record<string, string>)["X-Memory-OS-Agent-ID"],
+    )).toEqual(["agent-a", "agent-b"]);
+    for (let index = 0; index < 2; index += 1) {
+      expect(JSON.parse(String(requestInit(index, fetchMock.mock.calls).body))).toMatchObject({
+        bucket: "read-bucket",
+        scope: "read-scope",
+        team_id: "read-team",
+      });
+      expect(String(requestInit(index, fetchMock.mock.calls).body)).not.toContain("session-");
+    }
+  });
+
+  it("uses filtered search for readFile when read filters are restrictive", async () => {
+    fetchMock.mockResolvedValueOnce(mockResponse({ results: [] }));
+    const client = new XMemoClient("https://xmemo.dev", "key", "agent-a", "instance");
+    const manager = new XMemoSearchManager(
+      client,
+      createConfig({ readBucket: "private-bucket", readScope: "private-scope", teamId: "private-team" }),
+    );
+
+    await expect(manager.readFile({ relPath: "private-bucket/private-id" })).rejects.toThrow("Memory not found");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(requestUrl(0, fetchMock.mock.calls)).toContain("/v1/memories/search?");
+    const url = new URL(requestUrl(0, fetchMock.mock.calls));
+    expect(url.searchParams.get("bucket")).toBe("private-bucket");
+    expect(url.searchParams.get("scope")).toBe("private-scope");
+    expect(url.searchParams.get("team_id")).toBe("private-team");
+  });
+
   it("filters deleted and below-threshold results without inventing missing similarity scores", async () => {
     fetchMock.mockResolvedValue(
       mockResponse({

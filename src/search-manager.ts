@@ -7,6 +7,7 @@ import type {
 } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
 import type { XMemoClient, XMemoRecallContextItem } from "./client.js";
 import type { XMemoMemoryConfig } from "./config.js";
+import { hasRestrictedReadScope } from "./identity-scope.js";
 import { classifyMemorySearchFailure, filterMemorySearchItems, XMEMO_SEARCH_CAPABILITIES } from "./search-policy.js";
 
 const UUID_REGEX =
@@ -122,7 +123,7 @@ export class XMemoSearchManager implements MemorySearchManager {
     let path = trimmed;
 
     // Only attempt direct getMemory if id exists and is a UUID or doesn't end with .md
-    if (id && (isUuid || !trimmed.endsWith(".md"))) {
+    if (id && (isUuid || !trimmed.endsWith(".md")) && !hasRestrictedReadScope(this.config)) {
       try {
         const memory = await this.client.getMemory(id, signal);
         if (typeof memory?.content === "string" && (!memory.status || memory.status.toLowerCase() !== "deleted")) {

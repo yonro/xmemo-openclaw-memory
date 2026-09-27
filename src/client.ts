@@ -838,6 +838,7 @@ export class XMemoClient {
     params?: {
       bucket?: string;
       scope?: string | null;
+      team_id?: string | null;
       item_status?: string;
     },
     signal?: AbortSignal,
@@ -845,6 +846,7 @@ export class XMemoClient {
     const query = this.buildSearchParams({
       bucket: params?.bucket,
       scope: params?.scope,
+      team_id: params?.team_id,
       item_status: params?.item_status,
     });
     return this.request<XMemoReminderListResponse>(`/v1/reminders${query}`, {

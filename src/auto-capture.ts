@@ -9,6 +9,7 @@ import type { OpenClawPluginApi } from "openclaw/plugin-sdk/memory-core-host-run
 import { createHash } from "node:crypto";
 import { XMemoClient, XMemoClientError } from "./client.js";
 import { resolveXMemoMemoryConfig, type XMemoMemoryConfig } from "./config.js";
+import { trustedAgentId, trustedIdentityMetadata } from "./identity-scope.js";
 import { resolveLivePluginConfigObject } from "./openclaw-compat.js";
 
 type AutoCaptureCursor = {
@@ -296,11 +297,13 @@ function shouldCapture(
 }
 
 function captureIdempotencyKey(
+  agentId: string,
   agentInstanceId: string,
   cursorKey: string | undefined,
   message: unknown,
   occurrence: number,
   textIndex: number,
+  senderId: string | undefined,
 ): string {
   const stableId = messageId(message);
   const identity = stableId
@@ -308,12 +311,16 @@ function captureIdempotencyKey(
     : "fingerprint:" + messageFingerprint(message) + "\0" + occurrence;
   return createHash("sha256")
     .update("openclaw-auto-capture\0")
+    .update(agentId)
+    .update("\0")
     .update(agentInstanceId)
     .update("\0")
     .update(cursorKey ?? "")
     .update("\0")
     .update(identity)
     .update(`\0${textIndex}`)
+    .update("\0sender:")
+    .update(senderId ?? "")
     .digest("hex");
 }
 
@@ -379,11 +386,11 @@ function resolveCurrentConfig(
   };
 }
 
-function buildClient(cfg: XMemoMemoryConfig): XMemoClient | null {
+function buildClient(cfg: XMemoMemoryConfig, agentId = cfg.agentId): XMemoClient | null {
   if (!cfg.apiKey) {
     return null;
   }
-  return new XMemoClient(cfg.baseUrl, cfg.apiKey, cfg.agentId, cfg.agentInstanceId, cfg.authMode);
+  return new XMemoClient(cfg.baseUrl, cfg.apiKey, agentId, cfg.agentInstanceId, cfg.authMode);
 }
 
 export function registerXMemoAutoCapture(api: OpenClawPluginApi): void {
@@ -398,12 +405,16 @@ export function registerXMemoAutoCapture(api: OpenClawPluginApi): void {
       return;
     }
 
-    const client = buildClient(cfg);
+    const agentId = trustedAgentId(ctx, cfg.agentId);
+    const sessionIdentity =
+      (typeof ctx.sessionKey === "string" && ctx.sessionKey.trim() ? ctx.sessionKey.trim() : undefined) ??
+      (typeof ctx.sessionId === "string" && ctx.sessionId.trim() ? ctx.sessionId.trim() : undefined);
+    const cursorKey = sessionIdentity ? `${agentId}\0${sessionIdentity}` : undefined;
+    const client = buildClient(cfg, agentId);
     if (!client) {
       return;
     }
 
-    const cursorKey = ctx.sessionKey ?? ctx.sessionId;
     const startPosition = resolveStartPosition(
       event.messages,
       cursorKey ? CURSORS.get(cursorKey) : undefined,
@@ -453,11 +464,13 @@ export function registerXMemoAutoCapture(api: OpenClawPluginApi): void {
 
         const category = detectCategory(sanitized);
         const idempotencyKey = captureIdempotencyKey(
+          agentId,
           cfg.agentInstanceId,
           cursorKey,
           message,
           occurrence,
           textIndex,
+          typeof ctx.senderId === "string" && ctx.senderId.trim() ? ctx.senderId.trim() : undefined,
         );
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 10_000);
@@ -474,7 +487,10 @@ export function registerXMemoAutoCapture(api: OpenClawPluginApi): void {
               memory_type: "auto",
               importance: 0.7,
               source: "openclaw-auto-capture",
-              metadata: { category },
+              metadata: {
+                category,
+                ...trustedIdentityMetadata(ctx, cfg.agentId),
+              },
             },
             idempotencyKey,
             controller.signal,
@@ -538,7 +554,12 @@ export function registerXMemoAutoCapture(api: OpenClawPluginApi): void {
   });
 
   api.on("session_end", (_event, ctx) => {
-    const cursorKey = ctx.sessionKey ?? ctx.sessionId;
+    const cfg = resolveCurrentConfig(api, startupConfig);
+    const agentId = trustedAgentId(ctx, cfg.agentId);
+    const sessionIdentity =
+      (typeof ctx.sessionKey === "string" && ctx.sessionKey.trim() ? ctx.sessionKey.trim() : undefined) ??
+      (typeof ctx.sessionId === "string" && ctx.sessionId.trim() ? ctx.sessionId.trim() : undefined);
+    const cursorKey = sessionIdentity ? `${agentId}\0${sessionIdentity}` : undefined;
     if (cursorKey) {
       CURSORS.delete(cursorKey);
     }

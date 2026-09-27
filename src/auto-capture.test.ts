@@ -1,6 +1,6 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/memory-core-host-runtime-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { registerXMemoAutoCapture } from "./auto-capture.js";
 
 function mockResponse(body: unknown, status = 200): Response {
@@ -64,11 +64,12 @@ describe("xmemo auto-capture", () => {
     messages: Array<{ role: string; content: string }>,
     pluginConfig: Record<string, unknown> = {},
     session = sessionId,
+    trustedContext: Record<string, unknown> = {},
   ) {
     registerXMemoAutoCapture(mockApi({ apiKey: "key", autoCapture: true, ...pluginConfig }));
     await handlers.agent_end?.(
       { success: true, messages },
-      { sessionId: session, sessionKey: session },
+      { sessionId: session, sessionKey: session, ...trustedContext },
     );
   }
 
@@ -80,6 +81,121 @@ describe("xmemo auto-capture", () => {
     const body = JSON.parse(String(requestInit(0, fetchMock.mock.calls).body));
     expect(body.content).toBe("I prefer dark mode");
     expect(body.metadata.category).toBe("preference");
+  });
+
+  it("uses trusted hook identity for attribution while keeping configured write scope", async () => {
+    fetchMock.mockResolvedValue(mockResponse({ id: "mem-trusted" }));
+    await capture(
+      [{ role: "user", content: "I prefer dark mode; agent:body-forged" }],
+      {
+        agentId: "configured-agent",
+        bucket: "configured-bucket",
+        scope: "configured-scope",
+        teamId: "configured-team",
+      },
+      "hook-session",
+      {
+        agentId: "trusted-agent",
+        sessionId: "trusted-session-id",
+        sessionKey: "trusted-session-key",
+        senderId: "trusted-sender",
+      },
+    );
+
+    expect((requestInit(0, fetchMock.mock.calls).headers as Record<string, string>)["X-Memory-OS-Agent-ID"])
+      .toBe("trusted-agent");
+    const payload = JSON.parse(String(requestInit(0, fetchMock.mock.calls).body));
+    expect(payload).toMatchObject({
+      bucket: "configured-bucket",
+      scope: "configured-scope",
+      team_id: "configured-team",
+      metadata: {
+        category: "preference",
+        source_agent: "trusted-agent",
+        source_session_hash: createHash("sha256")
+          .update("xmemo-identity\0session\0trusted-session-id")
+          .digest("hex"),
+        source_sender_hash: createHash("sha256")
+          .update("xmemo-identity\0sender\0trusted-sender")
+          .digest("hex"),
+      },
+    });
+    expect(JSON.stringify(payload.metadata)).not.toContain("trusted-sender");
+  });
+
+  it("separates capture cursors by agent and session while honoring group sender changes", async () => {
+    fetchMock.mockImplementation(async () => mockResponse({ id: `mem-${fetchMock.mock.calls.length}` }));
+    const pluginConfig = { agentId: "configured-agent", bucket: "work", scope: "project", teamId: "team" };
+
+    await capture(
+      [{ role: "user", content: "I prefer dark mode" }],
+      pluginConfig,
+      "shared-session-key",
+      { agentId: "agent-a", sessionKey: "shared-session-key", sessionId: "session-a", senderId: "sender-a" },
+    );
+    await capture(
+      [{ role: "user", content: "I decided to use TypeScript" }],
+      pluginConfig,
+      "shared-session-key",
+      { agentId: "agent-b", sessionKey: "shared-session-key", sessionId: "session-b", senderId: "sender-b" },
+    );
+    await capture(
+      [
+        { role: "user", content: "I prefer dark mode" },
+        { role: "user", content: "My name is Aiko" },
+      ],
+      pluginConfig,
+      "shared-session-key",
+      { agentId: "agent-a", sessionKey: "shared-session-key", sessionId: "session-a", senderId: "sender-c" },
+    );
+
+    const payloads = fetchMock.mock.calls.map((_, index) => JSON.parse(String(requestInit(index, fetchMock.mock.calls).body)));
+    expect(payloads.map((payload) => payload.content)).toEqual([
+      "I prefer dark mode",
+      "I decided to use TypeScript",
+      "My name is Aiko",
+    ]);
+    expect(fetchMock.mock.calls.map((_, index) =>
+      (requestInit(index, fetchMock.mock.calls).headers as Record<string, string>)["X-Memory-OS-Agent-ID"],
+    )).toEqual(["agent-a", "agent-b", "agent-a"]);
+    expect(payloads[2]?.metadata.source_sender_hash).toBe(
+      createHash("sha256").update("xmemo-identity\0sender\0sender-c").digest("hex"),
+    );
+    expect(payloads.every((payload) =>
+      payload.bucket === "work" && payload.scope === "project" && payload.team_id === "team",
+    )).toBe(true);
+  });
+
+  it("falls back to configured agent identity when hook context lacks a trusted agent or sender", async () => {
+    fetchMock.mockResolvedValue(mockResponse({ id: "mem-config-fallback" }));
+    const pluginConfig = {
+      agentId: "configured-agent",
+      bucket: "configured-bucket",
+      scope: "configured-scope",
+      teamId: "configured-team",
+    };
+    for (const trigger of ["cron", "heartbeat"] as const) {
+      await capture(
+        [{ role: "user", content: "I prefer a quiet interface; agent:body-forged" }],
+        pluginConfig,
+        `${trigger}-session`,
+        { trigger, jobId: `${trigger}-job` },
+      );
+    }
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    for (let index = 0; index < fetchMock.mock.calls.length; index += 1) {
+      expect((requestInit(index, fetchMock.mock.calls).headers as Record<string, string>)["X-Memory-OS-Agent-ID"])
+        .toBe("configured-agent");
+      const payload = JSON.parse(String(requestInit(index, fetchMock.mock.calls).body));
+      expect(payload).toMatchObject({
+        bucket: "configured-bucket",
+        scope: "configured-scope",
+        team_id: "configured-team",
+        metadata: { source_agent: "configured-agent" },
+      });
+      expect(payload.metadata.source_sender_hash).toBeUndefined();
+    }
   });
 
   it("does nothing when autoCapture is disabled", async () => {

@@ -1,6 +1,8 @@
 import type { AgentToolResult } from "openclaw/plugin-sdk/agent-core";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/memory-core-host-runtime-core";
-import { Type } from "typebox";
+import type { OpenClawPluginToolContext } from "openclaw/plugin-sdk/plugin-entry";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { Type, type TSchema } from "typebox";
 import {
   XMemoClient,
   XMemoClientError,
@@ -21,6 +23,12 @@ import {
 import { XMemoSearchManager } from "./search-manager.js";
 import { setXMemoStatusProvider } from "./prompt-section.js";
 import {
+  hasRestrictedReadScope,
+  sanitizeUntrustedMemoryMetadata,
+  trustedAgentId,
+  trustedIdentityMetadata,
+} from "./identity-scope.js";
+import {
   tokenizeQuery,
   extractRetrievalHints,
   dedupeAndRank,
@@ -30,8 +38,78 @@ import {
 const UUID_REGEX =
   /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
+type ContextualToolDefinition = {
+  name: string;
+  label: string;
+  description: string;
+  parameters: TSchema;
+  execute: (
+    toolCallId: string,
+    params: unknown,
+    signal?: AbortSignal,
+  ) => Promise<AgentToolResult<unknown>>;
+};
+
+const toolExecutionContext = new AsyncLocalStorage<OpenClawPluginToolContext>();
+
+function registerContextualTool(
+  api: OpenClawPluginApi,
+  tool: ContextualToolDefinition,
+  options?: { names?: string[]; optional?: boolean },
+): void {
+  api.registerTool((context: OpenClawPluginToolContext) => ({
+    ...tool,
+    execute: (toolCallId, params, signal) =>
+      toolExecutionContext.run(context, () => tool.execute(toolCallId, params, signal)),
+  }), options);
+}
+
+function resolveToolConfig(api: OpenClawPluginApi): ReturnType<typeof resolveXMemoMemoryConfig> {
+  const context = toolExecutionContext.getStore();
+  let runtimeConfig: OpenClawPluginToolContext["runtimeConfig"];
+  try {
+    runtimeConfig = context?.getRuntimeConfig?.();
+  } catch {
+    runtimeConfig = undefined;
+  }
+  const config = runtimeConfig ?? context?.runtimeConfig ?? context?.config ?? api.config;
+  const resolved = resolveXMemoMemoryConfig(config);
+  const agentId = trustedAgentId(context, resolved.agentId);
+  return agentId === resolved.agentId ? resolved : { ...resolved, agentId };
+}
+
+function writeIdentityMetadata(
+  cfg: ReturnType<typeof resolveXMemoMemoryConfig>,
+  metadata: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    ...sanitizeUntrustedMemoryMetadata(metadata),
+    ...trustedIdentityMetadata(toolExecutionContext.getStore(), cfg.agentId),
+  };
+}
+
+async function isMemoryInConfiguredReadScope(
+  client: XMemoClient,
+  memoryId: string,
+  cfg: ReturnType<typeof resolveXMemoMemoryConfig>,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  const response = await client.searchMemory(
+    {
+      query: memoryId,
+      bucket: cfg.readBucket,
+      scope: cfg.readScope ?? null,
+      team_id: cfg.teamId ?? null,
+      status: "active",
+      max_items: 10,
+    },
+    signal,
+  );
+  return response.results.some((item) => item.id === memoryId && (!item.status || item.status.toLowerCase() !== "deleted"));
+}
+
 function buildClient(api: OpenClawPluginApi): XMemoClient | null {
-  const cfg = resolveXMemoMemoryConfig(api.config);
+  const cfg = resolveToolConfig(api);
   if (!cfg.apiKey) {
     return null;
   }
@@ -50,7 +128,7 @@ export function resetResilientClientForTesting(): void {
 }
 
 function buildResilientClient(api: OpenClawPluginApi): ResilientXMemoClient | null {
-  const cfg = resolveXMemoMemoryConfig(api.config);
+  const cfg = resolveToolConfig(api);
   if (!cfg.apiKey) {
     _resilientClient?.stopOutboxSync();
     _resilientClient = null;
@@ -369,7 +447,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
     _lifecycleRegisteredApis.add(api);
   }
 
-  api.registerTool(
+  registerContextualTool(api,
     {
       name: "memory_search",
       label: "Memory Search",
@@ -396,7 +474,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           };
         }
 
-        const cfg = resolveXMemoMemoryConfig(api.config);
+        const cfg = resolveToolConfig(api);
         const raw = asToolParamsRecord(params);
         const query = typeof raw.query === "string" ? raw.query.trim() : "";
         const maxResults = typeof raw.maxResults === "number" ? raw.maxResults : cfg.recallMaxItems;
@@ -722,7 +800,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
     { names: ["memory_search"] },
   );
 
-  api.registerTool(
+  registerContextualTool(api,
     {
       name: "memory_get",
       label: "Memory Get",
@@ -748,7 +826,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           };
         }
 
-        const cfg = resolveXMemoMemoryConfig(api.config);
+        const cfg = resolveToolConfig(api);
         const raw = asToolParamsRecord(params);
         const relPath = typeof raw.path === "string" ? raw.path.trim() : (typeof raw.id === "string" ? raw.id.trim() : "");
         if (!relPath) {
@@ -817,7 +895,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
     { names: ["memory_get"] },
   );
 
-  api.registerTool(
+  registerContextualTool(api,
     {
       name: "memory_store",
       label: "Memory Store",
@@ -854,7 +932,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           };
         }
 
-        const cfg = resolveXMemoMemoryConfig(api.config);
+        const cfg = resolveToolConfig(api);
         const raw = asToolParamsRecord(params);
         const content = typeof raw.content === "string" ? raw.content.trim() : "";
         if (!content) {
@@ -868,11 +946,10 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           ? (raw.metadata as Record<string, unknown>)
           : {};
 
-        const metadata: Record<string, unknown> = {
-          source_agent: userMetadata.source_agent ?? cfg.agentId ?? "openclaw",
+        const metadata = writeIdentityMetadata(cfg, {
           retrieval_tags: userMetadata.retrieval_tags ?? tokenizeQuery(content.slice(0, 100)),
           ...userMetadata,
-        };
+        });
 
         const payload: Record<string, unknown> = {
           content,
@@ -927,7 +1004,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
     { names: ["memory_store"] },
   );
 
-  api.registerTool(
+  registerContextualTool(api,
     {
       name: "memory_forget",
       label: "Memory Forget",
@@ -967,7 +1044,17 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           };
         }
 
+        const cfg = resolveToolConfig(api);
         try {
+          if (
+            hasRestrictedReadScope(cfg) &&
+            !(await isMemoryInConfiguredReadScope(resilient.rawClient, parsed.id, cfg, signal))
+          ) {
+            return {
+              content: [{ type: "text", text: "Memory not found in the configured read scope." }],
+              details: { error: "not_found_in_read_scope", id: parsed.id },
+            };
+          }
           await resilient.forgetMemory(
             parsed.id,
             {
@@ -992,7 +1079,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
     { names: ["memory_forget"] },
   );
 
-  api.registerTool(
+  registerContextualTool(api,
     {
       name: "xmemo_todo_create",
       label: "XMemo Todo Create",
@@ -1013,7 +1100,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           };
         }
 
-        const cfg = resolveXMemoMemoryConfig(api.config);
+        const cfg = resolveToolConfig(api);
         const raw = asToolParamsRecord(params);
         const content = typeof raw.content === "string" ? raw.content.trim() : "";
         if (!content) {
@@ -1030,6 +1117,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
             scope: cfg.scope ?? null,
             team_id: cfg.teamId ?? null,
             due_at: typeof raw.due_at === "string" ? raw.due_at : null,
+            metadata: writeIdentityMetadata(cfg),
           };
           const reminder = await client.createReminder(request, signal);
           const reminderText = reminder.content?.trim() || content;
@@ -1050,7 +1138,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
     { names: ["xmemo_todo_create"] },
   );
 
-  api.registerTool(
+  registerContextualTool(api,
     {
       name: "xmemo_todo_list",
       label: "XMemo Todo List",
@@ -1077,7 +1165,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           };
         }
 
-        const cfg = resolveXMemoMemoryConfig(api.config);
+        const cfg = resolveToolConfig(api);
         const raw = asToolParamsRecord(params);
 
         let statusVal = typeof raw.status === "string" ? raw.status.trim().toLowerCase() : "open";
@@ -1085,21 +1173,18 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
         else if (statusVal === "pending" || statusVal === "todo" || statusVal === "active" || statusVal === "uncompleted") statusVal = "open";
         else if (statusVal === "done" || statusVal === "finish" || statusVal === "finished") statusVal = "completed";
 
-        const targetBucket =
-          typeof raw.bucket === "string" && raw.bucket.trim()
-            ? raw.bucket.trim()
-            : cfg.bucket;
-
-        const targetScope =
-          typeof raw.scope === "string" && raw.scope.trim()
-            ? raw.scope.trim()
-            : (targetBucket === cfg.bucket ? (cfg.scope ?? null) : (cfg.readScope ?? null));
+        const requestedBucket = typeof raw.bucket === "string" ? raw.bucket.trim() : "";
+        const targetBucket = cfg.readBucket === "%"
+          ? requestedBucket && requestedBucket !== "%" ? requestedBucket : "%"
+          : cfg.readBucket;
+        const targetScope = cfg.readScope ?? null;
 
         try {
           const { reminders } = await client.listReminders(
             {
               bucket: targetBucket,
               scope: targetScope,
+              team_id: cfg.teamId ?? null,
               item_status: statusVal,
             },
             signal,
@@ -1127,7 +1212,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
     { names: ["xmemo_todo_list"] },
   );
 
-  api.registerTool(
+  registerContextualTool(api,
     {
       name: "xmemo_todo_complete",
       label: "XMemo Todo Complete",
@@ -1147,6 +1232,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
         }
 
         const raw = asToolParamsRecord(params);
+        const cfg = resolveToolConfig(api);
         const id = typeof raw.id === "string" ? raw.id.trim() : "";
         if (!id) {
           return {
@@ -1156,6 +1242,22 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
         }
 
         try {
+          if (hasRestrictedReadScope(cfg)) {
+            const { reminders } = await client.listReminders(
+              {
+                bucket: cfg.readBucket,
+                scope: cfg.readScope ?? null,
+                team_id: cfg.teamId ?? null,
+              },
+              signal,
+            );
+            if (!reminders.some((reminder) => reminder.id === id)) {
+              return {
+                content: [{ type: "text", text: "Reminder not found in the configured read scope." }],
+                details: { error: "not_found_in_read_scope", id },
+              };
+            }
+          }
           const reminder = await client.completeReminder(id, signal);
           const reminderText = reminder.content?.trim();
           return {
@@ -1175,7 +1277,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
     { names: ["xmemo_todo_complete"] },
   );
 
-  api.registerTool(
+  registerContextualTool(api,
     {
       name: "xmemo_record_event",
       label: "XMemo Record Event",
@@ -1201,7 +1303,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           };
         }
 
-        const cfg = resolveXMemoMemoryConfig(api.config);
+        const cfg = resolveToolConfig(api);
         const raw = asToolParamsRecord(params);
         const content = typeof raw.content === "string" ? raw.content.trim() : "";
         if (!content) {
@@ -1218,7 +1320,9 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
             bucket: cfg.bucket,
             scope: cfg.scope ?? null,
             team_id: cfg.teamId ?? null,
+            session_id: toolExecutionContext.getStore()?.sessionId,
             source: "openclaw",
+            metadata: writeIdentityMetadata(cfg),
           };
           const event = await client.recordEvent(request, signal);
           const eventText = event.content?.trim() || content;
@@ -1234,7 +1338,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
     { names: ["xmemo_record_event"] },
   );
 
-  api.registerTool(
+  registerContextualTool(api,
     {
       name: "xmemo_memory_list",
       label: "XMemo Memory List",
@@ -1266,7 +1370,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           };
         }
 
-        const cfg = resolveXMemoMemoryConfig(api.config);
+        const cfg = resolveToolConfig(api);
         const raw = asToolParamsRecord(params);
         const query = typeof raw.query === "string" ? raw.query.trim() : "";
         const path = typeof raw.path === "string" ? raw.path.trim() : "";
@@ -1494,7 +1598,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
     { names: ["xmemo_memory_list"] },
   );
 
-  api.registerTool(
+  registerContextualTool(api,
     {
       name: "xmemo_memory_get",
       label: "XMemo Memory Get",
@@ -1520,7 +1624,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           };
         }
 
-        const cfg = resolveXMemoMemoryConfig(api.config);
+        const cfg = resolveToolConfig(api);
         const raw = asToolParamsRecord(params);
         const id = typeof raw.id === "string" ? raw.id.trim() : "";
         const path = typeof raw.path === "string" ? raw.path.trim() : "";
@@ -1558,7 +1662,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           const extractedId = !id && path ? (path.split("/").pop() || "").trim() : "";
           const effectiveId = id || (extractedId && UUID_REGEX.test(extractedId) ? extractedId : "");
 
-          if (effectiveId) {
+          if (effectiveId && !hasRestrictedReadScope(cfg)) {
             try {
               const memory = await resilient.rawClient.getMemory(effectiveId, signal);
               if (typeof memory?.content === "string" && (!memory.status || memory.status.toLowerCase() !== "deleted")) {
@@ -1673,7 +1777,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
     { names: ["xmemo_memory_get"] },
   );
 
-  api.registerTool(
+  registerContextualTool(api,
     {
       name: "xmemo_memory_update",
       label: "XMemo Memory Update",
@@ -1724,8 +1828,17 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           };
         }
 
-        const cfg = resolveXMemoMemoryConfig(api.config);
+        const cfg = resolveToolConfig(api);
         try {
+          if (
+            hasRestrictedReadScope(cfg) &&
+            !(await isMemoryInConfiguredReadScope(client, parsed.id, cfg, signal))
+          ) {
+            return {
+              content: [{ type: "text", text: "Memory not found in the configured read scope." }],
+              details: { error: "not_found_in_read_scope", id: parsed.id },
+            };
+          }
           const memory = await client.updateMemory(parsed.id, update, signal);
 
           // Invalidate affected recall/search cache in the same identity and space
@@ -1764,7 +1877,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
     { names: ["xmemo_memory_update"] },
   );
 
-  api.registerTool(
+  registerContextualTool(api,
     {
       name: "xmemo_restart_snapshot_save",
       label: "XMemo Restart Snapshot Save",
@@ -1784,7 +1897,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           };
         }
 
-        const cfg = resolveXMemoMemoryConfig(api.config);
+        const cfg = resolveToolConfig(api);
         const raw = asToolParamsRecord(params);
         try {
           const snapshot = await client.saveRestartSnapshot(
@@ -1793,6 +1906,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
               bucket: cfg.bucket,
               scope: cfg.scope ?? null,
               team_id: cfg.teamId ?? null,
+              metadata: writeIdentityMetadata(cfg),
             },
             signal,
           );
@@ -1808,7 +1922,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
     { names: ["xmemo_restart_snapshot_save"] },
   );
 
-  api.registerTool(
+  registerContextualTool(api,
     {
       name: "xmemo_restart_snapshot_restore",
       label: "XMemo Restart Snapshot Restore",
@@ -1830,13 +1944,13 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
         }
 
         const raw = asToolParamsRecord(params);
-        const cfg = resolveXMemoMemoryConfig(api.config);
+        const cfg = resolveToolConfig(api);
         try {
           const result = await client.restoreRestartSnapshot(
             {
               snapshot_id: typeof raw.snapshot_id === "string" ? raw.snapshot_id : null,
-              bucket: typeof raw.bucket === "string" ? raw.bucket : cfg.bucket,
-              scope: typeof raw.scope === "string" ? raw.scope : (cfg.scope ?? null),
+              bucket: cfg.bucket,
+              scope: cfg.scope ?? null,
               team_id: cfg.teamId ?? null,
             },
             signal,
@@ -1846,8 +1960,8 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           if (restored) {
             const resilient = buildResilientClient(api);
             resilient?.invalidateCache({
-              bucket: typeof raw.bucket === "string" ? raw.bucket : cfg.bucket,
-              scope: typeof raw.scope === "string" ? raw.scope : (cfg.scope ?? null),
+              bucket: cfg.bucket,
+              scope: cfg.scope ?? null,
               teamId: cfg.teamId ?? null,
             });
           }
@@ -1870,7 +1984,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
     { names: ["xmemo_restart_snapshot_restore"] },
   );
 
-  api.registerTool(
+  registerContextualTool(api,
     {
       name: "xmemo_ledger_monthly_summary",
       label: "XMemo Ledger Monthly Summary",
@@ -1998,7 +2112,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
     { names: ["xmemo_ledger_monthly_summary"] },
   );
 
-  api.registerTool(
+  registerContextualTool(api,
     {
       name: "xmemo_audit_events",
       label: "XMemo Audit Events",
@@ -2054,7 +2168,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
     { names: ["xmemo_audit_events"] },
   );
 
-  api.registerTool(
+  registerContextualTool(api,
     {
       name: "xmemo_audit_consolidation",
       label: "XMemo Audit Consolidation",

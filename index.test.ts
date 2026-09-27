@@ -15,13 +15,20 @@ describe("xmemo-memory plugin entry", () => {
       cli?: unknown;
     } = { tools: [] };
 
-    const mockApi = {
+    const mockApi: Record<string, unknown> = {
       config: { plugins: {} } as never,
       registerMemoryCapability: (capability: { flushPlanResolver?: () => unknown }) => {
         registered.memoryCapability = capability;
       },
-      registerTool: (tool: { name: string }) => {
-        registered.tools.push(tool.name);
+      registerTool: (tool: unknown) => {
+        const resolved = typeof tool === "function"
+          ? (tool as (context: unknown) => unknown)({ config: { plugins: {} }, runtimeConfig: { plugins: {} } })
+          : tool;
+        for (const candidate of Array.isArray(resolved) ? resolved : [resolved]) {
+          if (candidate && typeof candidate === "object" && "name" in candidate && typeof candidate.name === "string") {
+            registered.tools.push(candidate.name);
+          }
+        }
       },
       registerCli: (registrar: unknown) => {
         registered.cli = registrar;

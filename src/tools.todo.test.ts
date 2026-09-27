@@ -1,4 +1,5 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/memory-core-host-runtime-core";
+import type { OpenClawPluginToolContext } from "openclaw/plugin-sdk/plugin-entry";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerXMemoTools } from "./tools.js";
 
@@ -33,25 +34,42 @@ describe("xmemo_todo_list tool", () => {
     delete process.env.XMEMO_KEY;
   });
 
-  function mockApi(): OpenClawPluginApi {
-    return {
-      config: {
-        plugins: {
-          entries: {
-            "xmemo-memory": {
-              config: {
-                apiKey: "test-key",
-                bucket: "openclaw",
-              },
+  function mockApi(pluginConfig: Record<string, unknown> = {}): OpenClawPluginApi {
+    const config = {
+      plugins: {
+        entries: {
+          "xmemo-memory": {
+            config: {
+              apiKey: "test-key",
+              bucket: "openclaw",
+              ...pluginConfig,
             },
           },
         },
       },
+    };
+    return {
+      config,
       registerTool: (
-        definition: { name: string; execute: (toolCallId: string, params: unknown) => unknown },
+        definition: unknown,
         _opts?: unknown,
       ) => {
-        tools.set(definition.name, definition);
+        const context = { config, runtimeConfig: config } as OpenClawPluginToolContext;
+        const resolved = typeof definition === "function"
+          ? (definition as (context: OpenClawPluginToolContext) => unknown)(context)
+          : definition;
+        for (const candidate of Array.isArray(resolved) ? resolved : [resolved]) {
+          if (
+            candidate &&
+            typeof candidate === "object" &&
+            "name" in candidate &&
+            typeof candidate.name === "string" &&
+            "execute" in candidate &&
+            typeof candidate.execute === "function"
+          ) {
+            tools.set(candidate.name, candidate as { name: string; execute: (toolCallId: string, params: unknown) => unknown });
+          }
+        }
       },
     } as unknown as OpenClawPluginApi;
   }
@@ -84,17 +102,17 @@ describe("xmemo_todo_list tool", () => {
 
     const url = new URL(requestUrl(0, fetchMock.mock.calls));
     expect(url.searchParams.get("item_status")).toBe("open");
-    expect(url.searchParams.get("bucket")).toBe("openclaw");
+    expect(url.searchParams.get("bucket")).toBe("%");
   });
 
-  it("passes custom bucket and scope when provided to xmemo_todo_list", async () => {
+  it("allows a requested bucket to narrow reads but ignores caller-supplied scope", async () => {
     fetchMock.mockResolvedValue(
       mockResponse({
         reminders: [],
       }),
     );
 
-    registerXMemoTools(mockApi());
+    registerXMemoTools(mockApi({ readScope: "configured-scope" }));
     const tool = tools.get("xmemo_todo_list");
     await tool!.execute("call-2", {
       status: "open",
@@ -104,7 +122,7 @@ describe("xmemo_todo_list tool", () => {
 
     const url = new URL(requestUrl(0, fetchMock.mock.calls));
     expect(url.searchParams.get("bucket")).toBe("custom-bucket");
-    expect(url.searchParams.get("scope")).toBe("custom-scope");
+    expect(url.searchParams.get("scope")).toBe("configured-scope");
     expect(url.searchParams.get("item_status")).toBe("open");
   });
 
