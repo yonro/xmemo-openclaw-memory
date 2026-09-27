@@ -36,24 +36,34 @@ function buildClient(api: OpenClawPluginApi): XMemoClient | null {
 /** Cached resilient client instance per process (stateless HTTP, safe to reuse). */
 let _resilientClient: ResilientXMemoClient | null = null;
 let _resilientClientKey = "";
+const _lifecycleRegisteredApis = new WeakSet<object>();
 
 export function resetResilientClientForTesting(): void {
+  _resilientClient?.stopOutboxSync();
   _resilientClient = null;
   _resilientClientKey = "";
 }
 
 function buildResilientClient(api: OpenClawPluginApi): ResilientXMemoClient | null {
   const cfg = resolveXMemoMemoryConfig(api.config);
-  if (!cfg.apiKey) return null;
+  if (!cfg.apiKey) {
+    _resilientClient?.stopOutboxSync();
+    _resilientClient = null;
+    _resilientClientKey = "";
+    return null;
+  }
 
   // Reuse instance if config hasn't changed
   const key = `${cfg.baseUrl}:${cfg.apiKey}:${cfg.agentId}:${cfg.agentInstanceId}:${cfg.authMode}`;
   if (_resilientClient && _resilientClientKey === key) {
+    _resilientClient.startOutboxSync();
     return _resilientClient;
   }
 
+  _resilientClient?.stopOutboxSync();
   const client = new XMemoClient(cfg.baseUrl, cfg.apiKey, cfg.agentId, cfg.agentInstanceId, cfg.authMode);
   _resilientClient = new ResilientXMemoClient(client, cfg);
+  _resilientClient.startOutboxSync();
   _resilientClientKey = key;
 
   // Wire up prompt status injection
@@ -275,6 +285,16 @@ const optionalPositiveInteger = (description: string) =>
   Type.Optional(Type.Integer({ description, minimum: 1 }));
 
 export function registerXMemoTools(api: OpenClawPluginApi): void {
+  const lifecycle = api.lifecycle;
+  if (lifecycle?.registerRuntimeLifecycle && !_lifecycleRegisteredApis.has(api)) {
+    lifecycle.registerRuntimeLifecycle({
+      id: "xmemo-memory.outbox-sync",
+      description: "Stop XMemo's local write recovery timer when the plugin runtime is disabled or unloaded.",
+      cleanup: () => _resilientClient?.stopOutboxSync(),
+    });
+    _lifecycleRegisteredApis.add(api);
+  }
+
   api.registerTool(
     {
       name: "memory_search",
@@ -1937,4 +1957,8 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
     },
     { names: ["xmemo_audit_consolidation"] },
   );
+
+  // Start recovery at plugin registration so persisted writes do not depend on
+  // a later successful foreground request to resume syncing.
+  buildResilientClient(api);
 }

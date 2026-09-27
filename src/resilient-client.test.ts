@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { XMemoClient } from "./client.js";
+import { globalBreaker, XMemoClient } from "./client.js";
 import type { XMemoMemoryConfig } from "./config.js";
-import { XMemoLocalCache } from "./local-cache.js";
+import { XMEMO_OUTBOX_MAX_RECORDS, XMemoLocalCache } from "./local-cache.js";
 import { ResilientXMemoClient } from "./resilient-client.js";
 
 function mockResponse(body: unknown, status = 200): Response {
@@ -90,6 +90,95 @@ describe("ResilientXMemoClient read cache policy", () => {
     expect(result.result).toEqual({
       items: [{ id: "remote", content: "remote authoritative result" }],
     });
+  });
+
+  it("periodically recovers and syncs queued writes without a foreground request, then stops cleanly", async () => {
+    vi.useFakeTimers();
+    let resilient: ResilientXMemoClient | undefined;
+    try {
+      vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+      globalBreaker.recordSuccess();
+      const cache = new XMemoLocalCache(cacheDir);
+      fetchMock.mockImplementation(() => Promise.resolve(mockResponse({ id: "synced" })));
+
+      resilient = buildClient(cacheDir);
+      resilient.startOutboxSync({ intervalMs: 100, staleLockTimeoutMs: 5 * 60_000 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fetchMock).not.toHaveBeenCalled();
+
+      // Leave a record processing while the worker is running, then advance
+      // beyond the lock timeout to exercise recovery on a later timer pass.
+      const staleId = cache.enqueueWrite("remember", "/v1/remember", "POST", { content: "stale" });
+      cache.lockForProcessing(staleId);
+      vi.setSystemTime(new Date("2026-01-01T00:06:00.000Z"));
+      await vi.advanceTimersByTimeAsync(100);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(new XMemoLocalCache(cacheDir).getStats().sentWrites).toBe(1);
+
+      cache.enqueueWrite("remember", "/v1/remember", "POST", { content: "periodic" });
+      await vi.advanceTimersByTimeAsync(100);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      await vi.waitFor(() => expect(new XMemoLocalCache(cacheDir).getStats().sentWrites).toBe(2), {
+        interval: 1,
+        timeout: 100,
+      });
+
+      resilient.stopOutboxSync();
+      cache.enqueueWrite("remember", "/v1/remember", "POST", { content: "after disable" });
+      await vi.advanceTimersByTimeAsync(500);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(new XMemoLocalCache(cacheDir).getStats().pendingWrites).toBe(1);
+    } finally {
+      resilient?.stopOutboxSync();
+      vi.useRealTimers();
+    }
+  });
+
+  it("returns a visible error instead of claiming success when the outbox is full", async () => {
+    const records = Object.fromEntries(Array.from({ length: XMEMO_OUTBOX_MAX_RECORDS }, (_, index) => {
+      const id = `record-${index}`;
+      return [id, {
+        id,
+        operation: "remember",
+        endpoint: "/v1/remember",
+        method: "POST",
+        payload: { index },
+        idempotencyKey: `key-${index}`,
+        status: "pending",
+        retryCount: 0,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        autoReplay: true,
+      }];
+    }));
+    writeFileSync(join(cacheDir, "write-outbox.json"), JSON.stringify({ version: 1, records }), "utf8");
+    const client = buildClient(cacheDir);
+    vi.spyOn(globalBreaker, "isOpen").mockReturnValue(true);
+
+    const result = await client.resilientWrite("remember", "/v1/remember", "POST", { content: "new" }, async () => ({}));
+
+    expect(result).toMatchObject({ status: "error" });
+    expect(result.status === "error" ? result.message : "").toContain("write queue is full");
+    expect(new XMemoLocalCache(cacheDir).getStats().pendingWrites).toBe(XMEMO_OUTBOX_MAX_RECORDS);
+  });
+
+  it("exposes failed queue counts and the last durable error in status", () => {
+    const cache = new XMemoLocalCache(cacheDir);
+    const id = cache.enqueueWrite("remember", "/v1/remember", "POST", { content: "fails" });
+    cache.lockForProcessing(id);
+    cache.markFailed(id, "authorization rejected", false);
+
+    const client = buildClient(cacheDir);
+    const summary = client.getStatusSummary();
+    expect(summary.cacheStats).toMatchObject({
+      failedWrites: 1,
+      lastOutboxError: "authorization rejected",
+    });
+    expect(client.getPromptStatusLine()).toContain("1 writes failed and need attention");
+    expect(client.getPromptStatusLine()).toContain("last write error: authorization rejected");
   });
 
   it("falls back to recall cache only after cloud failure", async () => {

@@ -12,6 +12,7 @@ type ToolResult = AgentToolResult<unknown>;
 
 function createApi(config: Record<string, unknown> = {}) {
   const tools = new Map<string, { execute: (...args: unknown[]) => Promise<ToolResult> }>();
+  const lifecycleCleanups: Array<() => void | Promise<void>> = [];
   const api = {
     config: {
       plugins: {
@@ -28,12 +29,17 @@ function createApi(config: Record<string, unknown> = {}) {
     },
     registerMemoryCapability: () => {},
     registerCli: () => {},
+    lifecycle: {
+      registerRuntimeLifecycle: (lifecycle: { id: string; cleanup?: () => void | Promise<void> }) => {
+        if (lifecycle.cleanup) lifecycleCleanups.push(lifecycle.cleanup);
+      },
+    },
     on: () => {},
     logger: { info: () => {}, warn: () => {} },
     runtime: { config: { current: () => ({ plugins: {} }) } },
   };
   registerXMemoTools(api as never);
-  return { api, tools };
+  return { api, tools, lifecycleCleanups };
 }
 
 function textContent(result: ToolResult): string {
@@ -71,6 +77,7 @@ describe("memory tool helpers", () => {
     const raw = 'Say "yes" && run rm -rf /';
     expect(escapeMemoryForPrompt(raw)).toBe("Say &quot;yes&quot; &amp;&amp; run rm -rf /");
   });
+
 });
 
 describe("memory_search failure-open", () => {
@@ -93,6 +100,16 @@ describe("memory_search failure-open", () => {
     vi.unstubAllEnvs();
     vi.restoreAllMocks();
     rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  it("registers runtime cleanup for the background outbox worker", async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(mockResponse({ items: [] })));
+    const { tools, lifecycleCleanups } = createApi({ apiKey: "key" });
+    const result = await tools.get("memory_search")!.execute("tc-lifecycle", { query: "worker cleanup" });
+
+    expect(textContent(result)).toContain("No matching XMemo memories");
+    expect(lifecycleCleanups).toHaveLength(1);
+    await lifecycleCleanups[0]();
   });
 
   it("returns unavailable when XMemo is not configured", async () => {
@@ -1288,4 +1305,3 @@ describe("Retrieval Robustness Tests", () => {
     });
   });
 });
-

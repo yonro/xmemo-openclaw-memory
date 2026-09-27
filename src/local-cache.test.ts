@@ -1,9 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
-import { XMemoLocalCache } from "./local-cache.js";
+import {
+  XMEMO_OUTBOX_MAX_RECORDS,
+  XMemoLocalCache,
+  XMemoLocalCacheStorageError,
+  XMemoOutboxCapacityError,
+} from "./local-cache.js";
 
 describe("XMemoLocalCache", () => {
   let cacheDir: string;
@@ -108,6 +114,20 @@ describe("XMemoLocalCache", () => {
   });
 
   describe("write outbox", () => {
+    it("merges writes from cache instances created before either write", () => {
+      const cacheA = new XMemoLocalCache(cacheDir);
+      const cacheB = new XMemoLocalCache(cacheDir);
+
+      cacheA.enqueueWrite("remember", "/v1/remember", "POST", { content: "from A" });
+      cacheB.enqueueWrite("remember", "/v1/remember", "POST", { content: "from B" });
+
+      const freshCache = new XMemoLocalCache(cacheDir);
+      expect(freshCache.listPendingWrites().map((record) => record.payload.content).sort()).toEqual([
+        "from A",
+        "from B",
+      ]);
+    });
+
     it("enqueues a write and lists it as pending", () => {
       const id = cache.enqueueWrite("remember", "/v1/remember", "POST", { content: "test" });
       expect(id).toBeTruthy();
@@ -160,6 +180,7 @@ describe("XMemoLocalCache", () => {
       const stats = cache.getStats();
       expect(stats.failedWrites).toBe(1);
       expect(stats.pendingWrites).toBe(0);
+      expect(stats.lastOutboxError).toBe("401 unauthorized");
     });
 
     it("dead-letters after max retries", () => {
@@ -201,6 +222,72 @@ describe("XMemoLocalCache", () => {
 
       const pending = cache.listPendingWrites();
       expect(pending.length).toBe(1);
+    });
+
+    it("does not lose queue, sync, or cache deletion updates across two processes", async () => {
+      const seededA = cache.enqueueWrite("remember", "/v1/remember", "POST", { content: "seed A" });
+      const seededB = cache.enqueueWrite("remember", "/v1/remember", "POST", { content: "seed B" });
+      cache.putCachedRecall("search", "query A", { bucket: "A" }, { items: ["A"] });
+      cache.putCachedRecall("search", "query B", { bucket: "B" }, { items: ["B"] });
+      cache.putCachedRecall("search", "keep", { bucket: "keep" }, { items: ["keep"] });
+
+      const barrier = join(cacheDir, "workers-go");
+      const workerSource = `
+        import { existsSync } from "node:fs";
+        const [moduleUrl, cacheDir, barrier, label, recordId, bucket] = process.argv.slice(1);
+        const { XMemoLocalCache } = await import(moduleUrl);
+        const cache = new XMemoLocalCache(cacheDir);
+        console.log("READY");
+        while (!existsSync(barrier)) await new Promise((resolve) => setTimeout(resolve, 2));
+        cache.enqueueWrite("remember", "/v1/remember", "POST", { content: label });
+        if (!cache.lockForProcessing(recordId)) throw new Error("could not lock " + recordId);
+        cache.markSent(recordId);
+        cache.invalidateRecallCache({ bucket });
+      `;
+      const moduleUrl = new URL("./local-cache.ts", import.meta.url).href;
+      const workers = [
+        ["process A", seededA, "A"],
+        ["process B", seededB, "B"],
+      ].map(([label, recordId, bucket]) => {
+        const child = spawn(
+          process.execPath,
+          ["--experimental-strip-types", "--input-type=module", "-e", workerSource, moduleUrl, cacheDir, barrier, label, recordId, bucket],
+          { stdio: ["ignore", "pipe", "pipe"] },
+        );
+        let output = "";
+        child.stdout.setEncoding("utf8");
+        child.stderr.setEncoding("utf8");
+        child.stdout.on("data", (chunk: string) => { output += chunk; });
+        child.stderr.on("data", (chunk: string) => { output += chunk; });
+        const ready = new Promise<void>((resolve, reject) => {
+          child.stdout.on("data", () => {
+            if (output.includes("READY")) resolve();
+          });
+          child.once("error", reject);
+        });
+        const exited = new Promise<{ code: number | null; output: string }>((resolve) => {
+          child.once("exit", (code) => resolve({ code, output }));
+        });
+        return { ready, exited };
+      });
+
+      await Promise.all(workers.map((worker) => worker.ready));
+      writeFileSync(barrier, "go");
+      const results = await Promise.all(workers.map((worker) => worker.exited));
+      expect(results).toEqual([
+        { code: 0, output: expect.stringContaining("READY") },
+        { code: 0, output: expect.stringContaining("READY") },
+      ]);
+
+      const fresh = new XMemoLocalCache(cacheDir);
+      expect(fresh.listPendingWrites().map((record) => record.payload.content).sort()).toEqual([
+        "process A",
+        "process B",
+      ]);
+      expect(fresh.getStats()).toMatchObject({ sentWrites: 2, pendingWrites: 2, cacheEntries: 1 });
+      expect(fresh.getCachedRecall("search", "query A", { bucket: "A" })).toBeNull();
+      expect(fresh.getCachedRecall("search", "query B", { bucket: "B" })).toBeNull();
+      expect(fresh.getCachedRecall("search", "keep", { bucket: "keep" })).not.toBeNull();
     });
   });
 
@@ -284,6 +371,63 @@ describe("XMemoLocalCache", () => {
 
       expect(statSync(join(cacheDir, "recall-cache.json")).mode & 0o777).toBe(0o600);
       expect(statSync(join(cacheDir, "write-outbox.json")).mode & 0o777).toBe(0o600);
+    });
+
+    it("fails closed when persisted JSON is malformed", () => {
+      writeFileSync(join(cacheDir, "write-outbox.json"), "{ broken", "utf8");
+      expect(() => new XMemoLocalCache(cacheDir)).toThrow(XMemoLocalCacheStorageError);
+    });
+
+    it("keeps old failed records and visibly rejects enqueue at capacity", () => {
+      const records = Object.fromEntries(Array.from({ length: XMEMO_OUTBOX_MAX_RECORDS }, (_, index) => {
+        const failed = index < 101;
+        const id = `record-${index}`;
+        return [id, {
+          id,
+          operation: "remember",
+          endpoint: "/v1/remember",
+          method: "POST",
+          payload: { index },
+          idempotencyKey: `key-${index}`,
+          status: failed ? "failed" : "pending",
+          retryCount: failed ? 5 : 0,
+          lastError: failed ? "permanent error" : undefined,
+          createdAt: 0,
+          updatedAt: failed ? 0 : Date.now(),
+          autoReplay: true,
+        }];
+      }));
+      writeFileSync(join(cacheDir, "write-outbox.json"), JSON.stringify({ version: 1, records }), "utf8");
+
+      const fullCache = new XMemoLocalCache(cacheDir);
+      fullCache.pruneOldRecords();
+      expect(() => fullCache.enqueueWrite("remember", "/v1/remember", "POST", { content: "new" }))
+        .toThrow(XMemoOutboxCapacityError);
+      const persisted = JSON.parse(readFileSync(join(cacheDir, "write-outbox.json"), "utf8"));
+      expect(Object.keys(persisted.records)).toHaveLength(XMEMO_OUTBOX_MAX_RECORDS);
+      expect(Object.values(persisted.records).filter((record: any) => record.status === "failed")).toHaveLength(101);
+    });
+
+    it("keeps credential-scoped data isolated when configuration switches A to B to A", () => {
+      const previousOpenClawData = process.env.OPENCLAW_DATA_DIR;
+      const previousXdgData = process.env.XDG_DATA_HOME;
+      process.env.OPENCLAW_DATA_DIR = join(cacheDir, "scoped-data");
+      delete process.env.XDG_DATA_HOME;
+      try {
+        new XMemoLocalCache({ baseUrl: "https://api.example", apiKey: "account-A" })
+          .enqueueWrite("remember", "/v1/remember", "POST", { content: "A data" });
+        new XMemoLocalCache({ baseUrl: "https://api.example", apiKey: "account-B" })
+          .enqueueWrite("remember", "/v1/remember", "POST", { content: "B data" });
+        const accountAAgain = new XMemoLocalCache({ baseUrl: "https://api.example", apiKey: "account-A" });
+        const accountBAgain = new XMemoLocalCache({ baseUrl: "https://api.example", apiKey: "account-B" });
+        expect(accountAAgain.listPendingWrites().map((record) => record.payload.content)).toEqual(["A data"]);
+        expect(accountBAgain.listPendingWrites().map((record) => record.payload.content)).toEqual(["B data"]);
+      } finally {
+        if (previousOpenClawData === undefined) delete process.env.OPENCLAW_DATA_DIR;
+        else process.env.OPENCLAW_DATA_DIR = previousOpenClawData;
+        if (previousXdgData === undefined) delete process.env.XDG_DATA_HOME;
+        else process.env.XDG_DATA_HOME = previousXdgData;
+      }
     });
   });
 });

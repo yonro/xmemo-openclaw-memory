@@ -1,27 +1,27 @@
 /**
  * Lightweight file-based local cache and write outbox for the XMemo OpenClaw plugin.
  *
- * Uses JSON files stored under the OpenClaw data directory (or fallback to ~/.xmemo/).
- * Provides:
- * - Read cache: recall/search results cached with fresh TTL + max-stale TTL
- * - Write outbox: failed writes queued locally with idempotency keys, exponential
- *   backoff retry, and dead-lettering after max retries
- *
- * Design constraints:
- * - Zero native dependencies (no better-sqlite3, no node:sqlite)
- * - Atomic writes via write-to-temp + rename
- * - The credential is only used to derive a scope hash; it is never written.
- * - Single-process safe (OpenClaw plugins run in one process)
+ * JSON files live under the OpenClaw data directory (or ~/.xmemo fallback). Each
+ * read-modify-write transaction reloads the latest file while holding an
+ * exclusive lock, so multiple plugin instances and processes cannot overwrite
+ * one another's changes.
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  closeSync,
+  copyFileSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
 
 export type CachedRecallEntry = {
   id: string;
@@ -55,24 +55,29 @@ export type OutboxRecord = {
   autoReplay: boolean;
 };
 
-type CacheStore = {
-  version: 1;
-  entries: Record<string, CachedRecallEntry>;
-};
+type CacheStore = { version: 1; entries: Record<string, CachedRecallEntry> };
+type OutboxStore = { version: 1; records: Record<string, OutboxRecord> };
 
-type OutboxStore = {
-  version: 1;
-  records: Record<string, OutboxRecord>;
-};
+export const XMEMO_OUTBOX_MAX_RECORDS = 1_000;
+const LOCK_WAIT_MS = 15_000;
+const LOCK_STALE_MS = 2 * 60_000;
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+export class XMemoLocalCacheStorageError extends Error {
+  constructor(filepath: string, detail: string) {
+    super(`XMemo local storage error at ${filepath}: ${detail}`);
+    this.name = "XMemoLocalCacheStorageError";
+  }
+}
+
+export class XMemoOutboxCapacityError extends Error {
+  constructor(limit: number) {
+    super(`XMemo write queue is full (${limit} records). No write was queued; existing records were kept.`);
+    this.name = "XMemoOutboxCapacityError";
+  }
+}
 
 function ensureDir(dir: string): void {
-  if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
-  }
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
   try {
     chmodSync(dir, 0o700);
   } catch {
@@ -82,65 +87,157 @@ function ensureDir(dir: string): void {
 
 function atomicWriteJson(filepath: string, data: unknown): void {
   ensureDir(dirname(filepath));
-  // Write temp file in the same directory to avoid cross-volume rename issues on Windows
   const tmp = join(dirname(filepath), `.xmemo-${randomUUID()}.tmp`);
-  writeFileSync(tmp, JSON.stringify(data, null, 2), { encoding: "utf-8", mode: 0o600 });
   try {
-    chmodSync(tmp, 0o600);
-  } catch {
-    // chmod is best-effort on Windows and some mounted filesystems.
-  }
-  try {
-    renameSync(tmp, filepath);
-  } catch (err: unknown) {
-    const code = err && typeof err === "object" && "code" in err ? (err as { code?: string }).code : undefined;
-    if (process.platform === "win32" && (code === "EPERM" || code === "EBUSY" || code === "EACCES")) {
-      try {
-        copyFileSync(tmp, filepath);
+    writeFileSync(tmp, JSON.stringify(data, null, 2), { encoding: "utf-8", mode: 0o600 });
+    try {
+      chmodSync(tmp, 0o600);
+    } catch {
+      // chmod is best-effort on Windows and some mounted filesystems.
+    }
+    try {
+      renameSync(tmp, filepath);
+    } catch (err: unknown) {
+      const code = err && typeof err === "object" && "code" in err
+        ? (err as { code?: string }).code
+        : undefined;
+      if (process.platform === "win32" && (code === "EPERM" || code === "EBUSY" || code === "EACCES")) {
         try {
+          copyFileSync(tmp, filepath);
           unlinkSync(tmp);
         } catch {
-          // unlink of temp is best-effort
+          renameSync(tmp, filepath);
         }
-      } catch {
-        renameSync(tmp, filepath);
+      } else {
+        throw err;
       }
-    } else {
-      throw err;
     }
-  }
-  try {
-    chmodSync(filepath, 0o600);
-  } catch {
-    // chmod is best-effort on Windows and some mounted filesystems.
+    try {
+      chmodSync(filepath, 0o600);
+    } catch {
+      // chmod is best-effort on Windows and some mounted filesystems.
+    }
+  } finally {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      // The temp file has normally been renamed already.
+    }
   }
 }
 
-function readJsonSafe<T>(filepath: string, fallback: T): T {
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function readJsonStore<T extends { version: 1 }>(
+  filepath: string,
+  key: "entries" | "records",
+  fallback: T,
+): T {
+  let raw: string;
   try {
-    if (!existsSync(filepath)) return fallback;
-    const raw = readFileSync(filepath, "utf-8");
-    return JSON.parse(raw) as T;
-  } catch {
-    return fallback;
+    raw = readFileSync(filepath, "utf-8");
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return fallback;
+    }
+    throw new XMemoLocalCacheStorageError(filepath, error instanceof Error ? error.message : String(error));
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new XMemoLocalCacheStorageError(
+      filepath,
+      `file is not valid JSON (${error instanceof Error ? error.message : String(error)})`,
+    );
+  }
+  if (!isObjectRecord(parsed) || parsed.version !== 1 || !isObjectRecord(parsed[key])) {
+    throw new XMemoLocalCacheStorageError(filepath, `file has an invalid ${key} store structure`);
+  }
+  for (const value of Object.values(parsed[key])) {
+    if (!isObjectRecord(value)) {
+      throw new XMemoLocalCacheStorageError(filepath, `file contains an invalid ${key} record`);
+    }
+  }
+  return parsed as T;
+}
+
+function withFileLock<T>(filepath: string, operation: () => T): T {
+  ensureDir(dirname(filepath));
+  const lockPath = `${filepath}.lock`;
+  const token = `${process.pid}:${randomUUID()}`;
+  const startedAt = Date.now();
+
+  while (true) {
+    let fd: number | undefined;
+    try {
+      fd = openSync(lockPath, "wx", 0o600);
+      writeFileSync(fd, `${token}\n${Date.now()}`, "utf-8");
+      closeSync(fd);
+      fd = undefined;
+      break;
+    } catch (error) {
+      if (fd !== undefined) {
+        try {
+          closeSync(fd);
+        } catch {
+          // Continue to release the lock path below if it belongs to this attempt.
+        }
+        try {
+          if (readFileSync(lockPath, "utf-8").startsWith(`${token}\n`)) unlinkSync(lockPath);
+        } catch {
+          // The lock may already have been removed by stale-lock recovery.
+        }
+      }
+      const code = error && typeof error === "object" && "code" in error
+        ? (error as { code?: string }).code
+        : undefined;
+      if (code !== "EEXIST") {
+        throw new XMemoLocalCacheStorageError(filepath, `could not acquire file lock (${String(error)})`);
+      }
+
+      try {
+        const firstStat = statSync(lockPath);
+        if (Date.now() - firstStat.mtimeMs > LOCK_STALE_MS) {
+          const secondStat = statSync(lockPath);
+          if (firstStat.ino === secondStat.ino && firstStat.mtimeMs === secondStat.mtimeMs) {
+            unlinkSync(lockPath);
+            continue;
+          }
+        }
+      } catch (statError) {
+        if (statError && typeof statError === "object" && "code" in statError && statError.code === "ENOENT") {
+          continue;
+        }
+        throw new XMemoLocalCacheStorageError(filepath, `could not inspect file lock (${String(statError)})`);
+      }
+
+      if (Date.now() - startedAt >= LOCK_WAIT_MS) {
+        throw new XMemoLocalCacheStorageError(filepath, `timed out waiting for file lock ${lockPath}`);
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+    }
+  }
+
+  try {
+    return operation();
+  } finally {
+    try {
+      if (readFileSync(lockPath, "utf-8").startsWith(`${token}\n`)) unlinkSync(lockPath);
+    } catch {
+      // Lock cleanup is best-effort; the next holder reclaims stale locks.
+    }
   }
 }
 
 function hashSignature(operation: string, query: string, params: Record<string, unknown>): string {
   const sorted = JSON.stringify(params, Object.keys(params).sort());
-  const sig = `${operation}:${query}:${sorted}`;
-  return createHash("sha256").update(sig).digest("hex");
+  return createHash("sha256").update(`${operation}:${query}:${sorted}`).digest("hex");
 }
 
-// ---------------------------------------------------------------------------
-// Default paths
-// ---------------------------------------------------------------------------
-
-/**
- * Generate a cache directory scoped to the current baseUrl + apiKey combination.
- * This prevents outbox writes for account A from replaying against account B,
- * and staging writes from replaying against production.
- */
 function scopedCacheDir(baseUrl: string, apiKey: string): string {
   const baseDir = (() => {
     const openclawData = process.env.OPENCLAW_DATA_DIR;
@@ -149,22 +246,17 @@ function scopedCacheDir(baseUrl: string, apiKey: string): string {
     if (xdg) return join(xdg, "xmemo");
     return join(homedir(), ".xmemo");
   })();
-
   const credentialFingerprint = apiKey ? createHash("sha256").update(apiKey).digest("hex") : "anonymous";
-  const scopeInput = JSON.stringify({ baseUrl, credentialFingerprint });
-  const scopeHash = createHash("sha256").update(scopeInput).digest("hex").slice(0, 16);
+  const scopeHash = createHash("sha256")
+    .update(JSON.stringify({ baseUrl, credentialFingerprint }))
+    .digest("hex")
+    .slice(0, 16);
   return join(baseDir, scopeHash);
 }
-
-// ---------------------------------------------------------------------------
-// XMemoLocalCache
-// ---------------------------------------------------------------------------
 
 export class XMemoLocalCache {
   private readonly cacheFile: string;
   private readonly outboxFile: string;
-  private cache: CacheStore;
-  private outbox: OutboxStore;
 
   constructor(cacheDirOrScope?: string | { baseUrl: string; apiKey: string }) {
     let dir: string;
@@ -173,19 +265,16 @@ export class XMemoLocalCache {
     } else if (cacheDirOrScope) {
       dir = scopedCacheDir(cacheDirOrScope.baseUrl, cacheDirOrScope.apiKey);
     } else {
-      // Fallback: use a generic unscopable directory (testing only)
       dir = join(homedir(), ".xmemo", "_default");
     }
     ensureDir(dir);
     this.cacheFile = join(dir, "recall-cache.json");
     this.outboxFile = join(dir, "write-outbox.json");
-    this.cache = readJsonSafe<CacheStore>(this.cacheFile, { version: 1, entries: {} });
-    this.outbox = readJsonSafe<OutboxStore>(this.outboxFile, { version: 1, records: {} });
+    // Fail at construction for corrupt or unreadable persisted state instead of
+    // treating it as an empty cache/outbox and later overwriting user data.
+    this._readCache();
+    this._readOutbox();
   }
-
-  // -------------------------------------------------------------------------
-  // Read Cache
-  // -------------------------------------------------------------------------
 
   getCachedRecall(
     operation: string,
@@ -193,25 +282,17 @@ export class XMemoLocalCache {
     params: Record<string, unknown>,
   ): { response: unknown; isFresh: boolean } | null {
     const id = hashSignature(operation, query, params);
-    const entry = this.cache.entries[id];
-    if (!entry) return null;
-
-    const now = Date.now();
-    if (now > entry.maxStaleUntil) {
-      // Expired beyond max stale — evict
-      delete this.cache.entries[id];
-      this._saveCache();
-      return null;
-    }
-
-    // Update hit count
-    entry.hitCount++;
-    this._saveCache();
-
-    return {
-      response: entry.response,
-      isFresh: now <= entry.freshUntil,
-    };
+    return this._mutateCache((store) => {
+      const entry = store.entries[id];
+      if (!entry) return { result: null, changed: false };
+      const now = Date.now();
+      if (now > entry.maxStaleUntil) {
+        delete store.entries[id];
+        return { result: null, changed: true };
+      }
+      entry.hitCount++;
+      return { result: { response: entry.response, isFresh: now <= entry.freshUntil }, changed: true };
+    });
   }
 
   putCachedRecall(
@@ -219,241 +300,196 @@ export class XMemoLocalCache {
     query: string,
     params: Record<string, unknown>,
     response: unknown,
-    freshTtlMs: number = 5 * 60 * 1000, // 5 minutes
-    maxStaleTtlMs: number = 24 * 60 * 60 * 1000, // 24 hours
+    freshTtlMs = 5 * 60 * 1000,
+    maxStaleTtlMs = 24 * 60 * 60 * 1000,
   ): void {
     const id = hashSignature(operation, query, params);
     const now = Date.now();
-
-    this.cache.entries[id] = {
-      id,
-      operation,
-      query,
-      paramsHash: id,
-      response,
-      bucket: typeof params.bucket === "string" ? params.bucket : undefined,
-      scope: params.scope !== undefined ? (params.scope as string | null) : undefined,
-      teamId: params.teamId !== undefined ? (params.teamId as string | null) : undefined,
-      createdAt: now,
-      freshUntil: now + freshTtlMs,
-      maxStaleUntil: now + maxStaleTtlMs,
-      hitCount: 0,
-    };
-    this._saveCache();
+    this._mutateCache((store) => {
+      store.entries[id] = {
+        id,
+        operation,
+        query,
+        paramsHash: id,
+        response,
+        bucket: typeof params.bucket === "string" ? params.bucket : undefined,
+        scope: params.scope !== undefined ? (params.scope as string | null) : undefined,
+        teamId: params.teamId !== undefined ? (params.teamId as string | null) : undefined,
+        createdAt: now,
+        freshUntil: now + freshTtlMs,
+        maxStaleUntil: now + maxStaleTtlMs,
+        hitCount: 0,
+      };
+      return { result: undefined, changed: true };
+    });
   }
-
-  // -------------------------------------------------------------------------
-  // Write Outbox
-  // -------------------------------------------------------------------------
 
   enqueueWrite(
     operation: string,
     endpoint: string,
     method: string,
     payload: Record<string, unknown>,
-    options?: {
-      idempotencyKey?: string;
-      autoReplay?: boolean;
-    },
+    options?: { idempotencyKey?: string; autoReplay?: boolean },
   ): string {
     const id = randomUUID();
     const now = Date.now();
     const idempotencyKey = options?.idempotencyKey ?? randomUUID();
     const autoReplay = options?.autoReplay ?? true;
-
-    this.outbox.records[id] = {
-      id,
-      operation,
-      endpoint,
-      method,
-      payload,
-      idempotencyKey,
-      status: autoReplay ? "pending" : "held",
-      retryCount: 0,
-      createdAt: now,
-      updatedAt: now,
-      autoReplay,
-    };
-    this._saveOutbox();
-    return id;
+    return this._mutateOutbox((store) => {
+      const oldestRetainedSentAt = now - 86_400_000;
+      for (const [recordId, record] of Object.entries(store.records)) {
+        if (record.status === "sent" && record.updatedAt < oldestRetainedSentAt) {
+          delete store.records[recordId];
+        }
+      }
+      if (Object.keys(store.records).length >= XMEMO_OUTBOX_MAX_RECORDS) {
+        throw new XMemoOutboxCapacityError(XMEMO_OUTBOX_MAX_RECORDS);
+      }
+      store.records[id] = {
+        id,
+        operation,
+        endpoint,
+        method,
+        payload,
+        idempotencyKey,
+        status: autoReplay ? "pending" : "held",
+        retryCount: 0,
+        createdAt: now,
+        updatedAt: now,
+        autoReplay,
+      };
+      return { result: id, changed: true };
+    });
   }
 
   listPendingWrites(): OutboxRecord[] {
     const now = Date.now();
-    return Object.values(this.outbox.records).filter(
-      (r) => r.status === "pending" && (r.nextRetryAt === undefined || r.nextRetryAt <= now),
+    return Object.values(this._readOutbox().records).filter(
+      (record) => record.status === "pending" && (record.nextRetryAt === undefined || record.nextRetryAt <= now),
     );
   }
 
   lockForProcessing(recordId: string): boolean {
-    const record = this.outbox.records[recordId];
-    if (!record || record.status !== "pending") return false;
-    record.status = "processing";
-    record.lockedAt = Date.now();
-    record.updatedAt = Date.now();
-    this._saveOutbox();
-    return true;
+    return this._mutateOutbox((store) => {
+      const record = store.records[recordId];
+      if (!record || record.status !== "pending") return { result: false, changed: false };
+      record.status = "processing";
+      record.lockedAt = Date.now();
+      record.updatedAt = record.lockedAt;
+      return { result: true, changed: true };
+    });
   }
 
   markSent(recordId: string): void {
-    const record = this.outbox.records[recordId];
-    if (!record) return;
-    record.status = "sent";
-    record.lockedAt = undefined;
-    record.updatedAt = Date.now();
-    this._saveOutbox();
+    this._mutateOutbox((store) => {
+      const record = store.records[recordId];
+      if (!record) return { result: undefined, changed: false };
+      record.status = "sent";
+      record.lockedAt = undefined;
+      record.lastError = undefined;
+      record.updatedAt = Date.now();
+      return { result: undefined, changed: true };
+    });
   }
 
   markFailed(recordId: string, error: string, isTransient: boolean, maxRetries = 5): void {
-    const record = this.outbox.records[recordId];
-    if (!record) return;
-
-    record.retryCount++;
-    record.lastError = error;
-    record.lockedAt = undefined;
-    record.updatedAt = Date.now();
-
-    if (!isTransient || record.retryCount >= maxRetries) {
-      record.status = "failed";
-    } else {
-      // Exponential backoff: (2^retryCount) * 10s, capped at 1 hour
-      const backoffMs = Math.min(Math.pow(2, record.retryCount) * 10_000, 3_600_000);
-      record.nextRetryAt = Date.now() + backoffMs;
-      record.status = "pending";
-    }
-    this._saveOutbox();
+    this._mutateOutbox((store) => {
+      const record = store.records[recordId];
+      if (!record) return { result: undefined, changed: false };
+      record.retryCount++;
+      record.lastError = error;
+      record.lockedAt = undefined;
+      record.updatedAt = Date.now();
+      if (!isTransient || record.retryCount >= maxRetries) {
+        record.status = "failed";
+        record.nextRetryAt = undefined;
+      } else {
+        const backoffMs = Math.min(Math.pow(2, record.retryCount) * 10_000, 3_600_000);
+        record.nextRetryAt = Date.now() + backoffMs;
+        record.status = "pending";
+      }
+      return { result: undefined, changed: true };
+    });
   }
 
   recoverStaleLocks(timeoutMs = 300_000): number {
-    const staleTime = Date.now() - timeoutMs;
-    let recovered = 0;
-
-    for (const record of Object.values(this.outbox.records)) {
-      if (record.status === "processing" && record.lockedAt !== undefined && record.lockedAt < staleTime) {
-        record.status = record.autoReplay ? "pending" : "held";
-        record.lockedAt = undefined;
-        record.updatedAt = Date.now();
-        recovered++;
+    return this._mutateOutbox((store) => {
+      const staleTime = Date.now() - timeoutMs;
+      let recovered = 0;
+      for (const record of Object.values(store.records)) {
+        if (record.status === "processing" && record.lockedAt !== undefined && record.lockedAt < staleTime) {
+          record.status = record.autoReplay ? "pending" : "held";
+          record.lockedAt = undefined;
+          record.updatedAt = Date.now();
+          recovered++;
+        }
       }
-    }
-
-    if (recovered > 0) this._saveOutbox();
-    return recovered;
+      return { result: recovered, changed: recovered > 0 };
+    });
   }
-
-  // -------------------------------------------------------------------------
-  // Pruning & Stats
-  // -------------------------------------------------------------------------
 
   pruneOldRecords(): void {
     const now = Date.now();
     const oneDayAgo = now - 86_400_000;
-    const sevenDaysAgo = now - 7 * 86_400_000;
-    let changed = false;
-
-    // Prune sent records older than 24h
-    for (const [id, record] of Object.entries(this.outbox.records)) {
-      if (record.status === "sent" && record.updatedAt < oneDayAgo) {
-        delete this.outbox.records[id];
-        changed = true;
+    this._mutateOutbox((store) => {
+      let changed = false;
+      // Only cloud-confirmed sent records can be discarded. Failed records stay
+      // visible indefinitely until a user or explicit operation removes them.
+      for (const [id, record] of Object.entries(store.records)) {
+        if (record.status === "sent" && record.updatedAt < oneDayAgo) {
+          delete store.records[id];
+          changed = true;
+        }
       }
-    }
-
-    // Prune failed records older than 7 days
-    for (const [id, record] of Object.entries(this.outbox.records)) {
-      if (record.status === "failed" && record.updatedAt < sevenDaysAgo) {
-        delete this.outbox.records[id];
-        changed = true;
+      return { result: undefined, changed };
+    });
+    this._mutateCache((store) => {
+      let changed = false;
+      for (const [id, entry] of Object.entries(store.entries)) {
+        if (now > entry.maxStaleUntil) {
+          delete store.entries[id];
+          changed = true;
+        }
       }
-    }
-
-    // Cap failed records at 100
-    const failed = Object.values(this.outbox.records).filter((r) => r.status === "failed");
-    if (failed.length > 100) {
-      const excess = failed
-        .sort((a, b) => a.updatedAt - b.updatedAt)
-        .slice(0, failed.length - 100);
-      for (const r of excess) {
-        delete this.outbox.records[r.id];
-      }
-      changed = true;
-    }
-
-    // Prune expired cache entries
-    for (const [id, entry] of Object.entries(this.cache.entries)) {
-      if (now > entry.maxStaleUntil) {
-        delete this.cache.entries[id];
-        changed = true;
-      }
-    }
-
-    if (changed) {
-      this._saveCache();
-      this._saveOutbox();
-    }
+      return { result: undefined, changed };
+    });
   }
 
-  /**
-   * Invalidate cached recall entries matching the filter for this identity/space.
-   * If no filter is given, invalidates all read cache entries in this scoped store.
-   * Never modifies or clears the outbox or other accounts.
-   */
-  invalidateRecallCache(filter?: {
-    bucket?: string | null;
-    scope?: string | null;
-    teamId?: string | null;
-  }): number {
-    let count = 0;
-    const entries = Object.entries(this.cache.entries);
-
-    for (const [id, entry] of entries) {
-      if (filter) {
-        // If entry has bucket metadata, check if it overlaps with filter.bucket
-        if (filter.bucket !== undefined && filter.bucket !== null && entry.bucket !== undefined) {
-          const bucketMatches =
-            entry.bucket === "%" ||
-            filter.bucket === "%" ||
-            entry.bucket.toLowerCase() === filter.bucket.toLowerCase();
-          if (!bucketMatches) continue;
+  invalidateRecallCache(filter?: { bucket?: string | null; scope?: string | null; teamId?: string | null }): number {
+    return this._mutateCache((store) => {
+      let count = 0;
+      for (const [id, entry] of Object.entries(store.entries)) {
+        if (filter) {
+          if (filter.bucket !== undefined && filter.bucket !== null && entry.bucket !== undefined) {
+            const bucketMatches = entry.bucket === "%" || filter.bucket === "%" || entry.bucket.toLowerCase() === filter.bucket.toLowerCase();
+            if (!bucketMatches) continue;
+          }
+          if (filter.scope !== undefined && entry.scope !== undefined) {
+            if (!(entry.scope === null || filter.scope === null || entry.scope === filter.scope)) continue;
+          }
+          if (filter.teamId !== undefined && entry.teamId !== undefined) {
+            if (!(entry.teamId === null || filter.teamId === null || entry.teamId === filter.teamId)) continue;
+          }
         }
-
-        // Check scope overlap
-        if (filter.scope !== undefined && entry.scope !== undefined) {
-          const scopeMatches =
-            entry.scope === null ||
-            filter.scope === null ||
-            entry.scope === filter.scope;
-          if (!scopeMatches) continue;
-        }
-
-        // Check teamId overlap
-        if (filter.teamId !== undefined && entry.teamId !== undefined) {
-          const teamMatches =
-            entry.teamId === null ||
-            filter.teamId === null ||
-            entry.teamId === filter.teamId;
-          if (!teamMatches) continue;
-        }
+        delete store.entries[id];
+        count++;
       }
-
-      delete this.cache.entries[id];
-      count++;
-    }
-
-    if (count > 0) {
-      this._saveCache();
-    }
-    return count;
+      return { result: count, changed: count > 0 };
+    });
   }
 
   clearCache(): void {
-    this.cache = { version: 1, entries: {} };
-    this._saveCache();
+    this._mutateCache((store) => {
+      store.entries = {};
+      return { result: undefined, changed: true };
+    });
   }
 
   clearOutbox(): void {
-    this.outbox = { version: 1, records: {} };
-    this._saveOutbox();
+    this._mutateOutbox((store) => {
+      store.records = {};
+      return { result: undefined, changed: true };
+    });
   }
 
   getStats(): {
@@ -462,26 +498,47 @@ export class XMemoLocalCache {
     heldWrites: number;
     failedWrites: number;
     sentWrites: number;
+    lastOutboxError: string | null;
+    lastOutboxErrorAt: number | null;
   } {
-    const records = Object.values(this.outbox.records);
+    const records = Object.values(this._readOutbox().records);
+    const latestError = records
+      .filter((record) => record.lastError && (record.status === "pending" || record.status === "failed"))
+      .sort((left, right) => right.updatedAt - left.updatedAt)[0];
     return {
-      cacheEntries: Object.keys(this.cache.entries).length,
-      pendingWrites: records.filter((r) => r.status === "pending").length,
-      heldWrites: records.filter((r) => r.status === "held").length,
-      failedWrites: records.filter((r) => r.status === "failed").length,
-      sentWrites: records.filter((r) => r.status === "sent").length,
+      cacheEntries: Object.keys(this._readCache().entries).length,
+      pendingWrites: records.filter((record) => record.status === "pending").length,
+      heldWrites: records.filter((record) => record.status === "held").length,
+      failedWrites: records.filter((record) => record.status === "failed").length,
+      sentWrites: records.filter((record) => record.status === "sent").length,
+      lastOutboxError: latestError?.lastError ?? null,
+      lastOutboxErrorAt: latestError?.updatedAt ?? null,
     };
   }
 
-  // -------------------------------------------------------------------------
-  // Persistence
-  // -------------------------------------------------------------------------
-
-  private _saveCache(): void {
-    atomicWriteJson(this.cacheFile, this.cache);
+  private _readCache(): CacheStore {
+    return readJsonStore(this.cacheFile, "entries", { version: 1, entries: {} });
   }
 
-  private _saveOutbox(): void {
-    atomicWriteJson(this.outboxFile, this.outbox);
+  private _readOutbox(): OutboxStore {
+    return readJsonStore(this.outboxFile, "records", { version: 1, records: {} });
+  }
+
+  private _mutateCache<T>(mutator: (store: CacheStore) => { result: T; changed: boolean }): T {
+    return withFileLock(this.cacheFile, () => {
+      const store = this._readCache();
+      const outcome = mutator(store);
+      if (outcome.changed) atomicWriteJson(this.cacheFile, store);
+      return outcome.result;
+    });
+  }
+
+  private _mutateOutbox<T>(mutator: (store: OutboxStore) => { result: T; changed: boolean }): T {
+    return withFileLock(this.outboxFile, () => {
+      const store = this._readOutbox();
+      const outcome = mutator(store);
+      if (outcome.changed) atomicWriteJson(this.outboxFile, store);
+      return outcome.result;
+    });
   }
 }

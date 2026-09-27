@@ -61,6 +61,11 @@ export class ResilientXMemoClient {
   private _lastSuccessAt = 0;
   private _lastError = "";
   private _syncInProgress = false;
+  private _outboxTimer: ReturnType<typeof setTimeout> | undefined;
+  private _outboxSyncStopped = true;
+  private _outboxSyncIntervalMs = 30_000;
+  private _outboxFailureDelayMs = 30_000;
+  private _staleLockTimeoutMs = 300_000;
 
   constructor(client: XMemoClient, config: XMemoMemoryConfig, cache?: XMemoLocalCache) {
     this.client = client;
@@ -85,6 +90,29 @@ export class ResilientXMemoClient {
 
   get rawClient(): XMemoClient {
     return this.client;
+  }
+
+  /** Start periodic recovery and replay, including an immediate first pass. */
+  startOutboxSync(options?: { intervalMs?: number; staleLockTimeoutMs?: number }): void {
+    if (options?.intervalMs !== undefined) {
+      this._outboxSyncIntervalMs = Math.max(1, options.intervalMs);
+    }
+    if (options?.staleLockTimeoutMs !== undefined) {
+      this._staleLockTimeoutMs = Math.max(1, options.staleLockTimeoutMs);
+    }
+    if (!this._outboxSyncStopped) return;
+    this._outboxSyncStopped = false;
+    this._outboxFailureDelayMs = this._outboxSyncIntervalMs;
+    void this._runScheduledOutboxSync();
+  }
+
+  /** Stop future background passes when OpenClaw disables or unloads the plugin. */
+  stopOutboxSync(): void {
+    this._outboxSyncStopped = true;
+    if (this._outboxTimer !== undefined) {
+      clearTimeout(this._outboxTimer);
+      this._outboxTimer = undefined;
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -319,6 +347,7 @@ export class ResilientXMemoClient {
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error);
           this.cache.markFailed(record.id, msg, isTransientError(error));
+          this._recordFailure(error);
           failed++;
 
           if (globalBreaker.state === "open") break;
@@ -371,16 +400,16 @@ export class ResilientXMemoClient {
   getPromptStatusLine(): string {
     const state = globalBreaker.state;
     if (this._status === "online" && state === "closed") {
-      return "XMemo status: online. Memory recall and writes are fully operational.";
+      const queueNote = this._outboxStatusNote(this.cache.getStats());
+      return `XMemo status: online. Memory recall and writes are operational.${queueNote}`;
     }
     if (this._status === "unknown") {
-      return "XMemo is enabled as the active long-term memory backend. Relevant project context, decisions, and prior fixes may be injected automatically or retrieved with the memory tools.";
+      const queueNote = this._outboxStatusNote(this.cache.getStats());
+      return `XMemo is enabled as the active long-term memory backend. Relevant project context, decisions, and prior fixes may be injected automatically or retrieved with the memory tools.${queueNote}`;
     }
     if (this._status === "degraded" || state === "half-open") {
       const stats = this.cache.getStats();
-      const queueNote = stats.pendingWrites > 0
-        ? ` ${stats.pendingWrites} writes queued locally.`
-        : "";
+      const queueNote = this._outboxStatusNote(stats);
       return `XMemo status: degraded. Some requests may fail temporarily.${queueNote} Do not assume the user has no saved memories just because recall is empty.`;
     }
     // offline
@@ -388,9 +417,7 @@ export class ResilientXMemoClient {
     const cacheNote = stats.cacheEntries > 0
       ? ` Local cache has ${stats.cacheEntries} entries for fallback.`
       : "";
-    const queueNote = stats.pendingWrites > 0
-      ? ` ${stats.pendingWrites} writes queued for sync.`
-      : "";
+    const queueNote = this._outboxStatusNote(stats);
     return `XMemo status: offline. Memory service is temporarily unavailable.${cacheNote}${queueNote} Do not overwrite or forget user memory based only on missing recall results.`;
   }
 
@@ -407,11 +434,17 @@ export class ResilientXMemoClient {
     _errorMsg: string,
   ): ResilientWriteResult {
     const autoReplay = IDEMPOTENT_OPS.has(operation);
-
-    this.cache.enqueueWrite(operation, endpoint, method, payload, {
-      idempotencyKey,
-      autoReplay,
-    });
+    try {
+      this.cache.enqueueWrite(operation, endpoint, method, payload, {
+        idempotencyKey,
+        autoReplay,
+      });
+    } catch (error) {
+      return {
+        status: "error",
+        message: error instanceof Error ? error.message : String(error),
+      };
+    }
 
     const note = autoReplay
       ? "queued locally and will sync automatically when connection is restored"
@@ -444,5 +477,34 @@ export class ResilientXMemoClient {
     // Fire-and-forget background sync
     if (globalBreaker.isOpen()) return;
     void this.syncOutbox().catch(() => {});
+  }
+
+  private _outboxStatusNote(stats: ReturnType<XMemoLocalCache["getStats"]>): string {
+    const notes: string[] = [];
+    if (stats.pendingWrites > 0) notes.push(`${stats.pendingWrites} writes queued for sync`);
+    if (stats.heldWrites > 0) notes.push(`${stats.heldWrites} writes are held for manual sync`);
+    if (stats.failedWrites > 0) notes.push(`${stats.failedWrites} writes failed and need attention`);
+    if (stats.lastOutboxError) notes.push(`last write error: ${stats.lastOutboxError}`);
+    return notes.length > 0 ? ` ${notes.join("; ")}.` : "";
+  }
+
+  private async _runScheduledOutboxSync(): Promise<void> {
+    if (this._outboxSyncStopped) return;
+    let nextDelay = this._outboxSyncIntervalMs;
+    try {
+      this.cache.recoverStaleLocks(this._staleLockTimeoutMs);
+      await this.syncOutbox();
+      this._outboxFailureDelayMs = this._outboxSyncIntervalMs;
+    } catch (error) {
+      this._recordFailure(error);
+      nextDelay = this._outboxFailureDelayMs;
+      this._outboxFailureDelayMs = Math.min(this._outboxFailureDelayMs * 2, 5 * 60_000);
+    }
+    if (this._outboxSyncStopped) return;
+    this._outboxTimer = setTimeout(() => {
+      this._outboxTimer = undefined;
+      void this._runScheduledOutboxSync();
+    }, nextDelay);
+    this._outboxTimer.unref?.();
   }
 }
