@@ -33,6 +33,23 @@ describe("retrieval-strategy", () => {
       expect(hints.pathHint).toBe("Projects/Xmemo/Project Plan");
     });
 
+    it("normalizes a spaced path without including trailing English query text", () => {
+      const hints = extractRetrievalHints(
+        "find notes in Projects / Xmemo / design about the auth flow"
+      );
+      expect(hints.pathHint).toBe("Projects/Xmemo/design");
+    });
+
+    it("does not include trailing Chinese query text in a path hint", () => {
+      const hints = extractRetrievalHints("查找 docs/reports 里的审计");
+      expect(hints.pathHint).toBe("docs/reports");
+    });
+
+    it("normalizes spaces around each path separator", () => {
+      const hints = extractRetrievalHints("Projects / Xmemo / Reports");
+      expect(hints.pathHint).toBe("Projects/Xmemo/Reports");
+    });
+
     it("should extract known agent names", () => {
       const hints1 = extractRetrievalHints("created by chatgpt agent");
       expect(hints1.agentHint).toBe("chatgpt");

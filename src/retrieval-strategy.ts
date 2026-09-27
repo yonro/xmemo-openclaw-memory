@@ -45,12 +45,30 @@ export function extractRetrievalHints(query: string): {
   let pathHint: string | undefined;
   let agentHint: string | undefined;
 
-  // Extract a slash-delimited path from prose. Whitespace around separators is
-  // normalized, and spaces inside the final segment are preserved.
-  const pathRegex = /[a-zA-Z0-9_.\u4e00-\u9fa5-]+(?:\s*\/\s*[a-zA-Z0-9_.\u4e00-\u9fa5-]+)+(?:\s+[a-zA-Z0-9_.\u4e00-\u9fa5-]+)*/g;
-  const pathMatches = trimmed.match(pathRegex);
-  if (pathMatches?.length) {
-    pathHint = pathMatches[0].replace(/\s*\/\s*/g, "/").replace(/[.,!?;:]+$/, "");
+  // Spaces may belong to a segment before another slash. For the last segment,
+  // preserve a multiword name only when the remainder looks like a path name;
+  // common prose markers indicate that the query has continued past the path.
+  const pathToken = "[a-zA-Z0-9_.\\u4e00-\\u9fa5-]+";
+  const pathRegex = new RegExp(
+    `${pathToken}\\s*\\/\\s*(?:${pathToken}(?:\\s+${pathToken})*\\s*\\/\\s*)*${pathToken}`,
+    "g"
+  );
+  const pathMatch = pathRegex.exec(trimmed);
+  if (pathMatch) {
+    let matchedPath = pathMatch[0];
+    const trailingText = trimmed.slice(pathMatch.index + matchedPath.length);
+    const trailingWords = trailingText.match(
+      /^\s+([a-zA-Z0-9_.\u4e00-\u9fa5-]+(?:\s+[a-zA-Z0-9_.\u4e00-\u9fa5-]+)*)[.,!?;:]*$/
+    )?.[1];
+    const proseMarkers = new Set([
+      "about", "and", "for", "from", "in", "of", "on", "or", "the", "to", "with",
+    ]);
+    const continuesAsProse = trailingWords?.split(/\s+/).some(word => {
+      const normalized = word.toLowerCase();
+      return proseMarkers.has(normalized) || ["里", "的", "中", "关于"].some(marker => word.startsWith(marker));
+    });
+    if (trailingWords && !continuesAsProse) matchedPath += ` ${trailingWords}`;
+    pathHint = matchedPath.replace(/\s*\/\s*/g, "/").replace(/[.,!?;:]+$/, "");
   }
 
   // Extract agent hint: look for known agent names.
