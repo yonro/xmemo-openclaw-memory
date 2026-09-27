@@ -9,13 +9,7 @@ import { XMemoSearchManager } from "./search-manager.js";
 export function createXMemoMemoryRuntime(_api: OpenClawPluginApi): MemoryPluginRuntime {
   return {
     async getMemorySearchManager(params) {
-      const resolvedConfig = resolveXMemoMemoryConfig(params.cfg);
-      const agentId = typeof params.agentId === "string" && params.agentId.trim()
-        ? params.agentId.trim()
-        : resolvedConfig.agentId;
-      const cfg = agentId === resolvedConfig.agentId
-        ? resolvedConfig
-        : { ...resolvedConfig, agentId };
+      const cfg = resolveXMemoMemoryConfig(params.cfg);
       if (!cfg.apiKey) {
         return {
           manager: null,

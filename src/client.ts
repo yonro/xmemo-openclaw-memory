@@ -94,6 +94,7 @@ export type XMemoMemory = {
   path?: string;
   bucket?: string;
   scope?: string | null;
+  team_id?: string | null;
   memory_type?: string;
   status?: string;
   importance?: number;
@@ -141,6 +142,7 @@ export type XMemoReminder = {
   due_at?: string;
   bucket?: string;
   scope?: string | null;
+  team_id?: string | null;
 };
 
 export type XMemoReminderListResponse = {
@@ -743,29 +745,34 @@ export class XMemoClient {
     });
   }
 
+  async getMemoryDirect(id: string, signal?: AbortSignal): Promise<XMemoMemory> {
+    const explain = await this.request<any>(
+      `/v1/memories/${encodeURIComponent(id)}/explain?include_embedding=false`,
+      { method: "GET", signal },
+    );
+    if (explain && typeof explain.content === "string") {
+      if (explain.status && String(explain.status).toLowerCase() === "deleted") {
+        throw new XMemoClientError("Memory not found", 404);
+      }
+      return {
+        id: explain.id || explain.memory_id || id,
+        content: explain.content,
+        path: explain.path,
+        bucket: explain.bucket,
+        scope: explain.scope,
+        team_id: explain.team_id,
+        memory_type: explain.memory_type,
+        status: explain.status,
+        updated_at: explain.updated_at,
+        created_at: explain.created_at,
+      };
+    }
+    throw new XMemoClientError("Memory not found", 404);
+  }
+
   async getMemory(id: string, signal?: AbortSignal): Promise<XMemoMemory> {
     try {
-      const explain = await this.request<any>(
-        `/v1/memories/${encodeURIComponent(id)}/explain?include_embedding=false`,
-        { method: "GET", signal },
-      );
-      if (explain && typeof explain.content === "string") {
-        if (explain.status && String(explain.status).toLowerCase() === "deleted") {
-          throw new XMemoClientError("Memory not found", 404);
-        }
-        return {
-          id: explain.id || explain.memory_id || id,
-          content: explain.content,
-          path: explain.path,
-          bucket: explain.bucket,
-          scope: explain.scope,
-          memory_type: explain.memory_type,
-          status: explain.status,
-          updated_at: explain.updated_at,
-          created_at: explain.created_at,
-        };
-      }
-      throw new XMemoClientError("Memory not found", 404);
+      return await this.getMemoryDirect(id, signal);
     } catch (error) {
       // Only fall back to search-by-id when the direct GET endpoint is missing or
       // unavailable (404/405). Auth, timeout, and server errors should surface as-is.
@@ -838,16 +845,16 @@ export class XMemoClient {
     params?: {
       bucket?: string;
       scope?: string | null;
-      team_id?: string | null;
       item_status?: string;
+      limit?: number;
     },
     signal?: AbortSignal,
   ): Promise<XMemoReminderListResponse> {
     const query = this.buildSearchParams({
       bucket: params?.bucket,
       scope: params?.scope,
-      team_id: params?.team_id,
       item_status: params?.item_status,
+      limit: params?.limit,
     });
     return this.request<XMemoReminderListResponse>(`/v1/reminders${query}`, {
       method: "GET",

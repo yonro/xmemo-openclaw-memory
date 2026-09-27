@@ -24,8 +24,8 @@ import { XMemoSearchManager } from "./search-manager.js";
 import { setXMemoStatusProvider } from "./prompt-section.js";
 import {
   hasRestrictedReadScope,
+  matchesConfiguredReadScope,
   sanitizeUntrustedMemoryMetadata,
-  trustedAgentId,
   trustedIdentityMetadata,
 } from "./identity-scope.js";
 import {
@@ -73,9 +73,7 @@ function resolveToolConfig(api: OpenClawPluginApi): ReturnType<typeof resolveXMe
     runtimeConfig = undefined;
   }
   const config = runtimeConfig ?? context?.runtimeConfig ?? context?.config ?? api.config;
-  const resolved = resolveXMemoMemoryConfig(config);
-  const agentId = trustedAgentId(context, resolved.agentId);
-  return agentId === resolved.agentId ? resolved : { ...resolved, agentId };
+  return resolveXMemoMemoryConfig(config);
 }
 
 function writeIdentityMetadata(
@@ -94,18 +92,16 @@ async function isMemoryInConfiguredReadScope(
   cfg: ReturnType<typeof resolveXMemoMemoryConfig>,
   signal?: AbortSignal,
 ): Promise<boolean> {
-  const response = await client.searchMemory(
-    {
-      query: memoryId,
-      bucket: cfg.readBucket,
-      scope: cfg.readScope ?? null,
-      team_id: cfg.teamId ?? null,
-      status: "active",
-      max_items: 10,
-    },
-    signal,
-  );
-  return response.results.some((item) => item.id === memoryId && (!item.status || item.status.toLowerCase() !== "deleted"));
+  try {
+    const memory = await client.getMemoryDirect(memoryId, signal);
+    return memory.id === memoryId && matchesConfiguredReadScope(memory, cfg);
+  } catch (error) {
+    const status = typeof error === "object" && error !== null && "status" in error
+      ? (error as { status?: unknown }).status
+      : undefined;
+    if (status === 404 || status === 405) return false;
+    throw error;
+  }
 }
 
 function buildClient(api: OpenClawPluginApi): XMemoClient | null {
@@ -1184,25 +1180,28 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
             {
               bucket: targetBucket,
               scope: targetScope,
-              team_id: cfg.teamId ?? null,
               item_status: statusVal,
             },
             signal,
           );
+          const visibleReminders = reminders.filter((reminder) =>
+            matchesConfiguredReadScope(reminder, cfg) &&
+            (targetBucket === "%" || reminder.bucket === undefined || reminder.bucket === targetBucket),
+          );
 
-          if (reminders.length === 0) {
+          if (visibleReminders.length === 0) {
             return {
               content: [{ type: "text", text: "No XMemo reminders found." }],
               details: { count: 0 },
             };
           }
 
-          const lines = reminders.map(
+          const lines = visibleReminders.map(
             (r, i) => `${i + 1}. [id: ${r.id}] [${r.item_status || "open"}] ${r.content}${r.due_at ? ` (due ${r.due_at})` : ""}`,
           );
           return {
             content: [{ type: "text", text: `XMemo reminders:\n\n${lines.join("\n")}` }],
-            details: { count: reminders.length, reminders },
+            details: { count: visibleReminders.length, reminders: visibleReminders },
           };
         } catch (error) {
           return buildErrorResult(error);
@@ -1247,11 +1246,14 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
               {
                 bucket: cfg.readBucket,
                 scope: cfg.readScope ?? null,
-                team_id: cfg.teamId ?? null,
+                item_status: "open",
+                limit: 500,
               },
               signal,
             );
-            if (!reminders.some((reminder) => reminder.id === id)) {
+            if (!reminders.some((reminder) =>
+              reminder.id === id && matchesConfiguredReadScope(reminder, cfg),
+            )) {
               return {
                 content: [{ type: "text", text: "Reminder not found in the configured read scope." }],
                 details: { error: "not_found_in_read_scope", id },
@@ -1661,11 +1663,18 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           // 1. Extract UUID from path if id was not explicitly provided
           const extractedId = !id && path ? (path.split("/").pop() || "").trim() : "";
           const effectiveId = id || (extractedId && UUID_REGEX.test(extractedId) ? extractedId : "");
+          const restrictedExactRead = Boolean(effectiveId && hasRestrictedReadScope(cfg));
 
-          if (effectiveId && !hasRestrictedReadScope(cfg)) {
+          if (effectiveId) {
             try {
-              const memory = await resilient.rawClient.getMemory(effectiveId, signal);
-              if (typeof memory?.content === "string" && (!memory.status || memory.status.toLowerCase() !== "deleted")) {
+              const memory = restrictedExactRead
+                ? await resilient.rawClient.getMemoryDirect(effectiveId, signal)
+                : await resilient.rawClient.getMemory(effectiveId, signal);
+              if (
+                (!restrictedExactRead || matchesConfiguredReadScope(memory, cfg)) &&
+                typeof memory?.content === "string" &&
+                (!memory.status || memory.status.toLowerCase() !== "deleted")
+              ) {
                 text = memory.content;
                 matchedPath = memory.path ?? path;
                 matchedId = memory.id;
@@ -1674,8 +1683,23 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
               if (err?.status === 401 || err?.status === 403 || err?.name === "AbortError") {
                 throw err;
               }
+              if (restrictedExactRead && err?.status !== 404 && err?.status !== 405) {
+                throw err;
+              }
               // Direct getMemory failed or 404/405; will fall back to searchMemory below
             }
+          }
+
+          if (restrictedExactRead && text === undefined) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: "Memory not found in the configured read scope.",
+                },
+              ],
+              details: { error: "not_found_in_read_scope", id: effectiveId, path },
+            };
           }
 
           // 2. If not found by direct id or only path was provided, search via resilient.searchMemory

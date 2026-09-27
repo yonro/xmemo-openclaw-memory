@@ -7,7 +7,7 @@ import type {
 } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
 import type { XMemoClient, XMemoRecallContextItem } from "./client.js";
 import type { XMemoMemoryConfig } from "./config.js";
-import { hasRestrictedReadScope } from "./identity-scope.js";
+import { hasRestrictedReadScope, matchesConfiguredReadScope } from "./identity-scope.js";
 import { classifyMemorySearchFailure, filterMemorySearchItems, XMEMO_SEARCH_CAPABILITIES } from "./search-policy.js";
 
 const UUID_REGEX =
@@ -123,10 +123,18 @@ export class XMemoSearchManager implements MemorySearchManager {
     let path = trimmed;
 
     // Only attempt direct getMemory if id exists and is a UUID or doesn't end with .md
-    if (id && (isUuid || !trimmed.endsWith(".md")) && !hasRestrictedReadScope(this.config)) {
+    const directLookup = id && (isUuid || !trimmed.endsWith(".md"));
+    const restrictedDirectLookup = Boolean(directLookup && hasRestrictedReadScope(this.config));
+    if (directLookup) {
       try {
-        const memory = await this.client.getMemory(id, signal);
-        if (typeof memory?.content === "string" && (!memory.status || memory.status.toLowerCase() !== "deleted")) {
+        const memory = restrictedDirectLookup
+          ? await this.client.getMemoryDirect(id, signal)
+          : await this.client.getMemory(id, signal);
+        if (
+          (!restrictedDirectLookup || matchesConfiguredReadScope(memory, this.config)) &&
+          typeof memory?.content === "string" &&
+          (!memory.status || memory.status.toLowerCase() !== "deleted")
+        ) {
           text = memory.content;
           path = memory.path ?? trimmed;
         }
@@ -134,11 +142,17 @@ export class XMemoSearchManager implements MemorySearchManager {
         if (err?.status === 401 || err?.status === 403 || err?.name === "AbortError") {
           throw err;
         }
+        if (restrictedDirectLookup && err?.status !== 404 && err?.status !== 405) {
+          throw err;
+        }
         // Fallback to searchMemory if direct getMemory failed
       }
     }
 
     if (text === undefined) {
+      if (restrictedDirectLookup) {
+        throw new Error("Memory not found for path: " + trimmed);
+      }
       const response = await this.client.searchMemory(
         {
           query: id || trimmed,

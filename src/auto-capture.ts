@@ -410,7 +410,7 @@ export function registerXMemoAutoCapture(api: OpenClawPluginApi): void {
       (typeof ctx.sessionKey === "string" && ctx.sessionKey.trim() ? ctx.sessionKey.trim() : undefined) ??
       (typeof ctx.sessionId === "string" && ctx.sessionId.trim() ? ctx.sessionId.trim() : undefined);
     const cursorKey = sessionIdentity ? `${agentId}\0${sessionIdentity}` : undefined;
-    const client = buildClient(cfg, agentId);
+    const client = buildClient(cfg);
     if (!client) {
       return;
     }

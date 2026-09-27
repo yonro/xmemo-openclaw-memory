@@ -103,7 +103,7 @@ describe("xmemo auto-capture", () => {
     );
 
     expect((requestInit(0, fetchMock.mock.calls).headers as Record<string, string>)["X-Memory-OS-Agent-ID"])
-      .toBe("trusted-agent");
+      .toBe("configured-agent");
     const payload = JSON.parse(String(requestInit(0, fetchMock.mock.calls).body));
     expect(payload).toMatchObject({
       bucket: "configured-bucket",
@@ -157,7 +157,8 @@ describe("xmemo auto-capture", () => {
     ]);
     expect(fetchMock.mock.calls.map((_, index) =>
       (requestInit(index, fetchMock.mock.calls).headers as Record<string, string>)["X-Memory-OS-Agent-ID"],
-    )).toEqual(["agent-a", "agent-b", "agent-a"]);
+    )).toEqual(["configured-agent", "configured-agent", "configured-agent"]);
+    expect(payloads.map((payload) => payload.metadata.source_agent)).toEqual(["agent-a", "agent-b", "agent-a"]);
     expect(payloads[2]?.metadata.source_sender_hash).toBe(
       createHash("sha256").update("xmemo-identity\0sender\0sender-c").digest("hex"),
     );

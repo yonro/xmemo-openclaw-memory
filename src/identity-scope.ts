@@ -70,3 +70,19 @@ export function hasRestrictedReadScope(
 ): boolean {
   return config.readBucket !== "%" || Boolean(config.readScope) || Boolean(config.teamId);
 }
+
+export function matchesConfiguredReadScope(
+  record: { bucket?: string; scope?: string | null; team_id?: string | null },
+  config: Pick<XMemoMemoryConfig, "readBucket" | "readScope" | "teamId">,
+): boolean {
+  if (config.readBucket !== "%" && record.bucket !== undefined && record.bucket !== config.readBucket) {
+    return false;
+  }
+  if (config.readScope && record.scope !== undefined && record.scope !== config.readScope) {
+    return false;
+  }
+  if (config.teamId && record.team_id !== undefined && record.team_id !== config.teamId) {
+    return false;
+  }
+  return true;
+}

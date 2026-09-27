@@ -482,7 +482,7 @@ describe("memory_search failure-open", () => {
     });
   });
 
-  it("uses trusted tool identity for memory writes and never lets query or metadata text change scope", async () => {
+  it("keeps configured agent attribution while recording trusted identity provenance", async () => {
     fetchMock
       .mockResolvedValueOnce(mockResponse({ id: "stored-1" }))
       .mockResolvedValueOnce(
@@ -534,7 +534,7 @@ describe("memory_search failure-open", () => {
     });
 
     const storeInit = requestInit(0, fetchMock.mock.calls);
-    expect((storeInit.headers as Record<string, string>)["X-Memory-OS-Agent-ID"]).toBe("trusted-agent-b");
+    expect((storeInit.headers as Record<string, string>)["X-Memory-OS-Agent-ID"]).toBe("configured-agent");
     const storedPayload = JSON.parse(String(storeInit.body));
     expect(storedPayload).toMatchObject({
       bucket: "write-bucket",
@@ -568,7 +568,7 @@ describe("memory_search failure-open", () => {
     });
 
     const searchInit = requestInit(1, fetchMock.mock.calls);
-    expect((searchInit.headers as Record<string, string>)["X-Memory-OS-Agent-ID"]).toBe("trusted-agent-b");
+    expect((searchInit.headers as Record<string, string>)["X-Memory-OS-Agent-ID"]).toBe("configured-agent");
     expect(JSON.parse(String(searchInit.body))).toMatchObject({
       query: "agent:query-forged find my memory",
       bucket: "read-bucket",
@@ -577,9 +577,13 @@ describe("memory_search failure-open", () => {
     });
   });
 
-  it("keeps direct memory reads inside configured read filters", async () => {
+  it("returns an in-scope memory by ID even when keyword search would miss it", async () => {
     fetchMock.mockResolvedValueOnce(mockResponse({
-      results: [],
+      id: "inside-id",
+      content: "Exact memory content",
+      bucket: "private-bucket",
+      scope: "private-scope",
+      team_id: "private-team",
     }));
     const { tools } = createApi({
       apiKey: "key",
@@ -588,14 +592,34 @@ describe("memory_search failure-open", () => {
       teamId: "private-team",
     });
 
-    const result = await tools.get("xmemo_memory_get")!.execute("tc-get", { id: "outside-id" });
+    const result = await tools.get("xmemo_memory_get")!.execute("tc-get", { id: "inside-id" });
 
-    expect(textContent(result)).toContain("Memory not found");
+    expect(textContent(result)).toContain("Exact memory content");
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(requestUrl(0, fetchMock.mock.calls)).toContain("/v1/memories/search?");
-    expect(new URL(requestUrl(0, fetchMock.mock.calls)).searchParams.get("bucket")).toBe("private-bucket");
-    expect(new URL(requestUrl(0, fetchMock.mock.calls)).searchParams.get("scope")).toBe("private-scope");
-    expect(new URL(requestUrl(0, fetchMock.mock.calls)).searchParams.get("team_id")).toBe("private-team");
+    expect(requestUrl(0, fetchMock.mock.calls)).toContain("/v1/memories/inside-id/explain?");
+    expect(requestInit(0, fetchMock.mock.calls).method).toBe("GET");
+  });
+
+  it("refuses a direct ID memory only when returned scope definitively mismatches", async () => {
+    fetchMock.mockResolvedValueOnce(mockResponse({
+      id: "outside-id",
+      content: "Out-of-scope content",
+      bucket: "other-bucket",
+      scope: "other-scope",
+      team_id: "other-team",
+    }));
+    const { tools } = createApi({
+      apiKey: "key",
+      readBucket: "private-bucket",
+      readScope: "private-scope",
+      teamId: "private-team",
+    });
+
+    const result = await tools.get("xmemo_memory_get")!.execute("tc-get-mismatch", { id: "outside-id" });
+
+    expect(textContent(result)).toContain("Memory not found in the configured read scope");
+    expect(textContent(result)).not.toContain("Out-of-scope content");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("renders memory_search text when recallContext uses alternate item text fields", async () => {
@@ -799,7 +823,13 @@ describe("configured read-scope preflights for mutations", () => {
   });
 
   it("does not forget a memory outside the configured read scope", async () => {
-    fetchMock.mockResolvedValueOnce(mockResponse({ results: [] }));
+    fetchMock.mockResolvedValueOnce(mockResponse({
+      id: "outside-id",
+      content: "other memory",
+      bucket: "other-bucket",
+      scope: "other-scope",
+      team_id: "other-team",
+    }));
     const { tools } = createApi({
       apiKey: "key",
       readBucket: "private-bucket",
@@ -813,11 +843,44 @@ describe("configured read-scope preflights for mutations", () => {
 
     expect(result.details).toMatchObject({ error: "not_found_in_read_scope" });
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(requestUrl(0, fetchMock.mock.calls)).toContain("/v1/memories/search?");
+    expect(requestUrl(0, fetchMock.mock.calls)).toContain("/v1/memories/outside-id/explain?");
+  });
+
+  it("allows forgetting an in-scope memory without a search-ranked ID match", async () => {
+    fetchMock
+      .mockResolvedValueOnce(mockResponse({
+        id: "inside-id",
+        content: "private memory",
+        bucket: "private-bucket",
+        scope: "private-scope",
+        team_id: "private-team",
+      }))
+      .mockResolvedValueOnce(mockResponse({ ok: true }));
+    const { tools } = createApi({
+      apiKey: "key",
+      readBucket: "private-bucket",
+      readScope: "private-scope",
+      teamId: "private-team",
+    });
+
+    const result = await tools.get("memory_forget")!.execute("tc-forget-inside", {
+      path: "private-bucket/inside-id",
+    });
+
+    expect(result.details).toMatchObject({ action: "deleted", id: "inside-id" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(requestUrl(0, fetchMock.mock.calls)).toContain("/v1/memories/inside-id/explain?");
+    expect(requestUrl(1, fetchMock.mock.calls)).toContain("/v1/memories/inside-id/forget");
   });
 
   it("does not update a memory outside the configured read scope", async () => {
-    fetchMock.mockResolvedValueOnce(mockResponse({ results: [] }));
+    fetchMock.mockResolvedValueOnce(mockResponse({
+      id: "outside-id",
+      content: "other memory",
+      bucket: "other-bucket",
+      scope: "other-scope",
+      team_id: "other-team",
+    }));
     const { tools } = createApi({
       apiKey: "key",
       readBucket: "private-bucket",
@@ -832,7 +895,41 @@ describe("configured read-scope preflights for mutations", () => {
 
     expect(result.details).toMatchObject({ error: "not_found_in_read_scope" });
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(requestUrl(0, fetchMock.mock.calls)).toContain("/v1/memories/search?");
+    expect(requestUrl(0, fetchMock.mock.calls)).toContain("/v1/memories/outside-id/explain?");
+  });
+
+  it("allows updating an in-scope memory without a search-ranked ID match", async () => {
+    fetchMock
+      .mockResolvedValueOnce(mockResponse({
+        id: "inside-id",
+        content: "private memory",
+        bucket: "private-bucket",
+        scope: "private-scope",
+        team_id: "private-team",
+      }))
+      .mockResolvedValueOnce(mockResponse({
+        id: "inside-id",
+        content: "updated memory",
+        bucket: "private-bucket",
+        scope: "private-scope",
+        team_id: "private-team",
+      }));
+    const { tools } = createApi({
+      apiKey: "key",
+      readBucket: "private-bucket",
+      readScope: "private-scope",
+      teamId: "private-team",
+    });
+
+    const result = await tools.get("xmemo_memory_update")!.execute("tc-update-inside", {
+      id: "inside-id",
+      content: "updated memory",
+    });
+
+    expect(result.details).toMatchObject({ action: "updated", id: "inside-id" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(requestUrl(0, fetchMock.mock.calls)).toContain("/v1/memories/inside-id/explain?");
+    expect(requestUrl(1, fetchMock.mock.calls)).toBe("https://xmemo.dev/v1/memories/inside-id");
   });
 });
 
@@ -900,9 +997,9 @@ describe("xmemo_restart_snapshot_restore tool", () => {
     const listUrl = new URL(requestUrl(0, fetchMock.mock.calls));
     expect(listUrl.searchParams.get("bucket")).toBe("read-bucket");
     expect(listUrl.searchParams.get("scope")).toBe("read-scope");
-    expect(listUrl.searchParams.get("team_id")).toBe("write-team");
+    expect(listUrl.searchParams.has("team_id")).toBe(false);
     expect((requestInit(0, fetchMock.mock.calls).headers as Record<string, string>)["X-Memory-OS-Agent-ID"])
-      .toBe("trusted-agent");
+      .toBe("configured-agent");
 
     await tools.get("xmemo_todo_create")!.execute("tc-create", { content: "Follow up" });
     const createPayload = JSON.parse(String(requestInit(1, fetchMock.mock.calls).body));
@@ -913,7 +1010,7 @@ describe("xmemo_restart_snapshot_restore tool", () => {
       metadata: { source_agent: "trusted-agent" },
     });
     expect((requestInit(1, fetchMock.mock.calls).headers as Record<string, string>)["X-Memory-OS-Agent-ID"])
-      .toBe("trusted-agent");
+      .toBe("configured-agent");
 
     await tools.get("xmemo_restart_snapshot_restore")!.execute("tc-restore", {
       snapshot_id: "snapshot-1",
@@ -927,7 +1024,7 @@ describe("xmemo_restart_snapshot_restore tool", () => {
       team_id: "write-team",
     });
     expect((requestInit(2, fetchMock.mock.calls).headers as Record<string, string>)["X-Memory-OS-Agent-ID"])
-      .toBe("trusted-agent");
+      .toBe("configured-agent");
   });
 
   it("does not complete a TODO outside the configured read scope", async () => {
@@ -947,7 +1044,37 @@ describe("xmemo_restart_snapshot_restore tool", () => {
     const listUrl = new URL(requestUrl(0, fetchMock.mock.calls));
     expect(listUrl.searchParams.get("bucket")).toBe("read-bucket");
     expect(listUrl.searchParams.get("scope")).toBe("read-scope");
-    expect(listUrl.searchParams.get("team_id")).toBe("read-team");
+    expect(listUrl.searchParams.has("team_id")).toBe(false);
+    expect(listUrl.searchParams.get("limit")).toBe("500");
+    expect(listUrl.searchParams.get("item_status")).toBe("open");
+  });
+
+  it("completes an in-scope TODO beyond the default reminder page", async () => {
+    const reminders = Array.from({ length: 250 }, (_, index) => ({
+      id: index === 249 ? "late-reminder" : "reminder-" + index,
+      content: "follow up",
+      item_status: "open",
+      bucket: "read-bucket",
+      scope: "read-scope",
+      team_id: "read-team",
+    }));
+    fetchMock
+      .mockResolvedValueOnce(mockResponse({ reminders }))
+      .mockResolvedValueOnce(mockResponse({ reminder: { id: "late-reminder", content: "follow up", item_status: "completed" } }));
+    const { tools } = createApi({
+      apiKey: "key",
+      readBucket: "read-bucket",
+      readScope: "read-scope",
+      teamId: "read-team",
+    });
+
+    const result = await tools.get("xmemo_todo_complete")!.execute("tc-complete-late", { id: "late-reminder" });
+
+    expect(result.details).toMatchObject({ action: "completed", id: "late-reminder" });
+    const listUrl = new URL(requestUrl(0, fetchMock.mock.calls));
+    expect(listUrl.searchParams.get("limit")).toBe("500");
+    expect(listUrl.searchParams.get("item_status")).toBe("open");
+    expect(requestUrl(1, fetchMock.mock.calls)).toContain("/v1/reminders/late-reminder/complete");
   });
 });
 
