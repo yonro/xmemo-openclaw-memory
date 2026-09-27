@@ -1,5 +1,6 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/memory-core-host-runtime-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { randomUUID } from "node:crypto";
 import { registerXMemoAutoCapture } from "./auto-capture.js";
 
 function mockResponse(body: unknown, status = 200): Response {
@@ -13,16 +14,23 @@ function requestInit(callIndex: number, calls: unknown[][]): RequestInit {
   return (calls[callIndex]?.[1] ?? {}) as RequestInit;
 }
 
+function idempotencyKey(callIndex: number, calls: unknown[][]): string | undefined {
+  const headers = requestInit(callIndex, calls).headers as Record<string, string>;
+  return headers["Idempotency-Key"];
+}
+
 describe("xmemo auto-capture", () => {
   let fetchMock: ReturnType<typeof vi.fn>;
   let handlers: Record<string, (event: unknown, ctx: unknown) => Promise<void>>;
   let logs: Array<{ level: string; message: string }>;
+  let sessionId: string;
 
   beforeEach(() => {
     fetchMock = vi.fn();
     global.fetch = fetchMock as unknown as typeof fetch;
     handlers = {};
     logs = [];
+    sessionId = randomUUID();
   });
 
   afterEach(() => {
@@ -55,11 +63,12 @@ describe("xmemo auto-capture", () => {
   async function capture(
     messages: Array<{ role: string; content: string }>,
     pluginConfig: Record<string, unknown> = {},
+    session = sessionId,
   ) {
     registerXMemoAutoCapture(mockApi({ apiKey: "key", autoCapture: true, ...pluginConfig }));
     await handlers.agent_end?.(
       { success: true, messages },
-      { sessionId: "session-1", sessionKey: "session-1" },
+      { sessionId: session, sessionKey: session },
     );
   }
 
@@ -121,15 +130,101 @@ describe("xmemo auto-capture", () => {
     expect(body.content).toBe("I prefer dark mode");
   });
 
-  it("stores at most three capturable memories per run", async () => {
-    fetchMock.mockResolvedValue(mockResponse({ id: "mem-1" }));
-    await capture([
+  it("defers captures above the three-item limit and resumes them on the next event", async () => {
+    fetchMock.mockImplementation(async () => mockResponse({ id: "mem-1" }));
+    const messages = [
       { role: "user", content: "I prefer dark mode" },
       { role: "user", content: "My email is a@b.com" },
       { role: "user", content: "I decided to use TypeScript" },
       { role: "user", content: "I love Kimi" },
+    ];
+
+    await capture(messages);
+    expect(fetchMock.mock.calls.map((_, index) => JSON.parse(String(requestInit(index, fetchMock.mock.calls).body)).content)).toEqual([
+      "I prefer dark mode",
+      "My email is a@b.com",
+      "I decided to use TypeScript",
     ]);
+    await capture(messages);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(JSON.parse(String(requestInit(3, fetchMock.mock.calls).body)).content).toBe("I love Kimi");
+    await capture(messages);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(new Set(fetchMock.mock.calls.map((_, index) => idempotencyKey(index, fetchMock.mock.calls))).size).toBe(4);
+  });
+
+  it("keeps one idempotency key across 503, lost response, and retry", async () => {
+    const messages = [{ role: "user", content: "I prefer dark mode" }];
+    fetchMock
+      .mockResolvedValueOnce(mockResponse({ error: "temporarily unavailable" }, 503))
+      .mockRejectedValueOnce(new TypeError("fetch failed: response lost"))
+      .mockImplementationOnce(async () => mockResponse({ id: "mem-1" }));
+
+    await capture(messages);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const firstKey = idempotencyKey(0, fetchMock.mock.calls);
+    expect(firstKey).toMatch(/^[0-9a-f]{64}$/);
+
+    await capture(messages);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(idempotencyKey(1, fetchMock.mock.calls)).toBe(firstKey);
+
+    await capture(messages);
+
     expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(idempotencyKey(2, fetchMock.mock.calls)).toBe(firstKey);
+    expect(JSON.parse(String(requestInit(2, fetchMock.mock.calls).body)).idempotency_key).toBe(firstKey);
+  });
+
+  it("keeps the idempotency key stable after a session cursor is reset", async () => {
+    const messages = [{ role: "user", content: "I prefer dark mode" }];
+    fetchMock.mockImplementation(async () => mockResponse({ id: "mem-1" }));
+
+    await capture(messages);
+    const firstKey = idempotencyKey(0, fetchMock.mock.calls);
+    await handlers.session_end?.({}, { sessionId, sessionKey: sessionId });
+    await capture(messages);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(idempotencyKey(1, fetchMock.mock.calls)).toBe(firstKey);
+  });
+
+  it("does not skip identical messages when the event history grows", async () => {
+    fetchMock.mockImplementation(async () => mockResponse({ id: "mem-1" }));
+    const repeated = { role: "user", content: "I prefer dark mode" };
+
+    await capture([repeated]);
+    await capture([repeated, repeated]);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(new Set(fetchMock.mock.calls.map((_, index) => idempotencyKey(index, fetchMock.mock.calls))).size).toBe(2);
+  });
+
+  it("captures Chinese, Japanese, and Korean triggers without ASCII word boundaries", async () => {
+    fetchMock.mockImplementation(async () => mockResponse({ id: "mem-1" }));
+    await capture([
+      { role: "user", content: "请记住我喜欢深色模式，以后默认使用深色主题。" },
+      { role: "user", content: "この設定を覚えてください。今後もダークモードを使ってください。" },
+      { role: "user", content: "앞으로 이 설정을 기억해 주세요. 항상 다크 모드를 사용해 주세요." },
+    ]);
+
+    expect(fetchMock.mock.calls.map((_, index) => JSON.parse(String(requestInit(index, fetchMock.mock.calls).body)).content)).toEqual([
+      "请记住我喜欢深色模式，以后默认使用深色主题。",
+      "この設定を覚えてください。今後もダークモードを使ってください。",
+      "앞으로 이 설정을 기억해 주세요. 항상 다크 모드를 사용해 주세요.",
+    ]);
+  });
+
+  it("rejects negated, quoted, and temporary capture requests", async () => {
+    await capture([
+      { role: "user", content: "请不要保存这件事，我喜欢深色模式。" },
+      { role: "user", content: "朋友说：“请记住我喜欢深色模式。”" },
+      { role: "user", content: "今天临时需要深色模式，请记住到今天结束。" },
+      { role: "user", content: "我需要一辆车。" },
+      { role: "user", content: "Please don't save this: I prefer dark mode." },
+    ]);
+
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("respects custom triggers", async () => {

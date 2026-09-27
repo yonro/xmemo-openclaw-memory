@@ -6,6 +6,7 @@
 
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/memory-core-host-runtime-core";
+import { createHash } from "node:crypto";
 import { XMemoClient } from "./client.js";
 import { resolveXMemoMemoryConfig, type XMemoMemoryConfig } from "./config.js";
 import { resolveLivePluginConfigObject } from "./openclaw-compat.js";
@@ -13,6 +14,12 @@ import { resolveLivePluginConfigObject } from "./openclaw-compat.js";
 type AutoCaptureCursor = {
   nextIndex: number;
   lastMessageFingerprint?: string;
+  nextTextIndex?: number;
+};
+
+type AutoCapturePosition = {
+  messageIndex: number;
+  textIndex: number;
 };
 
 const CURSORS = new Map<string, AutoCaptureCursor>();
@@ -38,12 +45,16 @@ const MEMORY_TRIGGERS = [
   /\b(decided|decision|we will use|let's use|going forward|from now on)\b/i,
   /\b(my name is|i am|my email|my phone|my address|contact me at)\b/i,
   /\b(always|never|important|crucial|critical)\b/i,
-  /\b(记住|记下|保存|不要忘记|注意)\b/i,
-  /\b(喜欢|偏好|讨厌|想要|需要)\b/i,
-  /\b(决定|我们使用|以后|重要)\b/i,
-  /\b(覚えて|記憶して|忘れないで|好み|いつも|絶対|重要)\b/i,
-  /\b(기억해|기억해줘|잊지 마|좋아|싫어|항상|절대|중요)\b/i,
+  /(记住|记下|保存|不要忘记|注意|喜欢|偏好|讨厌|想要|决定|以后|重要|默认使用)/i,
+  /(覚えて|記憶して|忘れないで|好み|いつも|絶対|重要|今後|これから)/i,
+  /(기억해|기억해줘|잊지 마|좋아|싫어|항상|절대|중요|앞으로|선호)/i,
 ];
+
+const NEGATED_CAPTURE_RE =
+  /\b(?:don't|do not|please don't)\s+(?:remember|save|store|keep this)\b|(?:不要(?:再)?(?:保存|记录|記錄|记住|記下)|别(?:保存|记录|記錄|记|記)|請勿(?:保存|記錄|記)|请勿(?:保存|记录|记))/iu;
+const TEMPORARY_REQUEST_RE =
+  /\b(?:temporary|temporarily|for now|just for now|only today|for today)\b|(?:今天|今日).{0,12}(?:临时|暫時|暂时)|(?:临时|暫時|暂时).{0,12}(?:需要|要用|要|使用)|(?:今日だけ|一時的に|とりあえず|오늘만|임시로|일시적으로)/iu;
+const QUOTED_TEXT_RE = /"[^"\n]*"|'[^'\n]*'|“[^”]*”|‘[^’]*’|「[^」]*」|『[^』]*』|《[^》]*》/gu;
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   if (value && typeof value === "object" && !Array.isArray(value)) {
@@ -88,22 +99,38 @@ function extractUserTextContent(message: unknown): string[] {
   return texts;
 }
 
-function resolveStartIndex(messages: unknown[], cursor: AutoCaptureCursor | undefined): number {
+function resolveStartPosition(
+  messages: unknown[],
+  cursor: AutoCaptureCursor | undefined,
+): AutoCapturePosition {
   if (!cursor) {
-    return 0;
+    return { messageIndex: 0, textIndex: 0 };
   }
   if (cursor.lastMessageFingerprint && cursor.nextIndex > 0) {
+    if (
+      cursor.nextTextIndex !== undefined &&
+      cursor.nextIndex < messages.length &&
+      messageFingerprint(messages[cursor.nextIndex]) === cursor.lastMessageFingerprint
+    ) {
+      return { messageIndex: cursor.nextIndex, textIndex: cursor.nextTextIndex };
+    }
+    if (
+      cursor.nextTextIndex === undefined &&
+      messageFingerprint(messages[cursor.nextIndex - 1]) === cursor.lastMessageFingerprint
+    ) {
+      return { messageIndex: cursor.nextIndex, textIndex: 0 };
+    }
     for (let index = messages.length - 1; index >= 0; index -= 1) {
       if (messageFingerprint(messages[index]) === cursor.lastMessageFingerprint) {
-        return index + 1;
+        return { messageIndex: index + 1, textIndex: 0 };
       }
     }
-    return 0;
+    return { messageIndex: 0, textIndex: 0 };
   }
   if (cursor.nextIndex <= messages.length) {
-    return cursor.nextIndex;
+    return { messageIndex: cursor.nextIndex, textIndex: 0 };
   }
-  return 0;
+  return { messageIndex: 0, textIndex: 0 };
 }
 
 function sanitizeForCapture(text: string): string {
@@ -129,6 +156,10 @@ function matchesCustomTrigger(text: string, customTriggers?: string[]): boolean 
   }
   const lower = text.toLocaleLowerCase();
   return customTriggers.some((trigger) => lower.includes(trigger.toLocaleLowerCase()));
+}
+
+function removeQuotedText(text: string): string {
+  return text.replace(QUOTED_TEXT_RE, " ");
 }
 
 function looksLikeEnvelopeSludge(text: string): boolean {
@@ -176,8 +207,13 @@ function shouldCapture(
   if (containsLikelySecret(text)) {
     return false;
   }
+  const triggerText = removeQuotedText(text);
+  if (NEGATED_CAPTURE_RE.test(triggerText) || TEMPORARY_REQUEST_RE.test(triggerText)) {
+    return false;
+  }
   const hasTrigger =
-    MEMORY_TRIGGERS.some((r) => r.test(text)) || matchesCustomTrigger(text, options.customTriggers);
+    MEMORY_TRIGGERS.some((r) => r.test(triggerText)) ||
+    matchesCustomTrigger(triggerText, options.customTriggers);
   if (!hasTrigger) {
     return false;
   }
@@ -185,6 +221,25 @@ function shouldCapture(
     return false;
   }
   return true;
+}
+
+function captureIdempotencyKey(
+  agentInstanceId: string,
+  cursorKey: string | undefined,
+  message: unknown,
+  messageIndex: number,
+  textIndex: number,
+): string {
+  return createHash("sha256")
+    .update("openclaw-auto-capture\0")
+    .update(agentInstanceId)
+    .update("\0")
+    .update(cursorKey ?? "")
+    .update("\0")
+    .update(messageFingerprint(message))
+    .update(`\0${messageIndex}`)
+    .update(`\0${textIndex}`)
+    .digest("hex");
 }
 
 function detectCategory(text: string): string {
@@ -258,7 +313,7 @@ export function registerXMemoAutoCapture(api: OpenClawPluginApi): void {
     }
 
     const cursorKey = ctx.sessionKey ?? ctx.sessionId;
-    const startIndex = resolveStartIndex(
+    const startPosition = resolveStartPosition(
       event.messages,
       cursorKey ? CURSORS.get(cursorKey) : undefined,
     );
@@ -266,65 +321,83 @@ export function registerXMemoAutoCapture(api: OpenClawPluginApi): void {
     let stored = 0;
     let capturableSeen = 0;
 
-    for (let index = startIndex; index < event.messages.length; index += 1) {
+    let stoppedAtPendingCapture = false;
+    for (let index = startPosition.messageIndex; index < event.messages.length; index += 1) {
       const message = event.messages[index];
-      let messageProcessed = false;
+      const fingerprint = messageFingerprint(message);
+      const textBlocks = extractUserTextContent(message);
+      const firstTextIndex = index === startPosition.messageIndex ? startPosition.textIndex : 0;
 
-      try {
-        for (const text of extractUserTextContent(message)) {
-          const sanitized = sanitizeForCapture(text);
-          if (
-            !sanitized ||
-            !shouldCapture(sanitized, {
-              maxChars: cfg.captureMaxChars,
-              customTriggers: cfg.customTriggers,
-            })
-          ) {
-            continue;
-          }
-
-          capturableSeen += 1;
-          if (capturableSeen > 3) {
-            continue;
-          }
-
-          const category = detectCategory(sanitized);
-
-          try {
-            const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), 10_000);
-            try {
-              await client.remember(
-                {
-                  content: sanitized,
-                  path: cfg.bucket,
-                  bucket: cfg.bucket,
-                  scope: cfg.scope ?? null,
-                  team_id: cfg.teamId ?? null,
-                  memory_type: "auto",
-                  importance: 0.7,
-                  source: "openclaw-auto-capture",
-                  metadata: { category },
-                },
-                controller.signal,
-              );
-              stored += 1;
-            } finally {
-              clearTimeout(timeout);
-            }
-          } catch (err) {
-            api.logger.warn(`xmemo-memory: auto-capture store failed: ${String(err)}`);
-          }
+      for (let textIndex = firstTextIndex; textIndex < textBlocks.length; textIndex += 1) {
+        const sanitized = sanitizeForCapture(textBlocks[textIndex]);
+        if (
+          !sanitized ||
+          !shouldCapture(sanitized, {
+            maxChars: cfg.captureMaxChars,
+            customTriggers: cfg.customTriggers,
+          })
+        ) {
+          continue;
         }
-        messageProcessed = true;
-      } finally {
-        if (messageProcessed && cursorKey) {
-          CURSORS.set(cursorKey, {
-            nextIndex: index + 1,
-            lastMessageFingerprint: messageFingerprint(message),
-          });
+
+        if (capturableSeen >= 3) {
+          if (cursorKey) {
+            CURSORS.set(cursorKey, {
+              nextIndex: index,
+              lastMessageFingerprint: fingerprint,
+              nextTextIndex: textIndex,
+            });
+          }
+          stoppedAtPendingCapture = true;
+          break;
+        }
+        capturableSeen += 1;
+
+        const category = detectCategory(sanitized);
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 10_000);
+        try {
+          await client.replayWrite(
+            "/v1/remember",
+            "POST",
+            {
+              content: sanitized,
+              path: cfg.bucket,
+              bucket: cfg.bucket,
+              scope: cfg.scope ?? null,
+              team_id: cfg.teamId ?? null,
+              memory_type: "auto",
+              importance: 0.7,
+              source: "openclaw-auto-capture",
+              metadata: { category },
+            },
+            captureIdempotencyKey(cfg.agentInstanceId, cursorKey, message, index, textIndex),
+            controller.signal,
+          );
+          stored += 1;
+        } catch (err) {
+          api.logger.warn(`xmemo-memory: auto-capture store failed: ${String(err)}`);
+          if (cursorKey) {
+            CURSORS.set(cursorKey, {
+              nextIndex: index,
+              lastMessageFingerprint: fingerprint,
+              nextTextIndex: textIndex,
+            });
+          }
+          stoppedAtPendingCapture = true;
+          break;
+        } finally {
+          clearTimeout(timeout);
         }
       }
+
+      if (!stoppedAtPendingCapture && cursorKey) {
+        CURSORS.set(cursorKey, {
+          nextIndex: index + 1,
+          lastMessageFingerprint: fingerprint,
+        });
+      }
+      if (stoppedAtPendingCapture) break;
     }
 
     if (stored > 0) {
