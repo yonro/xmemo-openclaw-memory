@@ -7,6 +7,7 @@
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
+    "allowJs": true,
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
     "declaration": true,
@@ -15,6 +16,6 @@
     "outDir": "dist",
     "types": ["node"]
   },
-  "include": ["index.ts", "doctor-contract-api.ts", "src/**/*.ts", "openclaw.plugin.json"],
+  "include": ["index.ts", "doctor-contract-api.ts", "src/**/*.ts", "src/**/*.mjs", "openclaw.plugin.json"],
   "exclude": ["src/**/*.test.ts"]
 }
