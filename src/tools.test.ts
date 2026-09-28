@@ -1072,16 +1072,38 @@ describe("local mode MemoryService routing", () => {
       content: "direct owner violet lantern phrase",
     });
     expect(stored.details).toMatchObject({ source: "local", action: "created" });
+    const id = String((stored.details as Record<string, unknown>).id);
+    const aliceRead = await alice.tools.get("memory_get")!.execute("direct-get", { id });
+    expect(textContent(aliceRead)).toContain("direct owner violet lantern phrase");
+
+    const bob = createApi({ mode: "local" }, true, {
+      agentId: "agent-local",
+      sessionKey: "agent:agent-local:telegram:direct:bob",
+      requesterSenderId: "bob",
+    });
+    const bobRead = await bob.tools.get("memory_get")!.execute("direct-get-bob", { id });
+    expect(bobRead.details).toMatchObject({ error: "not_found", errorType: "not_found" });
 
     const runtime = createXMemoMemoryRuntime(alice.api as never);
     const { manager } = await runtime.getMemorySearchManager({ cfg: alice.api.config, agentId: "agent-local" } as never);
     const results = await manager?.search("violet lantern", { sessionKey });
     expect(results).toHaveLength(1);
-    await expect(manager!.readFile({ relPath: results![0]!.path })).resolves.toMatchObject({
-      text: "direct owner violet lantern phrase",
+    expect(results![0]!.snippet).toContain("direct owner violet lantern phrase");
+    expect(results![0]!.path).toBe(`local/scoped/${id}`);
+    const aliceSearchRead = await alice.tools.get("memory_get")!.execute("direct-search-read", {
+      path: results![0]!.path,
     });
+    expect(textContent(aliceSearchRead)).toContain("direct owner violet lantern phrase");
+    await expect(manager!.readFile({ relPath: results![0]!.path }))
+      .rejects.toMatchObject({ category: "identity_denied" });
     expect(await manager?.search("violet lantern", { sessionKey: "agent:agent-local:telegram:direct:bob" })).toEqual([]);
-    await expect(manager!.readFile({ relPath: `local/${String((stored.details as Record<string, unknown>).id)}` }))
+    await expect(manager!.readFile({ relPath: results![0]!.path }))
+      .rejects.toMatchObject({ category: "identity_denied" });
+    const bobSearchRead = await bob.tools.get("memory_get")!.execute("direct-search-read-bob", {
+      path: results![0]!.path,
+    });
+    expect(bobSearchRead.details).toMatchObject({ error: "not_found", errorType: "not_found" });
+    await expect(manager!.readFile({ relPath: `local/${id}` }))
       .rejects.toMatchObject({ category: "not_found" });
     expect(fetchMock).not.toHaveBeenCalled();
   });

@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import type {
   MemoryEmbeddingProbeResult,
   MemoryProviderStatus,
@@ -11,14 +10,10 @@ import type { XMemoMemoryConfig } from "./config.js";
 import { CloudProvider, MemoryService, trustedLocalIdentity } from "./memory-service.js";
 import { hasRestrictedReadScope, matchesConfiguredReadScope } from "./identity-scope.js";
 import { classifyMemorySearchFailure, filterMemorySearchItems, XMEMO_SEARCH_CAPABILITIES } from "./search-policy.js";
-import type { TrustedLocalIdentityContext } from "./local/kernel.js";
+import { LocalKernelError, type TrustedLocalIdentityContext } from "./local/kernel.js";
 
 const UUID_REGEX =
   /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
-const MAX_LOCAL_READ_CAPABILITIES = 512;
-
-type LocalReadCapability = { recordId: string; identity: TrustedLocalIdentityContext };
-
 function sameLocalIdentity(left: TrustedLocalIdentityContext, right: TrustedLocalIdentityContext): boolean {
   return left.kind === right.kind && left.actorRef === right.actorRef && left.roomRef === right.roomRef &&
     left.groupOptIn === right.groupOptIn;
@@ -46,7 +41,6 @@ export class XMemoSearchManager implements MemorySearchManager {
 
   private readonly service: MemoryService;
   private readonly config: XMemoMemoryConfig;
-  private readonly localReadCapabilities = new Map<string, LocalReadCapability>();
 
   constructor(source: MemoryService | XMemoClient, config: XMemoMemoryConfig) {
     this.config = config;
@@ -96,19 +90,14 @@ export class XMemoSearchManager implements MemorySearchManager {
       this.lastError = undefined;
       const defaultIdentity = this.service.localIdentityContext ??
         trustedLocalIdentity({ agentId: this.config.agentId }, this.config.agentId);
-      const hasScopedIdentity = !sameLocalIdentity(identity, defaultIdentity);
+      const hasDirectSession = /:(direct|dm)(:|$)/i.test(opts.sessionKey ?? "");
+      const hasScopedIdentity = hasDirectSession || !sameLocalIdentity(identity, defaultIdentity);
       return records.map((record) => {
-        // The host readFile API has no session field. Carry a bounded opaque handle
-        // for results searched under an identity other than the manager's default.
-        const path = hasScopedIdentity ? `local/result/${randomUUID()}` : `local/${record.recordId}`;
-        if (hasScopedIdentity) {
-          this.localReadCapabilities.set(path, { recordId: record.recordId, identity });
-          while (this.localReadCapabilities.size > MAX_LOCAL_READ_CAPABILITIES) {
-            const oldestPath = this.localReadCapabilities.keys().next().value;
-            if (oldestPath === undefined) break;
-            this.localReadCapabilities.delete(oldestPath);
-          }
-        }
+        // The host readFile API has no session field. Scoped paths carry no cached
+        // identity, so readFile can fail closed instead of replaying one session's
+        // trusted identity to another on this shared manager. The per-call memory_get
+        // tool can still authorize this id against its current trusted requester.
+        const path = hasScopedIdentity ? `local/scoped/${record.recordId}` : `local/${record.recordId}`;
         return {
           path,
           startLine: 1,
@@ -186,10 +175,20 @@ export class XMemoSearchManager implements MemorySearchManager {
     }
     if (this.service.mode === "local") {
       const trimmed = relPath.trim();
-      const capability = this.localReadCapabilities.get(trimmed);
-      const id = capability?.recordId ?? memoryIdFromPath(trimmed);
+      if (trimmed.startsWith("local/scoped/")) {
+        throw new LocalKernelError({
+          storageStatus: "not_committed",
+          syncStatus: "local_only",
+          indexStatus: "unchanged",
+          error: {
+            category: "identity_denied",
+            message: "XMemo local identity_denied: scoped search results need a trusted requester identity to read.",
+          },
+        });
+      }
+      const id = memoryIdFromPath(trimmed);
       if (!id) throw new Error(`Memory not found for path: ${trimmed}`);
-      const record = await this.service.localGet(id, capability?.identity);
+      const record = await this.service.localGet(id);
       const allLines = record.body.split("\n");
       const startFrom = Math.max(1, from ?? 1);
       if (record.body.length > 0 && startFrom > allLines.length) {
@@ -201,7 +200,7 @@ export class XMemoSearchManager implements MemorySearchManager {
       const sliced = record.body.length === 0 ? [] : allLines.slice(startFrom - 1, startFrom - 1 + lineCount);
       return {
         text: sliced.join("\n"),
-        path: capability ? trimmed : `local/${record.recordId}`,
+        path: `local/${record.recordId}`,
         truncated: record.body.length > 0 && startFrom - 1 + sliced.length < allLines.length,
         from: startFrom,
         lines: sliced.length,
