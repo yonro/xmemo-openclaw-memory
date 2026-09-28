@@ -229,12 +229,13 @@ describe("xmemo-memory public discovery metadata", () => {
     const tools = manifest.contracts?.tools ?? [];
     expect(tools.length).toBeGreaterThan(0);
     for (const toolName of tools) {
+      const localOnly = toolName === "xmemo_memory_history" || toolName === "xmemo_memory_restore";
       expect(manifest.toolMetadata?.[toolName]).toMatchObject({
-        authSignals: [{ provider: "xmemo-memory" }],
+        ...(localOnly ? {} : { authSignals: [{ provider: "xmemo-memory" }] }),
         configSignals: [
           {
             rootPath: "plugins.entries.xmemo-memory.config",
-            requiredAny: ["apiKey", "token", "mode"],
+            requiredAny: localOnly ? ["mode"] : ["apiKey", "token", "mode"],
           },
         ],
       });

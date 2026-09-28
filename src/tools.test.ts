@@ -1012,11 +1012,27 @@ describe("local mode MemoryService routing", () => {
     const afterUpdate = await tools.get("memory_get")!.execute("local-read-updated", { id });
     expect(textContent(afterUpdate)).toContain("violet marmalade updated marker");
 
+    const history = await tools.get("xmemo_memory_history")!.execute("local-history", { id, limit: 10 });
+    expect(history.details).toMatchObject({ source: "local", coverage: "local_history", count: 2 });
+    const revisions = JSON.parse(textContent(history)) as { revisions: Array<{ revisionId: string; body: string; state: string }> };
+    expect(revisions.revisions.map((item) => item.body)).toEqual([
+      "violet marmalade updated marker",
+      "violet marmalade release marker",
+    ]);
+    const restored = await tools.get("xmemo_memory_restore")!.execute("local-restore", {
+      id,
+      from_revision_id: revisions.revisions[1]!.revisionId,
+      base_revision: String((afterUpdate.details as Record<string, unknown>).revision),
+    });
+    expect(restored.details).toMatchObject({ action: "restored", source: "local", write_kind: "restored" });
+    const afterRestore = await tools.get("memory_get")!.execute("local-read-restored", { id });
+    expect(textContent(afterRestore)).toContain("violet marmalade release marker");
+
     const runtime = createXMemoMemoryRuntime(api as never);
     const { manager, error } = await runtime.getMemorySearchManager({ cfg: api.config, agentId: "agent-local" } as never);
     expect(error).toBeUndefined();
     expect(await manager?.search("violet marmalade")).toEqual([
-      expect.objectContaining({ path: `local/${id}`, snippet: "violet marmalade updated marker", source: "memory" }),
+      expect.objectContaining({ path: `local/${id}`, snippet: "violet marmalade release marker", source: "memory" }),
     ]);
 
     const forgotten = await tools.get("memory_forget")!.execute("local-forget", {
@@ -1075,6 +1091,9 @@ describe("local mode MemoryService routing", () => {
     const id = String((stored.details as Record<string, unknown>).id);
     const aliceRead = await alice.tools.get("memory_get")!.execute("direct-get", { id });
     expect(textContent(aliceRead)).toContain("direct owner violet lantern phrase");
+    const aliceHistory = await alice.tools.get("xmemo_memory_history")!.execute("alice-history", { id });
+    expect(aliceHistory.details).toMatchObject({ source: "local", count: 1 });
+    const aliceRevision = JSON.parse(textContent(aliceHistory)).revisions[0].revisionId as string;
 
     const bob = createApi({ mode: "local" }, true, {
       agentId: "agent-local",
@@ -1083,6 +1102,14 @@ describe("local mode MemoryService routing", () => {
     });
     const bobRead = await bob.tools.get("memory_get")!.execute("direct-get-bob", { id });
     expect(bobRead.details).toMatchObject({ error: "not_found", errorType: "not_found" });
+    const bobHistory = await bob.tools.get("xmemo_memory_history")!.execute("bob-history", { id });
+    expect(bobHistory.details).toMatchObject({ error: "not_found", errorType: "not_found", source: "local" });
+    const bobRestore = await bob.tools.get("xmemo_memory_restore")!.execute("bob-restore", {
+      id,
+      from_revision_id: aliceRevision,
+      base_revision: aliceRevision,
+    });
+    expect(bobRestore.details).toMatchObject({ error: "not_found", errorType: "not_found", source: "local" });
 
     const runtime = createXMemoMemoryRuntime(alice.api as never);
     const { manager } = await runtime.getMemorySearchManager({ cfg: alice.api.config, agentId: "agent-local" } as never);
@@ -1121,6 +1148,19 @@ describe("local mode MemoryService routing", () => {
     expect(manager.manager).toBeNull();
     expect(manager.error).toContain("capability_unavailable");
     expect(hybrid.warningMessages).toContain("XMemo capability_unavailable: hybrid mode is not implemented.");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("marks local history and restore unavailable in cloud mode with stable capability errors", async () => {
+    const cloud = createApi({ mode: "cloud" });
+    const history = await cloud.tools.get("xmemo_memory_history")!.execute("cloud-history", { id: "record-1" });
+    const restore = await cloud.tools.get("xmemo_memory_restore")!.execute("cloud-restore", {
+      id: "record-1",
+      from_revision_id: "revision-old",
+      base_revision: "revision-current",
+    });
+    expect(history.details).toMatchObject({ error: "capability_unavailable", capability: "xmemo_memory_history", mode: "cloud" });
+    expect(restore.details).toMatchObject({ error: "capability_unavailable", capability: "xmemo_memory_restore", mode: "cloud" });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });

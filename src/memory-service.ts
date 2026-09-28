@@ -8,7 +8,7 @@ import type {
   XMemoSearchMemoryRequest,
   XMemoUpdateMemoryRequest,
 } from "./client.js";
-import { LocalKernelError, type LocalHardDeleteReceipt, type LocalRecord, type LocalSoftDeleteInput, type LocalUpdateInput, type LocalWriteReceipt } from "./local/kernel.js";
+import { LocalKernelError, type LocalExportRecord, type LocalHardDeleteReceipt, type LocalHistoryOptions, type LocalHistoryPage, type LocalRecord, type LocalRestoreInput, type LocalSoftDeleteInput, type LocalUpdateInput, type LocalWriteReceipt } from "./local/kernel.js";
 import type { ResilientXMemoClient, ResilientWriteResult } from "./resilient-client.js";
 
 export const HYBRID_UNAVAILABLE_MESSAGE = "XMemo capability_unavailable: hybrid mode is not implemented.";
@@ -153,6 +153,22 @@ export class LocalProvider {
     }
     return this.kernel.redact(id, { baseRevision, fields: ["title", "body"] }, this.identity);
   }
+
+  history(id: string, options: LocalHistoryOptions = {}): Promise<LocalHistoryPage> {
+    return this.kernel.history(id, this.identity, options);
+  }
+
+  restore(id: string, input: LocalRestoreInput): Promise<LocalWriteReceipt> {
+    return this.kernel.restore(id, input, this.identity);
+  }
+
+  exportRecords(): Promise<LocalExportRecord[]> {
+    return this.kernel.exportRecords(this.identity);
+  }
+
+  pendingPhysicalCleanupCount(): Promise<number> {
+    return this.kernel.pendingPhysicalCleanupCount();
+  }
 }
 
 /** Mode gate and the single domain boundary consumed by tools and SearchManager. */
@@ -262,6 +278,22 @@ export class MemoryService {
 
   localForget(id: string, mode: "soft_delete" | "hard_delete" | "redact") {
     return this.localProvider().forget(id, mode);
+  }
+
+  localHistory(id: string, options: LocalHistoryOptions = {}): Promise<LocalHistoryPage> {
+    return this.localProvider().history(id, options);
+  }
+
+  localRestore(id: string, input: LocalRestoreInput): Promise<LocalWriteReceipt> {
+    return this.localProvider().restore(id, input);
+  }
+
+  localExportRecords(): Promise<LocalExportRecord[]> {
+    return this.localProvider().exportRecords();
+  }
+
+  localPendingPhysicalCleanupCount(): Promise<number> {
+    return this.localProvider().pendingPhysicalCleanupCount();
   }
 }
 

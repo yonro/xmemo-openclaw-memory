@@ -10,4 +10,14 @@ Call `exportLocalJsonl(kernel, trustedIdentity)` to produce the document and `im
 
 `src/local/legacy-json.ts` previews the v1 `recall-cache.json` and `write-outbox.json` stores without constructing or mutating `XMemoLocalCache`. Preview reports source hashes, categories, and outbox counts by status. `importLegacyJson` writes a separate, owner-only JSONL migration ledger at the caller-selected `ledgerPath`; it never writes either source file. `readLegacyImportLedger` exposes imported and quarantined rows. Quarantine rows contain the source file hash, entry ordinal, entry hash, category, and reason so the original entry remains available in its byte-identical source file without copying an unknown payload into the destination.
 
+The CLI exposes these offline operations explicitly:
+
+```bash
+openclaw xmemo import-preview --recall-cache ./recall-cache.json --write-outbox ./write-outbox.json --json
+openclaw xmemo import --recall-cache ./recall-cache.json --write-outbox ./write-outbox.json --ledger ./legacy-import.jsonl --json
+openclaw xmemo export --output ./local-memory.jsonl --json
+```
+
+`import` classifies old cache/outbox entries into the migration ledger; it does not replay or insert them into the SQLite vault. `export` is available only with `mode=local`, exports the configured agent's trusted identity scope, applies the same privacy filters as the library API, creates a new file with owner-only permissions where supported, and refuses to overwrite an existing destination. These commands do not change mode or contact XMemo cloud. `xmemo status` in local mode reports vault readiness and the pending physical-cleanup count without probing cloud.
+
 The caller must provide `targetAccountRef` only after independently binding the source cache directory to that account. Without this explicit offline binding, recall entries and unsent writes remain quarantined. Only `remember` + `POST /v1/remember` entries with a recognized payload are imported; imported writes are stored with status `held` and `replayEnabled: false`. Entries found in `processing` are quarantined because their cloud outcome is unknown; `sent` entries are counted as skipped. This slice has no tool wiring or cloud calls.

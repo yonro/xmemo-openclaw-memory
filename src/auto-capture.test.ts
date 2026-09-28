@@ -208,6 +208,18 @@ describe("xmemo auto-capture", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("keeps local auto-capture disabled even when a cloud key is configured", async () => {
+    registerXMemoAutoCapture(mockApi({ mode: "local", apiKey: "configured-cloud-key", autoCapture: true }));
+    await handlers.agent_end?.(
+      { success: true, messages: [{ role: "user", content: "I prefer local notes" }] },
+      { sessionId: sessionId, sessionKey: sessionId, agentId: "agent-local" },
+    );
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(logs.map(({ message }) => message).join("\n")).toContain('"event":"xmemo_auto_capture_disabled"');
+    expect(logs.map(({ message }) => message).join("\n")).toContain('"reason":"local_capture_not_implemented"');
+  });
+
   it("does nothing when the plugin is not configured", async () => {
     registerXMemoAutoCapture(mockApi({ autoCapture: true }));
     await handlers.agent_end?.(

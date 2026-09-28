@@ -69,12 +69,16 @@ const LOCAL_MEMORY_TOOLS = new Set([
   "xmemo_memory_list",
   "xmemo_memory_get",
   "xmemo_memory_update",
+  "xmemo_memory_history",
+  "xmemo_memory_restore",
 ]);
 
-function capabilityUnavailableResult(capability: string, mode: "local" | "hybrid"): AgentToolResult<unknown> {
+function capabilityUnavailableResult(capability: string, mode: "local" | "cloud" | "hybrid"): AgentToolResult<unknown> {
   const message = mode === "hybrid"
     ? "XMemo capability_unavailable: hybrid mode is not implemented."
-    : `XMemo capability_unavailable: ${capability} is not available in local mode.`;
+    : mode === "local"
+      ? `XMemo capability_unavailable: ${capability} is not available in local mode.`
+      : `XMemo capability_unavailable: ${capability} requires local mode.`;
   return {
     content: [{ type: "text", text: message }],
     details: { error: "capability_unavailable", capability, mode },
@@ -247,7 +251,15 @@ function buildErrorResult(error: unknown): AgentToolResult<unknown> {
     };
   }
   if (error instanceof CapabilityUnavailableError) {
-    return capabilityUnavailableResult("memory_operation", "hybrid");
+    const mode = error.message.includes("hybrid mode") ? "hybrid" : undefined;
+    return {
+      content: [{ type: "text", text: error.message }],
+      details: {
+        error: "capability_unavailable",
+        capability: "memory_operation",
+        ...(mode ? { mode } : {}),
+      },
+    };
   }
   const message = error instanceof Error ? error.message : String(error);
   return {
@@ -2249,6 +2261,92 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
       },
     },
     { names: ["xmemo_memory_update"] },
+  );
+
+  registerContextualTool(api,
+    {
+      name: "xmemo_memory_history",
+      label: "XMemo Memory History",
+      description:
+        "Read revision history for one memory in the experimental local vault. Revision content is visible only to the current trusted local identity; cloud mode does not provide this local revision history.",
+      parameters: Type.Object({
+        id: Type.String({ description: "Memory id or local path" }),
+        limit: Type.Optional(Type.Integer({ description: "Revision count (default: 20, max: 100)", minimum: 1, maximum: 100 })),
+        before_local_revision: Type.Optional(Type.Integer({ description: "Return revisions older than this local revision number", minimum: 1 })),
+      }),
+      async execute(_toolCallId, params) {
+        const service = await buildMemoryService(api);
+        if (service.mode !== "local") return capabilityUnavailableResult("xmemo_memory_history", "cloud");
+        if (!service.isConfigured) {
+          return { content: [{ type: "text", text: "XMemo local vault is unavailable." }], details: { error: "not_configured", source: "local" } };
+        }
+        const raw = asToolParamsRecord(params);
+        const parsed = localMemoryId(typeof raw.id === "string" ? raw.id : "");
+        if ("error" in parsed) return { content: [{ type: "text", text: parsed.error }], details: { error: "validation", source: "local" } };
+        try {
+          const page = await service.localHistory(parsed.id, {
+            ...(typeof raw.limit === "number" ? { limit: raw.limit } : {}),
+            ...(typeof raw.before_local_revision === "number" ? { beforeLocalRevision: raw.before_local_revision } : {}),
+          });
+          return {
+            content: [{ type: "text", text: JSON.stringify(page, null, 2) }],
+            details: {
+              count: page.revisions.length,
+              next_before_local_revision: page.nextBeforeLocalRevision,
+              source: "local",
+              coverage: "local_history",
+            },
+          };
+        } catch (error) {
+          return buildServiceReadErrorResult(error, service);
+        }
+      },
+    },
+    { names: ["xmemo_memory_history"] },
+  );
+
+  registerContextualTool(api,
+    {
+      name: "xmemo_memory_restore",
+      label: "XMemo Memory Restore",
+      description:
+        "Restore an earlier non-deleted local revision as a new revision. Requires the selected revision id and the record's current base revision; cloud mode does not provide this local operation.",
+      parameters: Type.Object({
+        id: Type.String({ description: "Memory id or local path" }),
+        from_revision_id: Type.String({ description: "Historical revision id returned by xmemo_memory_history" }),
+        base_revision: Type.String({ description: "Current revision id used for optimistic concurrency" }),
+      }),
+      async execute(_toolCallId, params) {
+        const service = await buildMemoryService(api);
+        if (service.mode !== "local") return capabilityUnavailableResult("xmemo_memory_restore", "cloud");
+        if (!service.isConfigured) {
+          return { content: [{ type: "text", text: "XMemo local vault is unavailable." }], details: { error: "not_configured", source: "local" } };
+        }
+        const raw = asToolParamsRecord(params);
+        const parsed = localMemoryId(typeof raw.id === "string" ? raw.id : "");
+        if ("error" in parsed) return { content: [{ type: "text", text: parsed.error }], details: { error: "validation", source: "local" } };
+        const fromRevisionId = typeof raw.from_revision_id === "string" ? raw.from_revision_id.trim() : "";
+        const baseRevision = typeof raw.base_revision === "string" ? raw.base_revision.trim() : "";
+        if (!fromRevisionId || !baseRevision) {
+          return { content: [{ type: "text", text: "from_revision_id and base_revision are required." }], details: { error: "validation", source: "local" } };
+        }
+        try {
+          const receipt = await service.localRestore(parsed.id, { fromRevisionId, baseRevision });
+          return {
+            content: [{ type: "text", text: `Restored XMemo memory ${parsed.id} as a new local revision.` }],
+            details: {
+              ...localReceiptDetails(receipt, `local/${parsed.id}`),
+              action: "restored",
+              restored_from_revision: fromRevisionId,
+              write_kind: receipt.writeKind,
+            },
+          };
+        } catch (error) {
+          return buildServiceReadErrorResult(error, service);
+        }
+      },
+    },
+    { names: ["xmemo_memory_restore"] },
   );
 
   registerContextualTool(api,

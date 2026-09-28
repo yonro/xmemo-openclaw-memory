@@ -759,6 +759,16 @@ function hasPendingPhysicalCleanup() {
   }
 }
 
+function pendingPhysicalCleanupCount() {
+  if (!database) return 0;
+  try {
+    const row = database.prepare("SELECT COUNT(*) AS count FROM physical_cleanup_jobs WHERE status = 'pending'").get();
+    return Number(row?.count ?? 0);
+  } catch {
+    throw new DomainError("corrupt_store", safeMessage("corrupt_store"));
+  }
+}
+
 function checkpointWalTruncate() {
   const checkpoint = database.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get();
   const busy = Number(checkpoint?.busy ?? 1);
@@ -1530,6 +1540,7 @@ function handleRequest(operation, payload) {
     case "redact": return redactRecord(payload);
     case "search": return searchRecords(payload);
     case "exportRecords": return exportCurrentRecords(payload);
+    case "pendingPhysicalCleanupCount": return pendingPhysicalCleanupCount();
     case "importRecord": return createRecord({ ...payload, imported: true });
     case "close":
       clearPhysicalCleanupRetry();

@@ -2,17 +2,17 @@
 
 [![XMemo logo](./assets/icon.png)](https://xmemo.dev)
 
-**面向 OpenClaw 的原生记忆插件，提供持久云记忆与跨智能体召回。**
+**面向 OpenClaw 的原生记忆插件，默认使用 XMemo 云记忆，并提供实验性本地模式。**
 
-XMemo for OpenClaw 将智能体连接到 XMemo，提供长期记忆、语义搜索、精确读取、TODO、重启快照和审计工具。本文当前对应 **1.0.18**，使用记忆功能需要已认证的 XMemo 服务。独立本地记忆与本地/云端 Hybrid 是后续规划能力。
+XMemo for OpenClaw 提供云端长期记忆、语义搜索、精确读取、TODO、重启快照和审计工具。包版本为 **1.0.18**；云端仍是默认模式。当前源码另含无需云凭据的实验性本地模式；Hybrid 不可用。
 
 | 规格指标 | 详情 |
 | :--- | :--- |
 | **插件标识 (Plugin ID)** | `xmemo-memory`（原生 `kind: "memory"` 提供者） |
 | **兼容要求** | OpenClaw `≥ 2026.6.9` |
-| **内置工具** | 16 个原生记忆与治理工具 |
-| **当前存储** | XMemo 服务；本地保存召回缓存与写入待发箱 |
-| **本地 / Hybrid** | 规划中；1.0.18 尚不提供独立本地或混合记忆模式 |
+| **内置工具** | 18 个原生记忆与治理工具 |
+| **当前存储** | 默认使用 XMemo 云端；本地模式使用实验性 SQLite 库 |
+| **本地 / Hybrid** | 本地模式实验性且无需密钥；Hybrid 由能力门禁拒绝 |
 | **跨智能体协作** | 与 Claude、ChatGPT、Codex、Hermes、Cursor 共享召回 |
 | **官方 Hub** | [ClawHub 插件](https://clawhub.ai/plugins/@xmemo/openclaw-memory) · [配套 Skill](https://clawhub.ai/xmemo/xmemo) |
 | **源代码** | [GitHub 仓库](https://github.com/yonro/xmemo-openclaw-memory) |
@@ -32,15 +32,16 @@ XMemo for OpenClaw 将智能体连接到 XMemo，提供长期记忆、语义搜�
 
 ## 当前能力与后续规划
 
-| 能力 | 1.0.18 | 后续方向 |
+| 能力 | 当前源码行为 | 边界 |
 | --- | --- | --- |
 | 云端长期记忆与语义召回 | 配置 XMemo 服务后可用 | 保持兼容并增强可靠性 |
 | 跨智能体记忆 | 在已授权的 XMemo 范围内可用 | 明确身份归属与共享控制 |
-| 本地状态 | 召回缓存及部分写入的待发箱 | 事务型本地记忆库 |
-| 无云凭据的独立本地记忆 | 尚不可用 | 本地读写、全文与语义检索 |
-| 本地/云端 Hybrid | 尚不可用 | 本地提交、后台同步、冲突与删除处理 |
+| 无云凭据的本地记忆 | 实验性 SQLite 写入、关键词搜索、精确读取、历史与恢复 | 不支持语义检索、云同步或完整云工具；仅用于评估 |
+| 本地搜索和精确读取 | 选定工具通过当前可信宿主身份进行读写 | SearchManager `readFile` 没有可信请求者身份，因此对 `local/scoped/<recordId>` 失败关闭；`memory_get` 每次按可信宿主上下文重新授权 |
+| 本地自动捕获 | 即使配置了 `autoCapture` 和云密钥也会关闭 | 自动捕获仅用于云模式 |
+| 本地/云端 Hybrid | 返回 `capability_unavailable` | 没有本地提交加云端同步或冲突处理 |
 
-本地缓存并非完整的记忆副本，无法离线检索从未缓存的查询。Hybrid 是研发方向，尚不是可用的安装选项，也不是已经达成的性能承诺。详见[按版本记录的产品事实](docs/PRODUCT-FACTS.md)。
+显式配置 `mode: "local"` 会创建无需密钥的 SQLite 库，不发起网络请求，也不会改变默认云模式。本地仍属实验性功能；云端召回缓存与本地记忆库相互独立。Hybrid 不可用。详见[产品事实](docs/PRODUCT-FACTS.md)。
 
 ## 架构设计
 
@@ -53,7 +54,7 @@ XMemo for OpenClaw 将智能体连接到 XMemo，提供长期记忆、语义搜�
 | **OpenClaw 角色** | 原生 `kind: "memory"` 提供者 |
 | **最低宿主版本** | OpenClaw `2026.6.9` |
 | **托管云服务** | `https://xmemo.dev` |
-| **内置工具** | 16 个原生记忆与治理工具 |
+| **内置工具** | 18 个原生记忆与治理工具 |
 | **CLI 命名空间** | `openclaw xmemo` |
 
 ## 为什么选择本插件
@@ -121,7 +122,7 @@ openclaw xmemo status
 
 ## 工具目录
 
-插件共注册了 16 个工具。其中 `memory_*` 工具由 OpenClaw 智能体在对话决策轮次中自动调用，并非独立的终端 Shell 命令。
+插件共注册了 18 个工具。其中 `memory_*` 工具由 OpenClaw 智能体在对话决策轮次中自动调用，并非独立的终端 Shell 命令。
 
 ### 核心记忆工具
 
@@ -134,6 +135,8 @@ openclaw xmemo status
 | `memory_forget` | 遗忘/删除指定引用的记忆 |
 | `xmemo_memory_list` | 结合查询/路径提示浏览与检索记忆 |
 | `xmemo_memory_update` | 更新已存在的记忆内容 |
+| `xmemo_memory_history` | 在本地模式分页读取版本历史；云模式返回 `capability_unavailable` |
+| `xmemo_memory_restore` | 将较早的本地版本恢复为新版本；云模式返回 `capability_unavailable` |
 
 ### 连续性与工作流工具
 
@@ -205,10 +208,13 @@ openclaw xmemo status
 
 配置必须放置在 `plugins.entries["xmemo-memory"].config` 路径下，不要置于 `plugins.config`。
 
+将 `mode` 显式设为 `local` 可启用实验性本地库；无需配置 `apiKey`。本地模式不访问云端，关闭自动捕获，且云专属工具返回 `capability_unavailable`。Hybrid 当前不可用。
+
 ### 配置参数速查表
 
 | 参数名 | 默认值 | 说明 |
 | --- | --- | --- |
+| `mode` | `cloud` | `cloud` 默认模式、`local` 实验性无密钥模式，或不可用的 `hybrid` |
 | `baseUrl` | `https://xmemo.dev` | 托管服务或私有化部署的 XMemo 服务地址 |
 | `apiKey` | — | 字符串明文或环境 SecretRef 对象 |
 | `authMode` | `api-key` | 认证方式：`api-key`、`bearer` 或 `both` |
@@ -333,6 +339,9 @@ openclaw xmemo setup --env XMEMO_KEY
 openclaw xmemo setup --env XMEMO_KEY --dry-run
 openclaw xmemo status
 openclaw xmemo status --json
+openclaw xmemo import-preview --recall-cache ./recall-cache.json --write-outbox ./write-outbox.json --json
+openclaw xmemo import --recall-cache ./recall-cache.json --write-outbox ./write-outbox.json --ledger ./legacy-import.jsonl --json
+openclaw xmemo export --output ./local-memory.jsonl --json
 ```
 
 `openclaw xmemo login` 是受支持的浏览器授权命令；只有 `openclaw xmemo key set` 是 `setup` 的已弃用别名。
@@ -343,7 +352,9 @@ openclaw xmemo status --json
 openclaw xmemo status --json
 ```
 
-核心返回字段说明：
+云模式会探测 XMemo 云端。`local` 模式的 status 无需密钥，报告 `mode`、`providerReadiness`、`vaultPath`、`pendingPhysicalCleanup` 和 `networkAccess: "none"`；Hybrid 会报告 `capability_unavailable` 且不访问云端。
+
+云模式的核心返回字段：
 
 - `configured` — 是否成功解析到有效的凭据源
 - `credentialSource` — 凭据来源：`config`、`env-secret-ref`、`env` 或 `shared-credential`
@@ -356,7 +367,7 @@ openclaw xmemo status --json
 openclaw plugins inspect xmemo-memory --runtime --json
 ```
 
-输出中应包含 16 个原生工具、`xmemo` CLI 命名空间、记忆能力声明以及已注册的生命周期钩子。provider status 包含 `configured`、`connected`、`searchCapabilities` 和可选 `lastError`。搜索管理器仅支持 `memory`；不支持会话搜索或 session-key 过滤。OpenClaw 的 `backend` 字段为 `builtin` 以满足兼容契约；`provider` 为 `xmemo-memory`。
+输出中应包含 18 个原生工具、`xmemo` CLI 命名空间、记忆能力声明以及已注册的生命周期钩子。provider status 包含 `configured`、`connected`、`searchCapabilities` 和可选 `lastError`。搜索管理器仅支持 `memory`；不支持会话搜索或 session-key 过滤。本地 SearchManager `readFile` 对受限路径失败关闭；请通过可信的逐次调用 `memory_get` 读取。OpenClaw 的 `backend` 字段为 `builtin` 以满足兼容契约；`provider` 为 `xmemo-memory`。
 
 ### 检索排查技巧
 
@@ -414,15 +425,15 @@ openclaw plugins inspect xmemo-memory --runtime --json
 
 ### XMemo for OpenClaw 是什么？
 
-它是包名为 `@xmemo/openclaw-memory` 的外部插件，以 `xmemo-memory` 注册为 OpenClaw 原生记忆提供者，通过 16 个工具及宿主记忆生命周期连接 XMemo 云记忆。
+它是包名为 `@xmemo/openclaw-memory` 的外部插件，以 `xmemo-memory` 注册为 OpenClaw 原生记忆提供者，通过 18 个工具及宿主记忆生命周期连接 XMemo 云记忆或实验性本地库。
 
 ### 没有云账号或网络时，XMemo 能独立运行吗？
 
-1.0.18 的记忆操作需要已配置的 XMemo 服务和凭据。部分瞬时故障下可以读取已有搜索缓存，但没有云配置时尚不能提供完整本地记忆。独立本地记忆与 Hybrid 正在规划中。
+云模式需要 XMemo 服务和凭据。源码还支持无需密钥的实验性本地模式，具备关键词搜索、历史和恢复，但没有语义搜索或云同步；Hybrid 仍不可用。
 
 ### 需要自己部署本地 embedding 模型或向量数据库吗？
 
-当前云插件不需要，语义检索由 XMemo 服务执行。规划中的本地引擎会增加不依赖云账号的本地存储和检索；模型及资源交付方式尚未成为已发布的配置契约。
+云模式不需要，语义检索由 XMemo 服务执行。实验性本地模式仅提供关键词检索，不包含本地 embedding 或语义检索。
 
 ### 能与 ChatGPT、Claude 或 Codex 共享记忆吗？
 
@@ -430,7 +441,7 @@ openclaw plugins inspect xmemo-memory --runtime --json
 
 ### 插件会自动上传所有对话吗？
 
-不会。自动捕获默认关闭，启用还需要对话访问权限。触发词和内容过滤是启发式规则，不能保证发现全部敏感信息。显式工具写入及符合条件的捕获内容会发送至配置的 XMemo 服务。
+不会。云模式自动捕获默认关闭，启用还需要对话访问权限；本地模式中始终关闭。触发词和内容过滤是启发式规则，不能保证发现全部敏感信息。云模式下显式工具写入及符合条件的捕获内容会发送至配置的 XMemo 服务。
 
 ### 安装后会自动迁移已有本地记忆吗？
 

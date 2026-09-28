@@ -62,7 +62,9 @@
 
 ### 2.1 当前插件 schema 与宿主状态契约
 
-插件当前**注册 16 个工具**。其参数名、必填项、约束、显式默认值与描述以 [工具 schema 目录](docs/TOOL-CATALOG.md)中的实时注册快照为准；`src/documentation-parity.test.ts` 会将快照、manifest、README（中英文）和产品事实页与真实注册结果比较。
+插件当前源码**注册 18 个工具**。其中 `xmemo_memory_history` 与 `xmemo_memory_restore` 只在显式 `mode: "local"` 的实验性模式下可用，云模式稳定返回 `capability_unavailable`；本地模式仍是 cloud 默认值之外的独立 keyless 路径，Hybrid 被能力门禁拒绝。参数名、必填项、约束、显式默认值与描述以[工具 schema 目录](docs/TOOL-CATALOG.md)中的实时注册快照为准；`src/documentation-parity.test.ts` 会比较真实工具注册、manifest、README（中英文）和产品事实页。
+
+本地搜索结果的 scoped path 不能通过宿主 SearchManager `readFile` 回调读取，因为回调不携带可信请求者身份；该读取会失败关闭。`memory_get` 是受支持的逐次读取入口，会按当前可信宿主上下文重新校验身份。Local 模式下自动捕获禁用，CLI status 显示 vault 与待物理清理任务；`import-preview` / `import` 处理旧 JSON 缓存与 outbox，`export` 生成当前配置 agent 范围的 JSONL。本地能力仅覆盖已注明的工具，不代表云端工具完整 parity。
 
 `memory_search.minScore` 是 0–1 的真实相似度阈值，未知分数结果不满足阈值。OpenClaw host search manager 的 `searchCapabilities` 声明 `supportedSources: ["memory"]`、`sessionKeyFilter: "unsupported"`、`unsupportedSources: ["sessions"]`；provider status 另含 `configured`、`connected` 与可选 `lastError`。`backend: "builtin"` 是宿主兼容映射，不表示本插件使用 OpenClaw 内置记忆；`provider: "xmemo-memory"` 标识实际插件。
 

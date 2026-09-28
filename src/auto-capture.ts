@@ -28,6 +28,7 @@ type AutoCapturePosition = {
 
 const CURSORS = new Map<string, AutoCaptureCursor>();
 let terminalCaptureSkipCount = 0;
+const warnedCaptureDisabledModes = new Set<string>();
 
 const LEADING_TIMESTAMP_RE = /^\[[A-Za-z]{3} \d{4}-\d{2}-\d{2} \d{2}:\d{2}[^\]]*\] */;
 const MEDIA_ATTACHED_RE = /\[media attached(?:\s+\d+\/\d+)?:[^\]]*\]/gi;
@@ -378,6 +379,7 @@ function resolveCurrentConfig(
   }
   return {
     ...startupConfig,
+    mode: live.mode === "cloud" || live.mode === "local" || live.mode === "hybrid" ? live.mode : startupConfig.mode,
     autoCapture: (live.autoCapture as boolean | undefined) ?? startupConfig.autoCapture,
     captureMaxChars: (live.captureMaxChars as number | undefined) ?? startupConfig.captureMaxChars,
     customTriggers: Array.isArray(live.customTriggers)
@@ -399,6 +401,17 @@ export function registerXMemoAutoCapture(api: OpenClawPluginApi): void {
   api.on("agent_end", async (event, ctx) => {
     const cfg = resolveCurrentConfig(api, startupConfig);
     if (!cfg.autoCapture) {
+      return;
+    }
+    if (cfg.mode !== "cloud") {
+      if (!warnedCaptureDisabledModes.has(cfg.mode)) {
+        warnedCaptureDisabledModes.add(cfg.mode);
+        api.logger.warn(JSON.stringify({
+          event: "xmemo_auto_capture_disabled",
+          mode: cfg.mode,
+          reason: cfg.mode === "local" ? "local_capture_not_implemented" : "hybrid_unavailable",
+        }));
+      }
       return;
     }
     if (!event.success || !event.messages || event.messages.length === 0) {

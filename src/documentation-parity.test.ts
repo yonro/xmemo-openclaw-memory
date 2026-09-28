@@ -39,7 +39,7 @@ describe("public documentation parity", () => {
       [...catalog.matchAll(/^\| `([^`]+)` \|([^\n]*)$/gm)].map(([, name, row]) => [name, row ?? ""]),
     );
 
-    expect(actual).toHaveLength(16);
+    expect(actual).toHaveLength(18);
     expect(actual.map(({ name }) => name).sort()).toEqual([...manifest.contracts.tools].sort());
     expect(snapshot).toBe(JSON.stringify(actual, null, 2));
     expect(catalog).toContain("Required / 必填");
@@ -76,7 +76,7 @@ describe("public documentation parity", () => {
       const contents = read(path);
       for (const name of actualNames) expect(contents, `${path} is missing ${name}`).toContain(`\`${name}\``);
       expect(contents, `${path} needs a source-linked schema catalog`).toContain("TOOL-CATALOG.md");
-      expect(contents, `${path} needs the 16-tool count`).toMatch(/16\s*(native|tools|个工具|插件工具)/i);
+      expect(contents, `${path} needs the 18-tool count`).toMatch(/18\s*(native|tools|个工具|插件工具)/i);
       expect(contents, `${path} needs the real minimum-score field`).toContain("minScore");
       expect(contents, `${path} needs the host search capability contract`).toContain("searchCapabilities");
       expect(contents, `${path} needs the session filter limitation`).toContain("sessionKeyFilter");
@@ -94,5 +94,11 @@ describe("public documentation parity", () => {
 
     expect(read("PARITY.md")).toContain('backend: "builtin"');
     expect(read("PARITY.md")).toContain("兼容映射");
+    for (const path of ["README.md", "README_CN.md", "PARITY.md", "docs/PRODUCT-FACTS.md"]) {
+      const contents = read(path);
+      expect(contents, `${path} needs the scoped SearchManager fail-closed contract`).toContain("readFile");
+      expect(contents, `${path} needs the trusted memory_get identity boundary`).toContain("memory_get");
+      expect(contents, `${path} needs the experimental local-mode boundary`).toMatch(/experimental|实验/);
+    }
   });
 });

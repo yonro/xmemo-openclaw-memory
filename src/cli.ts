@@ -5,7 +5,11 @@ import { dirname } from "node:path";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/memory-core-host-runtime-core";
 import { XMemoClient } from "./client.js";
-import { resolveXMemoMemoryConfig, sharedCredentialPath } from "./config.js";
+import { resolveXMemoMemoryConfig, sharedCredentialPath, type XMemoMemoryConfig } from "./config.js";
+import { exportLocalRecordsJsonl } from "./local/jsonl-transfer.js";
+import { LocalMemoryKernel, resolveLocalVaultPath } from "./local/kernel.js";
+import { importLegacyJson, previewLegacyJson } from "./local/legacy-json.js";
+import { LocalProvider, MemoryService, trustedLocalIdentity } from "./memory-service.js";
 import { XMemoSearchManager } from "./search-manager.js";
 
 const PLUGIN_ID = "xmemo-memory";
@@ -38,6 +42,91 @@ type XMemoKeySetOptions = {
   dryRun?: boolean;
   stdin?: boolean;
 };
+
+export type XMemoLocalStatus = {
+  backend: "xmemo";
+  provider: "xmemo-memory";
+  mode: "local";
+  configured: boolean;
+  connected: boolean;
+  providerReadiness: "ready" | "unavailable";
+  experimental: true;
+  vaultPath: string;
+  pendingPhysicalCleanup: number | null;
+  autoCapture: false;
+  networkAccess: "none";
+  lastError?: string;
+};
+
+export async function readXMemoLocalStatus(config: XMemoMemoryConfig): Promise<XMemoLocalStatus> {
+  const vaultPath = resolveLocalVaultPath();
+  let kernel: LocalMemoryKernel | undefined;
+  try {
+    kernel = await LocalMemoryKernel.open({ databasePath: vaultPath });
+    const service = new MemoryService(
+      config,
+      undefined,
+      new LocalProvider(kernel, trustedLocalIdentity({ agentId: config.agentId }, config.agentId)),
+    );
+    const pendingPhysicalCleanup = await service.localPendingPhysicalCleanupCount();
+    return {
+      backend: "xmemo",
+      provider: "xmemo-memory",
+      mode: "local",
+      configured: true,
+      connected: true,
+      providerReadiness: "ready",
+      experimental: true,
+      vaultPath,
+      pendingPhysicalCleanup,
+      autoCapture: false,
+      networkAccess: "none",
+    };
+  } catch (error) {
+    return {
+      backend: "xmemo",
+      provider: "xmemo-memory",
+      mode: "local",
+      configured: false,
+      connected: false,
+      providerReadiness: "unavailable",
+      experimental: true,
+      vaultPath,
+      pendingPhysicalCleanup: null,
+      autoCapture: false,
+      networkAccess: "none",
+      lastError: error instanceof Error ? error.message : String(error),
+    };
+  } finally {
+    await kernel?.close();
+  }
+}
+
+export async function exportXMemoLocalJsonl(
+  config: XMemoMemoryConfig,
+  outputPath?: string,
+): Promise<{ records: number; outputPath?: string }> {
+  const kernel = await LocalMemoryKernel.open();
+  try {
+    const service = new MemoryService(
+      config,
+      undefined,
+      new LocalProvider(kernel, trustedLocalIdentity({ agentId: config.agentId }, config.agentId)),
+    );
+    const jsonl = exportLocalRecordsJsonl(await service.localExportRecords());
+    const records = jsonl ? jsonl.trimEnd().split("\n").length : 0;
+    if (outputPath) {
+      await mkdir(dirname(outputPath), { recursive: true, mode: 0o700 });
+      await writeFile(outputPath, jsonl, { encoding: "utf8", mode: 0o600, flag: "wx" });
+      await chmod(outputPath, 0o600).catch(() => undefined);
+      return { records, outputPath };
+    }
+    process.stdout.write(jsonl);
+    return { records };
+  } finally {
+    await kernel.close();
+  }
+}
 
 function trimRequired(value: string | undefined, label: string): string {
   const trimmed = value?.trim() ?? "";
@@ -448,6 +537,36 @@ export function registerXMemoCli(api: OpenClawPluginApi): void {
         .option("--json", "Output machine-readable JSON")
         .action(async (opts) => {
           const cfg = resolveXMemoMemoryConfig(api.config);
+          if (cfg.mode === "local") {
+            const status = await readXMemoLocalStatus(cfg);
+            if (opts.json) {
+              console.log(JSON.stringify(status, null, 2));
+            } else {
+              console.log(`XMemo memory backend: ${status.providerReadiness} (local, experimental)`);
+              console.log(`  Vault: ${status.vaultPath}`);
+              console.log(`  Pending physical cleanup: ${status.pendingPhysicalCleanup ?? "unavailable"}`);
+              console.log("  Auto capture: disabled in local mode");
+              console.log("  Network access: none");
+              if (status.lastError) console.log(`  Last error: ${status.lastError}`);
+            }
+            return;
+          }
+          if (cfg.mode === "hybrid") {
+            const status = {
+              backend: "xmemo",
+              provider: "xmemo-memory",
+              mode: "hybrid",
+              configured: false,
+              connected: false,
+              providerReadiness: "capability_unavailable",
+              error: "capability_unavailable",
+              autoCapture: false,
+              networkAccess: "none",
+            };
+            if (opts.json) console.log(JSON.stringify(status, null, 2));
+            else console.log("XMemo hybrid mode is unavailable: capability_unavailable. No network request was made.");
+            return;
+          }
           const configured = Boolean(cfg.apiKey);
 
           let connected = false;
@@ -478,6 +597,7 @@ export function registerXMemoCli(api: OpenClawPluginApi): void {
           const status = {
             backend: "xmemo",
             provider: "xmemo-memory",
+            mode: cfg.mode,
             configured,
             credentialSource: cfg.credentialSource ?? null,
             connected,
@@ -517,6 +637,73 @@ export function registerXMemoCli(api: OpenClawPluginApi): void {
             if (lastError) {
               console.log(`  Last error: ${lastError}`);
             }
+          }
+        });
+
+      xmemo
+        .command("import-preview")
+        .description("Preview legacy cache and outbox JSON without changing source files")
+        .requiredOption("--recall-cache <path>", "Path to the legacy recall-cache.json")
+        .requiredOption("--write-outbox <path>", "Path to the legacy write-outbox.json")
+        .option("--json", "Output machine-readable JSON")
+        .action((opts: { recallCache: string; writeOutbox: string; json?: boolean }) => {
+          try {
+            const result = previewLegacyJson({
+              recallCachePath: opts.recallCache,
+              writeOutboxPath: opts.writeOutbox,
+            });
+            if (opts.json) console.log(JSON.stringify(result, null, 2));
+            else console.log(`Legacy import preview: ${result.totalSourceEntries} entries; ${result.recallCache.sourceEntries} recall-cache, ${result.writeOutbox.sourceEntries} outbox.`);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            console.error(`Error: ${message}`);
+            process.exitCode = 1;
+          }
+        });
+
+      xmemo
+        .command("import")
+        .description("Classify legacy cache and outbox entries into a separate quarantine-first migration ledger")
+        .requiredOption("--recall-cache <path>", "Path to the legacy recall-cache.json")
+        .requiredOption("--write-outbox <path>", "Path to the legacy write-outbox.json")
+        .option("--ledger <path>", "Migration ledger destination (defaults beside the local vault)")
+        .option("--target-account-ref <ref>", "Explicit offline account binding for eligible legacy entries")
+        .option("--json", "Output machine-readable JSON")
+        .action((opts: { recallCache: string; writeOutbox: string; ledger?: string; targetAccountRef?: string; json?: boolean }) => {
+          try {
+            const result = importLegacyJson({
+              recallCachePath: opts.recallCache,
+              writeOutboxPath: opts.writeOutbox,
+              ledgerPath: opts.ledger ?? `${resolveLocalVaultPath()}.legacy-import.jsonl`,
+              targetAccountRef: opts.targetAccountRef,
+            });
+            if (opts.json) console.log(JSON.stringify(result, null, 2));
+            else console.log(`Legacy import ledger: imported ${result.imported}, quarantined ${result.quarantined}, skipped ${result.skipped} of ${result.sourceEntries}; ${result.ledgerPath}`);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            console.error(`Error: ${message}`);
+            process.exitCode = 1;
+          }
+        });
+
+      xmemo
+        .command("export")
+        .description("Export the configured agent's active local vault records as privacy-filtered JSONL")
+        .requiredOption("--output <path>", "New JSONL output path; existing files are never overwritten")
+        .option("--json", "Output machine-readable result metadata")
+        .action(async (opts: { output: string; json?: boolean }) => {
+          try {
+            const cfg = resolveXMemoMemoryConfig(api.config);
+            if (cfg.mode !== "local") {
+              throw new Error("Local JSONL export requires mode=local; this command never changes the configured mode.");
+            }
+            const result = await exportXMemoLocalJsonl(cfg, opts.output);
+            if (opts.json) console.log(JSON.stringify(result, null, 2));
+            else console.log(`Exported ${result.records} local records to ${result.outputPath}.`);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            console.error(`Error: ${message}`);
+            process.exitCode = 1;
           }
         });
     },

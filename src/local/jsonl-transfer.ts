@@ -50,6 +50,10 @@ export async function exportLocalJsonl(
   identity: TrustedLocalIdentityContext,
 ): Promise<string> {
   const records = await kernel.exportRecords(identity);
+  return exportLocalRecordsJsonl(records);
+}
+
+export function exportLocalRecordsJsonl(records: LocalExportRecord[]): string {
   return records.map(record => JSON.stringify(toJsonlRecord(record))).join("\n") + (records.length ? "\n" : "");
 }
 

@@ -2,20 +2,20 @@
 
 [![XMemo logo](./assets/icon.png)](https://xmemo.dev)
 
-**A native OpenClaw memory plugin for persistent cloud memory and cross-agent recall.**
+**A native OpenClaw memory plugin for persistent XMemo cloud memory and experimental local memory.**
 
 XMemo for OpenClaw connects your agent to XMemo for long-term memory, semantic
 search, exact memory reads, TODOs, restart snapshots, and audit tools. The
-current documented version is **1.0.18** and requires an authenticated XMemo
-service. Standalone local memory and local/cloud Hybrid are planned capabilities.
+package version is **1.0.18**. Cloud remains the default. This source also has an
+explicit, keyless local mode marked experimental; Hybrid is unavailable.
 
 | Specification | Details |
 | :--- | :--- |
 | **Plugin ID** | `xmemo-memory` (Native `kind: "memory"` provider) |
 | **Compatibility** | OpenClaw `≥ 2026.6.9` |
-| **Tools Included** | 16 native memory & governance tools |
-| **Storage today** | XMemo service; local recall cache and write outbox |
-| **Local / Hybrid** | Planned; not available as standalone memory modes in 1.0.18 |
+| **Tools Included** | 18 native memory & governance tools |
+| **Storage today** | XMemo cloud by default; explicit experimental local SQLite vault |
+| **Local / Hybrid** | Local is experimental and keyless; Hybrid is refused by a capability gate |
 | **Cross-Agent** | Shared recall with Claude, ChatGPT, Codex, Hermes, Cursor |
 | **Official Hub** | [ClawHub Plugin](https://clawhub.ai/plugins/@xmemo/openclaw-memory) · [Companion Skill](https://clawhub.ai/xmemo/xmemo) |
 | **Source Code** | [GitHub Repository](https://github.com/yonro/xmemo-openclaw-memory) |
@@ -43,18 +43,19 @@ subject to the credential permissions and configured read scope.
 
 ## Available now and planned
 
-| Capability | 1.0.18 | Planned direction |
+| Capability | Current source behavior | Boundary |
 | --- | --- | --- |
 | Cloud long-term memory and semantic recall | Available with a configured XMemo service | Retain compatibility and improve reliability |
 | Cross-agent memory | Available within authorized XMemo scopes | Explicit identity and sharing controls |
-| Local state | Recall cache and an outbox for supported writes | Transactional local memory database |
-| Standalone local memory without cloud credentials | Not available | Local reads, writes, full-text and semantic search |
-| Local/cloud Hybrid | Not available | Local commits, background sync, conflict and deletion handling |
+| Local memory without cloud credentials | Experimental local SQLite writes, keyword search, exact reads, history, restore, and local JSONL export | No semantic retrieval, cloud synchronization, or complete cloud-tool parity; use only for evaluation |
+| Local search and exact reads | `memory_search`, `memory_store`, `memory_get`, and selected management tools use the current trusted host identity | SearchManager `readFile` fails closed for scoped paths because its host API has no trusted requester identity; `memory_get` authorizes each call against the trusted host context |
+| Local auto-capture | Disabled even when `autoCapture` and a cloud key are configured | Auto-capture remains cloud-only |
+| Local/cloud Hybrid | Refused with `capability_unavailable` | No local commits plus cloud sync or conflict handling |
 
-The local cache is not a complete copy of your memory and cannot search unseen
-queries offline. The Hybrid direction is a development plan, not an installation
-option or a performance claim. See [versioned product facts](docs/PRODUCT-FACTS.md)
-for the current capability boundary.
+Local mode is opt-in with `mode: "local"`, creates a keyless SQLite vault, and
+does not make network calls. It is experimental and does not replace the cloud
+default. The cloud recall cache is separate from this vault. See [product facts](docs/PRODUCT-FACTS.md)
+for the complete capability boundary.
 
 ## Architecture
 
@@ -67,7 +68,7 @@ for the current capability boundary.
 | **OpenClaw role** | Native `kind: "memory"` provider |
 | **Minimum host** | OpenClaw `2026.6.9` |
 | **Hosted service** | `https://xmemo.dev` |
-| **Tools** | 16 native memory and governance tools |
+| **Tools** | 18 native memory and governance tools |
 | **CLI** | `openclaw xmemo` |
 
 ## Why this plugin
@@ -145,7 +146,7 @@ openclaw xmemo status
 
 ## Tool catalog
 
-The plugin registers 16 tools. `memory_*` tools are used by the OpenClaw agent
+The plugin registers 18 tools. `memory_*` tools are used by the OpenClaw agent
 during a turn; they are not standalone shell commands.
 
 ### Core memory
@@ -159,6 +160,8 @@ during a turn; they are not standalone shell commands.
 | `memory_forget` | Delete an exact memory |
 | `xmemo_memory_list` | Browse or search memories using query/path hints |
 | `xmemo_memory_update` | Update an existing memory |
+| `xmemo_memory_history` | Read local revision history with pagination; unavailable in cloud mode |
+| `xmemo_memory_restore` | Restore a prior local revision as a new revision; unavailable in cloud mode |
 
 ### Continuity and workflow
 
@@ -248,6 +251,7 @@ Configuration belongs under
 
 | Field | Default | Description |
 | --- | --- | --- |
+| `mode` | `cloud` | `cloud` (default), `local` (experimental, keyless), or `hybrid` (unavailable) |
 | `baseUrl` | `https://xmemo.dev` | Hosted or private XMemo service |
 | `apiKey` | — | String or environment SecretRef |
 | `authMode` | `api-key` | `api-key`, `bearer`, or `both` |
@@ -264,6 +268,21 @@ Configuration belongs under
 
 Previous tagged configurations remain compatible. The deprecated `token` field
 is still accepted as an alias for `apiKey`; new setup writes `apiKey`.
+
+To opt into the experimental local vault, set `mode` to `local` and omit
+`apiKey`. Local mode creates a SQLite vault under the OpenClaw data directory,
+does not call XMemo cloud, and disables auto-capture. It provides keyword
+search, scoped reads and writes, revision history, restore, and JSONL export;
+cloud-only tools return `capability_unavailable`. Hybrid mode is rejected.
+
+```json
+{ "plugins": { "entries": { "xmemo-memory": { "config": { "mode": "local" } } } } }
+```
+
+The host SearchManager cannot supply trusted requester identity to its
+`readFile` callback, so it fails closed for `local/scoped/<recordId>` paths.
+Use `memory_get` for local search results: each tool call receives the current
+trusted host context and checks access again.
 
 ### Cross-agent read policy
 
@@ -393,6 +412,9 @@ openclaw xmemo setup --env XMEMO_KEY
 openclaw xmemo setup --env XMEMO_KEY --dry-run
 openclaw xmemo status
 openclaw xmemo status --json
+openclaw xmemo import-preview --recall-cache ./recall-cache.json --write-outbox ./write-outbox.json --json
+openclaw xmemo import --recall-cache ./recall-cache.json --write-outbox ./write-outbox.json --ledger ./legacy-import.jsonl --json
+openclaw xmemo export --output ./local-memory.jsonl --json
 ```
 
 `openclaw xmemo login` is the supported browser-authorization command. Only
@@ -404,7 +426,12 @@ openclaw xmemo status --json
 openclaw xmemo status --json
 ```
 
-Important fields:
+Cloud status probes the XMemo endpoint. Local status is keyless and reports
+`mode`, `providerReadiness`, `vaultPath`, `pendingPhysicalCleanup`, and
+`networkAccess: "none"`; hybrid reports `capability_unavailable` without probing
+cloud.
+
+Important cloud fields:
 
 - `configured` — a supported credential source was resolved
 - `credentialSource` — `config`, `env-secret-ref`, `env`, or `shared-credential`
@@ -417,7 +444,7 @@ Inspect the loaded plugin runtime:
 openclaw plugins inspect xmemo-memory --runtime --json
 ```
 
-The output should list the 16 tools, the `xmemo` CLI, memory capability, and
+The output should list the 18 tools, the `xmemo` CLI, memory capability, and
 registered lifecycle hooks. Its provider status includes `configured`,
 `connected`, `searchCapabilities`, and optional `lastError`. The search manager
 supports `memory` only; session-key filtering and session search are unsupported.
@@ -491,7 +518,7 @@ migration has been verified.
 | **Auto-capture** | Disabled and permission-gated |
 | **Capture filtering** | Rejects known secret patterns and injected context |
 | **Identity** | Non-secret agent and instance attribution headers |
-| **Local state** | User-scoped, permission-hardened cache and outbox |
+| **Local state** | Cloud cache/outbox plus a separate experimental user-scoped SQLite vault |
 | **Destructive tools** | Exact memory references required |
 | **Public metadata** | Discovery and package metadata contain no user credentials |
 
@@ -505,21 +532,22 @@ accounts or retiring a device.
 
 It is the external `@xmemo/openclaw-memory` plugin, registered as the native
 `xmemo-memory` memory provider. It gives OpenClaw access to XMemo cloud memory
-through 16 tools and the host memory lifecycle.
+through 18 tools and the host memory lifecycle. The local mode is experimental,
+has no semantic retrieval or sync, and disables auto-capture. SearchManager
+`readFile` fails closed for scoped local paths; use trusted per-call `memory_get`.
 
 ### Does XMemo work without a cloud account or internet connection?
 
-Version 1.0.18 requires a configured XMemo service and credential for memory
-operations. Previously cached search results may be available during eligible
-transient failures, but the plugin cannot provide full local memory without
-cloud configuration. Standalone local memory and Hybrid are planned.
+Cloud mode requires a configured XMemo service and credential. This source also
+contains a keyless experimental local mode with keyword search, revision history,
+and restore; it has no semantic search or cloud synchronization. Hybrid remains
+unavailable, and the default mode remains cloud.
 
 ### Do I need a local embedding model or vector database?
 
-Not for the current cloud plugin. The XMemo service performs semantic retrieval.
-The planned local engine would add its own local storage and retrieval without
-requiring a cloud account; model and packaging choices are not yet a released
-configuration contract.
+Not for cloud mode; the XMemo service performs semantic retrieval. Experimental
+local mode uses keyword search and does not include local embeddings or semantic
+retrieval.
 
 ### Can OpenClaw share memory with ChatGPT, Claude, or Codex?
 
@@ -531,9 +559,10 @@ permissions or automatically connect another client.
 ### Does XMemo automatically upload every conversation?
 
 No. Auto-capture is disabled by default and needs conversation-access permission
-when enabled. Capture applies trigger and content filters, which are heuristic,
-not a guarantee that every sensitive value is detected. Explicit tool writes
-and eligible captured content are sent to the configured XMemo service.
+when enabled in cloud mode. It remains disabled in local mode. Capture applies
+trigger and content filters, which are heuristic, not a guarantee that every
+sensitive value is detected. Explicit cloud writes and eligible cloud captures
+are sent to the configured XMemo service.
 
 ### Does installing this plugin migrate my existing local memory?
 

@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
@@ -8,6 +8,8 @@ import {
   buildXMemoEnvCredential,
   pollDeviceLoginToken,
   requestDeviceLoginStart,
+  registerXMemoCli,
+  readXMemoLocalStatus,
   resolveKeyCredentialFromInput,
   runDeviceLoginCommand,
   saveXMemoSharedCredential,
@@ -15,6 +17,25 @@ import {
   type XMemoKeyCredential,
 } from "./cli.js";
 import { resolveXMemoMemoryConfig, sharedCredentialPath } from "./config.js";
+import { LocalMemoryKernel } from "./local/kernel.js";
+import { trustedLocalIdentity } from "./memory-service.js";
+
+class FakeCommand {
+  readonly children = new Map<string, FakeCommand>();
+  handler?: (...args: unknown[]) => unknown;
+
+  constructor(readonly name = "root") {}
+  command(name: string) {
+    const command = new FakeCommand(name);
+    this.children.set(name, command);
+    return command;
+  }
+  description() { return this; }
+  argument() { return this; }
+  option() { return this; }
+  requiredOption() { return this; }
+  action(handler: (...args: unknown[]) => unknown) { this.handler = handler; return this; }
+}
 
 type EntryView = {
   enabled?: boolean;
@@ -321,5 +342,89 @@ describe("xmemo CLI key config helpers", () => {
         logSpy.mockRestore();
       }
     });
+  });
+});
+
+describe("xmemo local CLI", () => {
+  it("reports local readiness without networking and exposes preview, import, and export commands", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "xmemo-local-cli-"));
+    const outputPath = join(dataDir, "export.jsonl");
+    const ledgerPath = join(dataDir, "legacy-import.jsonl");
+    const recallCachePath = join(dataDir, "recall-cache.json");
+    const writeOutboxPath = join(dataDir, "write-outbox.json");
+    const network = vi.fn(() => { throw new Error("network blocked in local CLI test"); });
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubEnv("OPENCLAW_DATA_DIR", dataDir);
+    vi.stubEnv("XMEMO_KEY", "configured-cloud-key-must-not-be-used");
+    global.fetch = network as unknown as typeof fetch;
+    try {
+      const config = {
+        plugins: {
+          entries: {
+            "xmemo-memory": { enabled: true, config: { mode: "local", apiKey: "configured-cloud-key", agentId: "agent-cli" } },
+          },
+        },
+      } as unknown as OpenClawConfig;
+      const kernel = await LocalMemoryKernel.open();
+      try {
+        await kernel.create({ body: "cli export violet note", title: "Export sample" }, trustedLocalIdentity({ agentId: "agent-cli" }, "agent-cli"));
+      } finally {
+        await kernel.close();
+      }
+
+      const status = await readXMemoLocalStatus(resolveXMemoMemoryConfig(config));
+      expect(status).toMatchObject({ mode: "local", providerReadiness: "ready", pendingPhysicalCleanup: 0, autoCapture: false, networkAccess: "none" });
+      expect(status.vaultPath).toContain("local-vault.sqlite");
+      expect(network).not.toHaveBeenCalled();
+
+      const program = new FakeCommand();
+      const api = {
+        config,
+        registerCli(callback: (input: { program: FakeCommand }) => void) { callback({ program }); },
+      };
+      registerXMemoCli(api as never);
+      const xmemo = program.children.get("xmemo")!;
+      const captured: unknown[] = [];
+      logSpy.mockImplementation((value?: unknown) => captured.push(value));
+
+      await xmemo.children.get("status")!.handler?.({ json: true });
+      const statusOutput = JSON.parse(String(captured.pop())) as Record<string, unknown>;
+      expect(statusOutput).toMatchObject({ mode: "local", providerReadiness: "ready", networkAccess: "none" });
+
+      const hybridProgram = new FakeCommand();
+      const hybridConfig = {
+        plugins: { entries: { "xmemo-memory": { enabled: true, config: { mode: "hybrid", apiKey: "configured-cloud-key" } } } },
+      } as unknown as OpenClawConfig;
+      registerXMemoCli({
+        config: hybridConfig,
+        registerCli(callback: (input: { program: FakeCommand }) => void) { callback({ program: hybridProgram }); },
+      } as never);
+      await hybridProgram.children.get("xmemo")!.children.get("status")!.handler?.({ json: true });
+      expect(JSON.parse(String(captured.pop()))).toMatchObject({ mode: "hybrid", error: "capability_unavailable", networkAccess: "none" });
+
+      await xmemo.children.get("export")!.handler?.({ output: outputPath, json: true });
+      const exportResult = JSON.parse(String(captured.pop())) as Record<string, unknown>;
+      expect(exportResult).toMatchObject({ records: 1, outputPath });
+      expect(readFileSync(outputPath, "utf8")).toContain("cli export violet note");
+      expect(statSync(outputPath).mode & 0o777).toBe(0o600);
+
+      const cacheBytes = JSON.stringify({ version: 1, entries: {} });
+      const outboxBytes = JSON.stringify({ version: 1, records: {} });
+      writeFileSync(recallCachePath, cacheBytes);
+      writeFileSync(writeOutboxPath, outboxBytes);
+      await xmemo.children.get("import-preview")!.handler?.({ recallCache: recallCachePath, writeOutbox: writeOutboxPath, json: true });
+      expect(JSON.parse(String(captured.pop()))).toMatchObject({ totalSourceEntries: 0 });
+      await xmemo.children.get("import")!.handler?.({ recallCache: recallCachePath, writeOutbox: writeOutboxPath, ledger: ledgerPath, json: true });
+      expect(JSON.parse(String(captured.pop()))).toMatchObject({ imported: 0, quarantined: 0, skipped: 0, reconciled: true });
+      expect(readFileSync(recallCachePath, "utf8")).toBe(cacheBytes);
+      expect(readFileSync(writeOutboxPath, "utf8")).toBe(outboxBytes);
+      expect(network).not.toHaveBeenCalled();
+      expect(errorSpy).not.toHaveBeenCalled();
+    } finally {
+      vi.restoreAllMocks();
+      vi.unstubAllEnvs();
+      rmSync(dataDir, { recursive: true, force: true });
+    }
   });
 });

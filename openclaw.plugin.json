@@ -2,7 +2,7 @@
   "id": "xmemo-memory",
   "version": "1.0.18",
   "name": "XMemo for OpenClaw",
-  "description": "OpenClaw memory plugin for XMemo cloud: persistent memory, semantic recall, cross-agent sharing, TODOs, and restart snapshots.",
+  "description": "OpenClaw memory plugin for XMemo cloud by default, with experimental keyless local memory, semantic recall, TODOs, and restart snapshots.",
   "kind": "memory",
   "commandAliases": [
     {
@@ -80,6 +80,8 @@
       "xmemo_memory_list",
       "xmemo_memory_get",
       "xmemo_memory_update",
+      "xmemo_memory_history",
+      "xmemo_memory_restore",
       "xmemo_todo_create",
       "xmemo_todo_list",
       "xmemo_todo_complete",
@@ -152,6 +154,22 @@
         {
           "rootPath": "plugins.entries.xmemo-memory.config",
           "requiredAny": ["apiKey", "token", "mode"]
+        }
+      ]
+    },
+    "xmemo_memory_history": {
+      "configSignals": [
+        {
+          "rootPath": "plugins.entries.xmemo-memory.config",
+          "requiredAny": ["mode"]
+        }
+      ]
+    },
+    "xmemo_memory_restore": {
+      "configSignals": [
+        {
+          "rootPath": "plugins.entries.xmemo-memory.config",
+          "requiredAny": ["mode"]
         }
       ]
     },
@@ -308,7 +326,7 @@
     },
     "autoCapture": {
       "label": "Auto-Capture",
-      "help": "Opt in to capturing matching user messages into XMemo cloud after a conversation turn. Disabled by default; this does not archive every message.",
+      "help": "Opt in to capturing matching user messages into XMemo cloud after a conversation turn. Cloud mode only; disabled by default and disabled in local/hybrid mode.",
       "advanced": false
     },
     "captureMaxChars": {

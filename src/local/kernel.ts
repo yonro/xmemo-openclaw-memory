@@ -428,6 +428,11 @@ export class LocalMemoryKernel {
     return this.vaultIdValue;
   }
 
+  async pendingPhysicalCleanupCount(): Promise<number> {
+    await this.readyPromise;
+    return await this.request<number>("pendingPhysicalCleanupCount", {});
+  }
+
   async backup(artifactDirectory: string): Promise<LocalBackupManifest> {
     await this.readyPromise;
     return await this.request<LocalBackupManifest>("backup", { artifactDirectory });

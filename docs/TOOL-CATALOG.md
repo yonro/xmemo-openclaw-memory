@@ -21,11 +21,15 @@ This catalog records the OpenClaw tool schemas captured from `registerXMemoTools
 | `xmemo_memory_list` | None in schema; runtime requires `query` or `path` / schema 无必填，执行时需提供query或path | `maxResults` ≥1, default 20 / 默认20; `debug` default false / 默认false; `memory_type` enum `semantic`, `episodic`, `working`, `procedural`, `identity` / 类型枚举; `full` default false / 默认false; `maxChars` 1–100000, default 500 / 默认500; `include_deleted` default false / 默认false |
 | `xmemo_memory_get` | None in schema; runtime requires `id` or `path` / schema 无必填，执行时需提供id或path | `from` start line ≥1 / 起始行≥1; `lines` ≥1 / 行数≥1; no default / 无默认值 |
 | `xmemo_memory_update` | `id` — memory ID / 记忆ID | `content`, `path`, `memory_type`, `status`; `importance` 0–1 / 重要度0–1; `base_revision` expected current local revision for a version-aware update / 本地版本更新时的预期当前版本; no default / 无默认值 |
+| `xmemo_memory_history` | `id` — memory ID or local path / 记忆ID或本地路径 | `limit` 1–100, default 20 / 默认20; `before_local_revision` ≥1 / 本地版本分页游标; local-only / 仅本地模式 |
+| `xmemo_memory_restore` | `id`, `from_revision_id`, `base_revision` / 均必填 | None / 无；仅本地模式，将所选历史版本恢复为新版本 |
 | `xmemo_restart_snapshot_save` | None / 无 | `label` optional / 可选标签 |
 | `xmemo_restart_snapshot_restore` | None / 无 | `snapshot_id`, `bucket`, `scope` optional / 均可选; no schema default / schema未声明默认值 |
 | `xmemo_ledger_monthly_summary` | None / 无 | `months` 1–24, default 6 / 默认6; `month` 1–12 and `year` are legacy aliases / 旧版兼容参数; optional `currency`, `transaction_type` / 可选币种与交易类型 |
 | `xmemo_audit_events` | None / 无 | `action`, `target_id`, `since`, `until` optional / 均可选; `limit` ≥1, default 50 / 默认50 |
 | `xmemo_audit_consolidation` | None / 无 | `action_type`, `since`, `until` optional / 均可选; `limit` ≥1, default 50 / 默认50 |
+
+`xmemo_memory_history` and `xmemo_memory_restore` are registered in both modes but only operate in explicit local mode; cloud mode returns stable `capability_unavailable` errors. Local mode is experimental, keyless, and does not change the cloud default. / `xmemo_memory_history` 与 `xmemo_memory_restore` 在两种模式中均注册，但仅在显式本地模式下可执行；云模式返回稳定的 `capability_unavailable` 错误。本地模式为实验性、无需密钥，且不会改变云端默认模式。
 
 ## Source schema snapshot / 源 schema 快照
 
@@ -266,6 +270,32 @@ This catalog records the OpenClaw tool schemas captured from `registerXMemoTools
     }
   },
   {
+    "name": "xmemo_memory_history",
+    "parameters": {
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Memory id or local path"
+        },
+        "limit": {
+          "type": "integer",
+          "description": "Revision count (default: 20, max: 100)",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "before_local_revision": {
+          "type": "integer",
+          "description": "Return revisions older than this local revision number",
+          "minimum": 1
+        }
+      }
+    }
+  },
+  {
     "name": "xmemo_memory_list",
     "parameters": {
       "type": "object",
@@ -311,6 +341,31 @@ This catalog records the OpenClaw tool schemas captured from `registerXMemoTools
         "include_deleted": {
           "type": "boolean",
           "description": "Include soft-deleted memories (default: false)"
+        }
+      }
+    }
+  },
+  {
+    "name": "xmemo_memory_restore",
+    "parameters": {
+      "type": "object",
+      "required": [
+        "id",
+        "from_revision_id",
+        "base_revision"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Memory id or local path"
+        },
+        "from_revision_id": {
+          "type": "string",
+          "description": "Historical revision id returned by xmemo_memory_history"
+        },
+        "base_revision": {
+          "type": "string",
+          "description": "Current revision id used for optimistic concurrency"
         }
       }
     }
