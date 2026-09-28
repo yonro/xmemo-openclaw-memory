@@ -96,6 +96,42 @@ export type LocalHistoryPage = {
   nextBeforeLocalRevision: number | null;
 };
 
+export type LocalBackupManifest = {
+  format_version: 1;
+  backup_id: string;
+  artifact_sha256: string;
+  integrity: "ok";
+  schema_version: number;
+  vault_id: string;
+  epoch: number;
+  generation: number;
+  counts: {
+    records: number;
+    revisions: number;
+    deletion_barriers: number;
+    operations: number;
+    operation_tombstones: number;
+  };
+  created_at: string;
+  expires_at: string;
+  max_retention_days: 30;
+};
+
+export type LocalBackupRestoreReceipt = {
+  restored: true;
+  integrity: "ok";
+  schema_version: number;
+  vault_id: string;
+  source_epoch: number;
+  epoch: number;
+  source_generation: number;
+  generation: number;
+  replayed_barriers: number;
+  fenced_operations: number;
+  physical_cleanup: "pending" | "complete";
+  counts: LocalBackupManifest["counts"];
+};
+
 export type LocalRecord = {
   recordId: string;
   origin: "local";
@@ -375,6 +411,16 @@ export class LocalMemoryKernel {
 
   get vaultId(): string {
     return this.vaultIdValue;
+  }
+
+  async backup(artifactDirectory: string): Promise<LocalBackupManifest> {
+    await this.readyPromise;
+    return await this.request<LocalBackupManifest>("backup", { artifactDirectory });
+  }
+
+  async restoreBackup(artifactDirectory: string): Promise<LocalBackupRestoreReceipt> {
+    await this.readyPromise;
+    return await this.request<LocalBackupRestoreReceipt>("restoreBackup", { artifactDirectory });
   }
 
   async create(input: LocalRecordInput, identity: TrustedLocalIdentityContext): Promise<LocalWriteReceipt> {

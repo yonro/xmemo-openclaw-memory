@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -451,6 +451,162 @@ describe("isolated local SQLite kernel", () => {
     await reopened.close();
   });
 
+  it("creates an integrity-checked SQLite backup while writes continue", async () => {
+    const dataDirectory = await mkdtemp(join(tmpdir(), "xmemo-online-backup-"));
+    dataDirectories.push(dataDirectory);
+    const kernel = await createKernel({ dataDirectory });
+    for (let index = 0; index < 64; index += 1) {
+      await kernel.create({ body: `backup seed ${index} ${"x".repeat(16_384)}` }, directAlice);
+    }
+
+    const artifactDirectory = join(dataDirectory, "backups", "concurrent");
+    const backupPromise = kernel.backup(artifactDirectory).then(
+      value => ({ value }),
+      error => ({ error }),
+    );
+    const concurrentWrites = Promise.allSettled(Array.from({ length: 24 }, (_, index) => kernel.create({
+      body: `concurrent backup write ${index} ${"y".repeat(8_192)}`,
+    }, directAlice)));
+    const [backupResult, writeResults] = await Promise.all([backupPromise, concurrentWrites]);
+    if ("error" in backupResult) throw new Error("Online backup failed while concurrent writes completed.", { cause: backupResult.error });
+    const rejectedWrite = writeResults.find(result => result.status === "rejected");
+    if (rejectedWrite?.status === "rejected") {
+      throw new Error("A concurrent write failed during online backup.", { cause: rejectedWrite.reason });
+    }
+    const manifest = backupResult.value;
+    const writes = writeResults.map(result => result.status === "fulfilled" ? result.value : undefined);
+
+    expect(manifest).toMatchObject({
+      format_version: 1,
+      integrity: "ok",
+      schema_version: 4,
+      vault_id: kernel.vaultId,
+      artifact_sha256: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+      epoch: 1,
+      max_retention_days: 30,
+      counts: { records: expect.any(Number), revisions: expect.any(Number) },
+    });
+    expect(Date.parse(manifest.expires_at) - Date.parse(manifest.created_at)).toBe(30 * 24 * 60 * 60 * 1000);
+    expect(writes).toHaveLength(24);
+    expect(manifest.counts.records).toBeGreaterThanOrEqual(64);
+    expect(manifest.counts.records).toBeLessThanOrEqual(88);
+
+    const backupDb = new DatabaseSync(join(artifactDirectory, "vault.sqlite"), { readOnly: true });
+    try {
+      expect(backupDb.prepare("PRAGMA integrity_check").get()).toMatchObject({ integrity_check: "ok" });
+      expect(backupDb.prepare("SELECT count(*) AS count FROM records").get()?.count).toBe(manifest.counts.records);
+      expect(backupDb.prepare("SELECT value FROM vault_metadata WHERE key='generation'").get()?.value)
+        .toBe(String(manifest.generation));
+    } finally {
+      backupDb.close();
+    }
+  }, 15_000);
+
+  it("restores in place, reapplies hard-delete and redaction barriers, and fences stale operations", async () => {
+    const dataDirectory = await mkdtemp(join(tmpdir(), "xmemo-backup-restore-"));
+    dataDirectories.push(dataDirectory);
+    const kernel = await createKernel({ dataDirectory });
+    const hardDeleteCanary = "restore-hard-delete-byte-canary-f72a";
+    const redactionCanary = "restore-redaction-byte-canary-a811";
+    const staleCanary = "restore-post-backup-stale-operation-canary-044b";
+    const hardRecord = await kernel.create({ body: hardDeleteCanary, operationId: "backup-hard-delete-create" }, directAlice);
+    const redactedRecord = await kernel.create({ body: redactionCanary, operationId: "backup-redact-create" }, directAlice);
+    const survivor = await kernel.create({ body: "survivor as captured by the backup", operationId: "backup-survivor-create" }, directAlice);
+    const softDeletedRecord = await kernel.create({ body: "soft delete barrier record" }, directAlice);
+    const artifactDirectory = join(dataDirectory, "backups", "restore-drill");
+    const manifest = await kernel.backup(artifactDirectory);
+
+    const staleUpdate = await kernel.update(survivor.recordId, {
+      body: staleCanary,
+      baseRevision: survivor.revisionId,
+      operationId: "post-backup-stale-update",
+    }, directAlice);
+    expect(staleUpdate.writeKind).toBe("versioned_update");
+    await kernel.redact(redactedRecord.recordId, {
+      baseRevision: redactedRecord.revisionId,
+      fields: ["body"],
+      metadataKeys: [],
+      operationId: "post-backup-redact",
+    }, directAlice);
+    await kernel.hardDelete(hardRecord.recordId, {
+      baseRevision: hardRecord.revisionId,
+      operationId: "post-backup-hard-delete",
+    }, directAlice);
+    await kernel.softDelete(softDeletedRecord.recordId, {
+      baseRevision: softDeletedRecord.revisionId,
+      operationId: "post-backup-soft-delete",
+    }, directAlice);
+
+    const restored = await kernel.restoreBackup(artifactDirectory);
+    expect(restored).toMatchObject({
+      restored: true,
+      integrity: "ok",
+      schema_version: 4,
+      vault_id: kernel.vaultId,
+      source_epoch: manifest.epoch,
+      replayed_barriers: 3,
+      physical_cleanup: "complete",
+    });
+    expect(restored.epoch).toBeGreaterThan(manifest.epoch);
+    expect(restored.generation).toBeGreaterThan(manifest.generation);
+    expect(restored.counts.records).toBe(manifest.counts.records - 1);
+    expect(restored.counts.revisions).toBe(manifest.counts.revisions - 1);
+    expect(restored.counts.deletion_barriers).toBe(3);
+    expect(restored.counts.operations).toBe(manifest.counts.operations - 2);
+    await expect(kernel.get(hardRecord.recordId, directAlice)).rejects.toMatchObject({ category: "not_found" });
+    await expect(kernel.get(softDeletedRecord.recordId, directAlice)).rejects.toMatchObject({ category: "not_found" });
+    expect((await kernel.get(redactedRecord.recordId, directAlice)).body).toBe("");
+    expect((await kernel.get(survivor.recordId, directAlice)).body).toBe("survivor as captured by the backup");
+    expect(await kernel.search(hardDeleteCanary, directAlice)).toHaveLength(0);
+    expect(await kernel.search(redactionCanary, directAlice)).toHaveLength(0);
+    expect(await kernel.search("soft delete barrier record", directAlice)).toHaveLength(0);
+    expect((await kernel.search("survivor as captured", directAlice)).map(record => record.recordId)).toContain(survivor.recordId);
+    await expect(kernel.update(survivor.recordId, {
+      body: staleCanary,
+      baseRevision: survivor.revisionId,
+      operationId: "post-backup-stale-update",
+    }, directAlice)).rejects.toMatchObject({ category: "not_found" });
+    await expect(kernel.create({
+      body: "survivor as captured by the backup",
+      operationId: "backup-survivor-create",
+    }, directAlice))
+      .rejects.toMatchObject({ category: "conflict" });
+    expectTokensAbsent(await physicalVaultBytes(dataDirectory), [hardDeleteCanary, redactionCanary, staleCanary]);
+    await kernel.close();
+    const reopened = await createKernel({ dataDirectory });
+    expectTokensAbsent(await physicalVaultBytes(dataDirectory), [hardDeleteCanary, redactionCanary, staleCanary]);
+    expect((await reopened.get(survivor.recordId, directAlice)).body).toBe("survivor as captured by the backup");
+  });
+
+  it("rejects a backup from another vault without changing the active vault", async () => {
+    const firstDirectory = await mkdtemp(join(tmpdir(), "xmemo-backup-source-"));
+    const secondDirectory = await mkdtemp(join(tmpdir(), "xmemo-backup-target-"));
+    dataDirectories.push(firstDirectory, secondDirectory);
+    const source = await createKernel({ dataDirectory: firstDirectory });
+    const target = await createKernel({ dataDirectory: secondDirectory });
+    const sourceRecord = await source.create({ body: "source vault backup" }, directAlice);
+    const targetRecord = await target.create({ body: "target vault remains unchanged" }, directAlice);
+    const artifactDirectory = join(firstDirectory, "backup");
+    await source.backup(artifactDirectory);
+
+    await expect(target.restoreBackup(artifactDirectory)).rejects.toMatchObject({ category: "validation" });
+    expect((await target.get(targetRecord.recordId, directAlice)).body).toBe("target vault remains unchanged");
+    expect((await source.get(sourceRecord.recordId, directAlice)).body).toBe("source vault backup");
+  });
+
+  it("rejects a backup whose SQLite artifact no longer matches its manifest", async () => {
+    const dataDirectory = await mkdtemp(join(tmpdir(), "xmemo-backup-tamper-"));
+    dataDirectories.push(dataDirectory);
+    const kernel = await createKernel({ dataDirectory });
+    const record = await kernel.create({ body: "active data survives a damaged backup" }, directAlice);
+    const artifactDirectory = join(dataDirectory, "backup");
+    await kernel.backup(artifactDirectory);
+    await appendFile(join(artifactDirectory, "vault.sqlite"), Buffer.from("tamper"));
+
+    await expect(kernel.restoreBackup(artifactDirectory)).rejects.toMatchObject({ category: "corrupt_store" });
+    expect((await kernel.get(record.recordId, directAlice)).body).toBe("active data survives a damaged backup");
+  });
+
   it("persists pending physical cleanup when a reader blocks WAL truncation and completes it when idle", async () => {
     const dataDirectory = await mkdtemp(join(tmpdir(), "xmemo-pending-cleanup-"));
     dataDirectories.push(dataDirectory);
@@ -531,6 +687,7 @@ describe("isolated local SQLite kernel", () => {
         SELECT record_id, barrier_revision_id, operation_id, created_at FROM deletion_barriers WHERE record_id = ?
       `).run(created.recordId);
       database.exec("DROP TABLE deletion_barriers; ALTER TABLE deletion_barriers_v1 RENAME TO deletion_barriers; DROP TABLE operation_tombstones; DROP TABLE physical_cleanup_jobs");
+      database.exec("ALTER TABLE operations DROP COLUMN generation; ALTER TABLE operations DROP COLUMN epoch");
       database.prepare("UPDATE vault_metadata SET value = '1' WHERE key = 'schema_version'").run();
       database.exec("PRAGMA user_version = 1");
     } finally {
@@ -547,9 +704,9 @@ describe("isolated local SQLite kernel", () => {
     expect((await migrated.get(created.recordId, directAlice)).body).toBe("migration barrier keeps content");
     const verification = new DatabaseSync(databasePath, { readOnly: true });
     try {
-      expect(verification.prepare("PRAGMA user_version").get()).toMatchObject({ user_version: 3 });
+      expect(verification.prepare("PRAGMA user_version").get()).toMatchObject({ user_version: 4 });
       expect(verification.prepare("SELECT value FROM vault_metadata WHERE key = 'schema_version'").get())
-        .toMatchObject({ value: "3" });
+        .toMatchObject({ value: "4" });
     } finally {
       verification.close();
     }

@@ -1,10 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import { chmodSync, createReadStream, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { backup, DatabaseSync } from "node:sqlite";
 import { parentPort, workerData } from "node:worker_threads";
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
+const MAX_BACKUP_RETENTION_DAYS = 30;
+const MAX_BACKUP_RETENTION_MS = MAX_BACKUP_RETENTION_DAYS * 24 * 60 * 60 * 1000;
 const { databasePath, busyTimeoutMs } = workerData;
 let database;
 let vaultId;
@@ -150,10 +152,35 @@ const migrationThree = `
   INSERT INTO record_fts(record_fts, rank) VALUES ('secure-delete', 1);
 `;
 
+const migrationFour = `
+  DROP INDEX physical_cleanup_jobs_status;
+  ALTER TABLE physical_cleanup_jobs RENAME TO physical_cleanup_jobs_v3;
+  CREATE TABLE physical_cleanup_jobs (
+    operation_id TEXT PRIMARY KEY,
+    record_id TEXT NOT NULL,
+    operation_kind TEXT NOT NULL CHECK (operation_kind IN ('hard_delete', 'redact', 'restore')),
+    status TEXT NOT NULL CHECK (status IN ('pending', 'complete')),
+    created_at TEXT NOT NULL,
+    completed_at TEXT
+  ) STRICT;
+  INSERT INTO physical_cleanup_jobs SELECT * FROM physical_cleanup_jobs_v3;
+  DROP TABLE physical_cleanup_jobs_v3;
+  CREATE INDEX physical_cleanup_jobs_status ON physical_cleanup_jobs(status, created_at);
+
+  ALTER TABLE operations ADD COLUMN epoch INTEGER NOT NULL DEFAULT 1 CHECK (epoch >= 1);
+  ALTER TABLE operations ADD COLUMN generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0);
+  ALTER TABLE operation_tombstones ADD COLUMN created_generation INTEGER NOT NULL DEFAULT 0 CHECK (created_generation >= 0);
+  ALTER TABLE deletion_barriers ADD COLUMN created_generation INTEGER NOT NULL DEFAULT 0 CHECK (created_generation >= 0);
+
+  INSERT OR IGNORE INTO vault_metadata(key, value) VALUES ('epoch', '1');
+  INSERT OR IGNORE INTO vault_metadata(key, value) VALUES ('generation', '0');
+`;
+
 const MIGRATIONS = [
   { version: 1, sql: migrationOne },
   { version: 2, sql: migrationTwo },
   { version: 3, sql: migrationThree },
+  { version: 4, sql: migrationFour },
 ];
 
 function errorCode(error) {
@@ -325,13 +352,17 @@ function initializeDatabase() {
     }
   }
 
-  const metadata = database.prepare("SELECT key, value FROM vault_metadata WHERE key IN ('schema_version', 'vault_id')").all();
+  const metadata = database.prepare("SELECT key, value FROM vault_metadata WHERE key IN ('schema_version', 'vault_id', 'epoch', 'generation')").all();
   const values = new Map(metadata.map(row => [String(row.key), String(row.value)]));
   const storedVersion = Number(values.get("schema_version"));
+  const storedEpoch = Number(values.get("epoch"));
+  const storedGeneration = Number(values.get("generation"));
   if (storedVersion > SCHEMA_VERSION) {
     throw new DomainError("unsupported_schema_version", safeMessage("unsupported_schema_version"));
   }
-  if (storedVersion !== SCHEMA_VERSION || !values.get("vault_id")) {
+  if (storedVersion !== SCHEMA_VERSION || !values.get("vault_id")
+    || !Number.isSafeInteger(storedEpoch) || storedEpoch < 1
+    || !Number.isSafeInteger(storedGeneration) || storedGeneration < 0) {
     throw new DomainError("corrupt_store", safeMessage("corrupt_store"));
   }
   assertDatabaseIntegrity();
@@ -339,6 +370,378 @@ function initializeDatabase() {
   try { attemptPendingPhysicalCleanup(); } catch { /* A durable job is retried on an idle pass. */ }
   schedulePhysicalCleanupRetry();
   return { vaultId: values.get("vault_id"), schemaVersion: storedVersion };
+}
+
+function tableCount(connection, tableName) {
+  const allowed = new Set(["records", "revisions", "deletion_barriers", "operations", "operation_tombstones"]);
+  if (!allowed.has(tableName)) throw new DomainError("validation", safeMessage("validation"));
+  return Number(connection.prepare(`SELECT count(*) AS count FROM ${tableName}`).get()?.count ?? 0);
+}
+
+async function sha256File(filePath) {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(filePath)) hash.update(chunk);
+  return `sha256:${hash.digest("hex")}`;
+}
+
+function inspectVault(connection) {
+  const integrityRows = connection.prepare("PRAGMA integrity_check").all();
+  if (integrityRows.length === 0 || integrityRows.some(row => String(row.integrity_check) !== "ok")) {
+    throw new DomainError("corrupt_store", safeMessage("corrupt_store"));
+  }
+  const userVersion = Number(connection.prepare("PRAGMA user_version").get()?.user_version ?? 0);
+  const metadataRows = connection.prepare(
+    "SELECT key, value FROM vault_metadata WHERE key IN ('schema_version', 'vault_id', 'epoch', 'generation')",
+  ).all();
+  const metadata = new Map(metadataRows.map(row => [String(row.key), String(row.value)]));
+  const schemaVersion = Number(metadata.get("schema_version"));
+  const epoch = Number(metadata.get("epoch"));
+  const generation = Number(metadata.get("generation"));
+  const vaultIdValue = metadata.get("vault_id");
+  if (userVersion !== SCHEMA_VERSION || schemaVersion !== SCHEMA_VERSION || !vaultIdValue
+    || !Number.isSafeInteger(epoch) || epoch < 1
+    || !Number.isSafeInteger(generation) || generation < 0) {
+    throw new DomainError("corrupt_store", safeMessage("corrupt_store"));
+  }
+  return {
+    integrity: "ok",
+    schema_version: schemaVersion,
+    vault_id: vaultIdValue,
+    epoch,
+    generation,
+    counts: {
+      records: tableCount(connection, "records"),
+      revisions: tableCount(connection, "revisions"),
+      deletion_barriers: tableCount(connection, "deletion_barriers"),
+      operations: tableCount(connection, "operations"),
+      operation_tombstones: tableCount(connection, "operation_tombstones"),
+    },
+  };
+}
+
+async function readBackupArtifact(artifactDirectory, expectedVaultId) {
+  const directory = resolve(requireText(artifactDirectory, "artifactDirectory", { maxLength: 4_096 }));
+  let manifest;
+  try {
+    manifest = JSON.parse(readFileSync(join(directory, "manifest.json"), "utf8"));
+  } catch {
+    throw new DomainError("validation", "Backup manifest is missing or unreadable.");
+  }
+  if (!manifest || manifest.format_version !== 1 || manifest.integrity !== "ok"
+    || manifest.max_retention_days !== MAX_BACKUP_RETENTION_DAYS
+    || manifest.vault_id !== expectedVaultId) {
+    throw new DomainError("validation", "Backup manifest does not match this local vault.");
+  }
+  const createdAt = Date.parse(manifest.created_at);
+  const expiresAt = Date.parse(manifest.expires_at);
+  const now = Date.now();
+  if (!Number.isFinite(createdAt) || !Number.isFinite(expiresAt)
+    || expiresAt <= now || expiresAt < createdAt || expiresAt - createdAt > MAX_BACKUP_RETENTION_MS
+    || createdAt > now + 5 * 60 * 1000) {
+    throw new DomainError("validation", "Backup is expired or exceeds the 30-day retention bound.");
+  }
+  const databaseFile = join(directory, "vault.sqlite");
+  if (typeof manifest.artifact_sha256 !== "string" || await sha256File(databaseFile) !== manifest.artifact_sha256) {
+    throw new DomainError("corrupt_store", "Backup artifact checksum does not match its manifest.");
+  }
+  let artifactDatabase;
+  try {
+    artifactDatabase = new DatabaseSync(databaseFile, { readOnly: true, timeout: busyTimeoutMs });
+    const actual = inspectVault(artifactDatabase);
+    if (actual.vault_id !== expectedVaultId
+      || actual.schema_version !== manifest.schema_version
+      || actual.epoch !== manifest.epoch
+      || actual.generation !== manifest.generation
+      || JSON.stringify(actual.counts) !== JSON.stringify(manifest.counts)) {
+      throw new DomainError("corrupt_store", "Backup manifest does not match its SQLite contents.");
+    }
+    return { directory, databaseFile, manifest, actual };
+  } catch (error) {
+    if (error instanceof DomainError) throw error;
+    const category = categoryFor(error, true);
+    throw new DomainError(category, safeMessage(category));
+  } finally {
+    try { artifactDatabase?.close(); } catch { /* Best effort after verification failure. */ }
+  }
+}
+
+async function createOnlineBackup(payload) {
+  const artifactDirectory = resolve(requireText(payload.artifactDirectory, "artifactDirectory", { maxLength: 4_096 }));
+  mkdirSync(dirname(artifactDirectory), { recursive: true, mode: 0o700 });
+  mkdirSync(artifactDirectory, { mode: 0o700 });
+  const databaseFile = join(artifactDirectory, "vault.sqlite");
+  try {
+    let backupSource;
+    try {
+      // Keep Node's threadpool backup work off the live writer connection; SQLite restarts
+      // a read-only source backup when the active writer commits during the copy.
+      backupSource = new DatabaseSync(databasePath, { readOnly: true, timeout: busyTimeoutMs });
+      await backup(backupSource, databaseFile);
+    } finally {
+      try { backupSource?.close(); } catch { /* Preserve the online backup result. */ }
+    }
+    try { chmodSync(databaseFile, 0o600); } catch { /* Best effort on Windows. */ }
+    let artifactDatabase;
+    let manifest;
+    try {
+      artifactDatabase = new DatabaseSync(databaseFile, { readOnly: true, timeout: busyTimeoutMs });
+      const createdAt = Date.now();
+      manifest = {
+        format_version: 1,
+        backup_id: randomUUID(),
+        artifact_sha256: await sha256File(databaseFile),
+        ...inspectVault(artifactDatabase),
+        created_at: new Date(createdAt).toISOString(),
+        expires_at: new Date(createdAt + MAX_BACKUP_RETENTION_MS).toISOString(),
+        max_retention_days: MAX_BACKUP_RETENTION_DAYS,
+      };
+    } finally {
+      try { artifactDatabase?.close(); } catch { /* Preserve backup verification errors. */ }
+    }
+    const temporaryManifest = join(artifactDirectory, `.manifest-${randomUUID()}.tmp`);
+    writeFileSync(temporaryManifest, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+    renameSync(temporaryManifest, join(artifactDirectory, "manifest.json"));
+    try { chmodSync(artifactDirectory, 0o700); } catch { /* Best effort on Windows. */ }
+    return manifest;
+  } catch (error) {
+    rmSync(artifactDirectory, { recursive: true, force: true });
+    if (error instanceof DomainError) throw error;
+    const category = categoryFor(error);
+    throw new DomainError(category, safeMessage(category));
+  }
+}
+
+function replayDeletionBarriers(stagedDatabase, sourceDatabase, backupGeneration) {
+  const barriers = sourceDatabase.prepare(`
+    SELECT barrier_id, record_id, barrier_revision_id, operation_id, barrier_kind, created_at, cleared_at, created_generation
+    FROM deletion_barriers WHERE created_generation > ? ORDER BY created_generation, barrier_id
+  `).all(backupGeneration);
+
+  const postBackupOperations = sourceDatabase.prepare(`
+    SELECT operation_id, record_id, generation AS created_generation
+    FROM operations WHERE generation > ?
+    UNION
+    SELECT operation_id, record_id, created_generation
+    FROM operation_tombstones WHERE created_generation > ?
+  `).all(backupGeneration, backupGeneration);
+  const saveOperationBarrier = stagedDatabase.prepare(`
+    INSERT OR IGNORE INTO operation_tombstones(operation_id, record_id, created_at, created_generation)
+    VALUES (?, ?, ?, ?)
+  `);
+  for (const row of postBackupOperations) {
+    saveOperationBarrier.run(String(row.operation_id), String(row.record_id), new Date().toISOString(), Number(row.created_generation));
+  }
+
+  const updateRevision = stagedDatabase.prepare(`
+    UPDATE revisions SET title = ?, body = ?, metadata_json = ?, content_hash = ? WHERE revision_id = ?
+  `);
+  const deleteOperationsForRedactedRecord = stagedDatabase.prepare("DELETE FROM operations WHERE record_id = ?");
+  const updateRecordProjection = stagedDatabase.prepare(`
+    UPDATE records SET current_title = ?, current_body = ?, metadata_json = ? WHERE record_id = ?
+  `);
+  const sourceRevisions = sourceDatabase.prepare(`
+    SELECT revision_id, title, body, metadata_json, content_hash FROM revisions WHERE record_id = ?
+  `);
+  const targetRevisionExists = stagedDatabase.prepare("SELECT 1 FROM revisions WHERE revision_id = ?");
+  const targetCurrentRevision = stagedDatabase.prepare("SELECT current_revision_id FROM records WHERE record_id = ?");
+  const targetCurrentContent = stagedDatabase.prepare(`
+    SELECT title, body, metadata_json FROM revisions WHERE revision_id = ?
+  `);
+  for (const barrier of barriers) {
+    if (String(barrier.barrier_kind) !== "redact") continue;
+    deleteOperationsForRedactedRecord.run(String(barrier.record_id));
+    for (const revision of sourceRevisions.all(String(barrier.record_id))) {
+      updateRevision.run(revision.title, revision.body, revision.metadata_json, revision.content_hash, revision.revision_id);
+    }
+    const current = targetCurrentRevision.get(String(barrier.record_id));
+    if (current) {
+      const content = targetCurrentContent.get(String(current.current_revision_id));
+      if (content) updateRecordProjection.run(content.title, content.body, content.metadata_json, String(barrier.record_id));
+    }
+  }
+
+  const insertBarrier = stagedDatabase.prepare(`
+    INSERT OR IGNORE INTO deletion_barriers(
+      barrier_id, record_id, barrier_revision_id, operation_id, barrier_kind, created_at, cleared_at, created_generation
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  const updateSoftDeleted = stagedDatabase.prepare(`
+    UPDATE records SET deleted_at = ?, updated_at = ? WHERE record_id = ? AND deleted_at IS NULL
+  `);
+  const operationIdsForRecord = stagedDatabase.prepare("SELECT operation_id FROM operations WHERE record_id = ?");
+  const deleteOperationsForRecord = stagedDatabase.prepare("DELETE FROM operations WHERE record_id = ?");
+  const insertHardDeleteTombstone = stagedDatabase.prepare(`
+    INSERT OR IGNORE INTO operation_tombstones(operation_id, record_id, created_at, created_generation)
+    VALUES (?, ?, ?, ?)
+  `);
+  const deleteRecord = stagedDatabase.prepare("DELETE FROM records WHERE record_id = ?");
+  for (const barrier of barriers) {
+    const recordId = String(barrier.record_id);
+    const revisionId = barrier.barrier_revision_id === null
+      || targetRevisionExists.get(String(barrier.barrier_revision_id)) === undefined
+      ? null
+      : String(barrier.barrier_revision_id);
+    insertBarrier.run(
+      String(barrier.barrier_id), recordId, revisionId, String(barrier.operation_id),
+      String(barrier.barrier_kind), String(barrier.created_at),
+      barrier.cleared_at === null ? null : String(barrier.cleared_at), Number(barrier.created_generation),
+    );
+    if (String(barrier.barrier_kind) === "soft_delete" && barrier.cleared_at === null) {
+      updateSoftDeleted.run(String(barrier.created_at), String(barrier.created_at), recordId);
+    }
+    if (String(barrier.barrier_kind) === "hard_delete") {
+      for (const operation of operationIdsForRecord.all(recordId)) {
+        insertHardDeleteTombstone.run(String(operation.operation_id), recordId, String(barrier.created_at), Number(barrier.created_generation));
+      }
+      deleteOperationsForRecord.run(recordId);
+      deleteRecord.run(recordId);
+    }
+  }
+  return { barriers: barriers.length, fenced_operations: postBackupOperations.length };
+}
+
+async function restoreOnlineBackup(payload) {
+  if (!database || database.isTransaction) throw new DomainError("storage_busy", safeMessage("storage_busy"));
+  const artifact = await readBackupArtifact(payload.artifactDirectory, vaultId);
+  const stagingDirectory = mkdtempSync(join(dirname(databasePath), ".xmemo-restore-"));
+  const stagingPath = join(stagingDirectory, "local-vault.sqlite");
+  const restoreOperationId = randomUUID();
+  let stagedDatabase;
+  let attached = false;
+  let sourceTransactionStarted = false;
+  let committed = false;
+  let replay = { barriers: 0, fenced_operations: 0 };
+  try {
+    const backupDatabase = new DatabaseSync(artifact.databaseFile, { readOnly: true, timeout: busyTimeoutMs });
+    try { await backup(backupDatabase, stagingPath); } finally { backupDatabase.close(); }
+    stagedDatabase = new DatabaseSync(stagingPath, { timeout: busyTimeoutMs });
+    stagedDatabase.exec("PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON");
+    const stagedInitial = inspectVault(stagedDatabase);
+    if (stagedInitial.vault_id !== vaultId || stagedInitial.schema_version !== SCHEMA_VERSION) {
+      throw new DomainError("validation", "Backup vault identity or schema does not match the active vault.");
+    }
+
+    database.exec("BEGIN IMMEDIATE");
+    sourceTransactionStarted = true;
+    const sourceEpoch = Number(database.prepare("SELECT value FROM vault_metadata WHERE key = 'epoch'").get()?.value);
+    const sourceGeneration = Number(database.prepare("SELECT value FROM vault_metadata WHERE key = 'generation'").get()?.value);
+    if (!Number.isSafeInteger(sourceEpoch) || sourceEpoch < 1
+      || !Number.isSafeInteger(sourceGeneration) || sourceGeneration < 0) {
+      throw new DomainError("corrupt_store", safeMessage("corrupt_store"));
+    }
+    replay = replayDeletionBarriers(stagedDatabase, database, artifact.manifest.generation);
+    const nextEpoch = Math.max(sourceEpoch, artifact.manifest.epoch) + 1;
+    const nextGeneration = Math.max(sourceGeneration, artifact.manifest.generation) + 1;
+    if (!Number.isSafeInteger(nextEpoch) || !Number.isSafeInteger(nextGeneration)) {
+      throw new DomainError("validation", "Local vault epoch or generation is exhausted.");
+    }
+    stagedDatabase.prepare("UPDATE vault_metadata SET value = ? WHERE key = 'epoch'").run(String(nextEpoch));
+    stagedDatabase.prepare("UPDATE vault_metadata SET value = ? WHERE key = 'generation'").run(String(nextGeneration));
+    stagedDatabase.prepare(`
+      INSERT INTO physical_cleanup_jobs(operation_id, record_id, operation_kind, status, created_at, completed_at)
+      VALUES (?, 'restore', 'restore', 'pending', ?, NULL)
+    `).run(restoreOperationId, new Date().toISOString());
+    inspectVault(stagedDatabase);
+    const checkpoint = stagedDatabase.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get();
+    if (Number(checkpoint?.busy ?? 0) !== 0) throw new DomainError("storage_busy", safeMessage("storage_busy"));
+    stagedDatabase.close();
+    stagedDatabase = undefined;
+
+    database.prepare("ATTACH DATABASE ? AS restore_vault").run(stagingPath);
+    attached = true;
+    // Replace records without firing external-content FTS triggers, then rebuild only active rows.
+    // This also removes stale index entries from legacy soft-deleted rows in the same transaction.
+    const restoreStatements = [
+      "DROP TRIGGER records_fts_insert; DROP TRIGGER records_fts_update; DROP TRIGGER records_fts_delete",
+      "INSERT INTO record_fts(record_fts) VALUES ('delete-all')",
+      "DELETE FROM records",
+      "DELETE FROM deletion_barriers",
+      "DELETE FROM operations",
+      "DELETE FROM operation_tombstones",
+      "DELETE FROM physical_cleanup_jobs",
+      "DELETE FROM vault_metadata",
+      "INSERT INTO records SELECT * FROM restore_vault.records",
+      "INSERT INTO revisions SELECT * FROM restore_vault.revisions",
+      "INSERT INTO deletion_barriers SELECT * FROM restore_vault.deletion_barriers",
+      "INSERT INTO operations SELECT * FROM restore_vault.operations",
+      "INSERT INTO operation_tombstones SELECT * FROM restore_vault.operation_tombstones",
+      "INSERT INTO physical_cleanup_jobs SELECT * FROM restore_vault.physical_cleanup_jobs",
+      "INSERT INTO vault_metadata SELECT * FROM restore_vault.vault_metadata",
+      "INSERT INTO record_fts(rowid, current_title, current_body) SELECT rowid, current_title, current_body FROM records WHERE deleted_at IS NULL",
+      `CREATE TRIGGER records_fts_insert AFTER INSERT ON records BEGIN
+        INSERT INTO record_fts(rowid, current_title, current_body)
+        SELECT NEW.rowid, NEW.current_title, NEW.current_body WHERE NEW.deleted_at IS NULL;
+      END`,
+      `CREATE TRIGGER records_fts_update AFTER UPDATE OF current_title, current_body, deleted_at ON records BEGIN
+        INSERT INTO record_fts(record_fts, rowid, current_title, current_body)
+        SELECT 'delete', OLD.rowid, OLD.current_title, OLD.current_body WHERE OLD.deleted_at IS NULL;
+        INSERT INTO record_fts(rowid, current_title, current_body)
+        SELECT NEW.rowid, NEW.current_title, NEW.current_body WHERE NEW.deleted_at IS NULL;
+      END`,
+      `CREATE TRIGGER records_fts_delete AFTER DELETE ON records BEGIN
+        INSERT INTO record_fts(record_fts, rowid, current_title, current_body)
+        VALUES ('delete', OLD.rowid, OLD.current_title, OLD.current_body);
+      END`,
+    ];
+    for (const statement of restoreStatements) {
+      database.exec(statement);
+    }
+    database.exec("COMMIT");
+    sourceTransactionStarted = false;
+    committed = true;
+    database.exec("DETACH DATABASE restore_vault");
+    attached = false;
+    try { chmodSync(databasePath, 0o600); } catch { /* Best effort on Windows. */ }
+
+    let physicalCleanup = "pending";
+    try {
+      physicalCleanup = attemptPendingPhysicalCleanup(restoreOperationId) ? "complete" : "pending";
+    } catch {
+      physicalCleanup = "pending";
+    }
+    schedulePhysicalCleanupRetry();
+    const final = inspectVault(database);
+    return {
+      restored: true,
+      integrity: final.integrity,
+      schema_version: final.schema_version,
+      vault_id: final.vault_id,
+      source_epoch: artifact.manifest.epoch,
+      epoch: final.epoch,
+      source_generation: artifact.manifest.generation,
+      generation: final.generation,
+      replayed_barriers: replay.barriers,
+      fenced_operations: replay.fenced_operations,
+      physical_cleanup: physicalCleanup,
+      counts: final.counts,
+    };
+  } catch (error) {
+    if (!committed && sourceTransactionStarted && database?.isTransaction) {
+      try { database.exec("ROLLBACK"); } catch { /* Preserve restore failure. */ }
+      sourceTransactionStarted = false;
+    }
+    if (error instanceof DomainError) {
+      if (committed) {
+        error.storageStatus = "unknown";
+        error.indexStatus = "unknown";
+      }
+      throw error;
+    }
+    const category = categoryFor(error);
+    throw new DomainError(category, safeMessage(category), {
+      storageStatus: committed ? "unknown" : "not_committed",
+      indexStatus: committed ? "unknown" : "unchanged",
+    });
+  } finally {
+    try { stagedDatabase?.close(); } catch { /* Best effort cleanup of the isolated copy. */ }
+    if (attached) {
+      try { database.exec("DETACH DATABASE restore_vault"); } catch { /* Rollback or connection shutdown releases it. */ }
+    }
+    if (sourceTransactionStarted && !committed && database?.isTransaction) {
+      try { database.exec("ROLLBACK"); } catch { /* Best effort after a failed restore. */ }
+    }
+    rmSync(stagingDirectory, { recursive: true, force: true });
+  }
 }
 
 function pendingPhysicalCleanupJobs(operationId) {
@@ -446,10 +849,18 @@ function operationResult(operationId, requestHash, work, recordIdHint, options =
     if (tombstone) {
       throw new DomainError("not_found", safeMessage("not_found"), { operationId, recordId: recordIdHint });
     }
+    const epoch = Number(database.prepare("SELECT value FROM vault_metadata WHERE key = 'epoch'").get()?.value);
+    const generation = Number(database.prepare("SELECT value FROM vault_metadata WHERE key = 'generation'").get()?.value);
+    if (!Number.isSafeInteger(epoch) || epoch < 1 || !Number.isSafeInteger(generation) || generation < 0) {
+      throw new DomainError("corrupt_store", safeMessage("corrupt_store"), { operationId, recordId: recordIdHint });
+    }
     const previous = database.prepare(
-      "SELECT request_hash, response_json FROM operations WHERE operation_id = ?",
+      "SELECT request_hash, response_json, epoch FROM operations WHERE operation_id = ?",
     ).get(operationId);
     if (previous) {
+      if (Number(previous.epoch) !== epoch) {
+        throw new DomainError("conflict", "operation_id belongs to an earlier local restore epoch.", { operationId, recordId: recordIdHint });
+      }
       if (String(previous.request_hash) !== requestHash) {
         throw new DomainError("validation", "operation_id was already used for a different mutation.", { operationId, recordId: recordIdHint });
       }
@@ -460,12 +871,20 @@ function operationResult(operationId, requestHash, work, recordIdHint, options =
       result = work();
       const recordId = String(result.recordId ?? recordIdHint ?? "");
       if (!recordId) throw new DomainError("validation", "Mutation did not produce a record identifier.", { operationId });
+      const nextGeneration = generation + 1;
+      if (!Number.isSafeInteger(nextGeneration)) {
+        throw new DomainError("validation", "Local vault generation is exhausted.", { operationId, recordId });
+      }
+      database.prepare("UPDATE vault_metadata SET value = ? WHERE key = 'generation'")
+        .run(String(nextGeneration));
+      database.prepare("UPDATE deletion_barriers SET created_generation = ? WHERE operation_id = ?")
+        .run(nextGeneration, operationId);
       if (options.physicalCleanupKind) {
         result.physicalCleanup = "pending";
       }
       database.prepare(
-        "INSERT INTO operations(operation_id, request_hash, record_id, response_json, created_at) VALUES (?, ?, ?, ?, ?)",
-      ).run(operationId, requestHash, recordId, JSON.stringify(result), new Date().toISOString());
+        "INSERT INTO operations(operation_id, request_hash, record_id, response_json, created_at, epoch, generation) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      ).run(operationId, requestHash, recordId, JSON.stringify(result), new Date().toISOString(), epoch, nextGeneration);
       if (options.physicalCleanupKind) {
         database.prepare(`
           INSERT INTO physical_cleanup_jobs(operation_id, record_id, operation_kind, status, created_at, completed_at)
@@ -590,10 +1009,11 @@ function currentRecordIncludingDeleted(recordId, scope) {
 function retireOperationsForRecord(recordId) {
   const rows = database.prepare("SELECT operation_id FROM operations WHERE record_id = ?").all(recordId);
   const insertTombstone = database.prepare(
-    "INSERT OR IGNORE INTO operation_tombstones(operation_id, record_id, created_at) VALUES (?, ?, ?)",
+    "INSERT OR IGNORE INTO operation_tombstones(operation_id, record_id, created_at, created_generation) VALUES (?, ?, ?, ?)",
   );
   const createdAt = new Date().toISOString();
-  for (const row of rows) insertTombstone.run(String(row.operation_id), recordId, createdAt);
+  const currentGeneration = Number(database.prepare("SELECT value FROM vault_metadata WHERE key = 'generation'").get()?.value ?? 0);
+  for (const row of rows) insertTombstone.run(String(row.operation_id), recordId, createdAt, currentGeneration + 1);
   database.prepare("DELETE FROM operations WHERE record_id = ?").run(recordId);
 }
 
@@ -1091,6 +1511,12 @@ function handleRequest(operation, payload) {
   }
 }
 
+async function handleAsyncRequest(operation, payload) {
+  if (operation === "backup") return await createOnlineBackup(payload);
+  if (operation === "restoreBackup") return await restoreOnlineBackup(payload);
+  return handleRequest(operation, payload);
+}
+
 function sendFatal(error) {
   const category = error?.category ?? categoryFor(error, true);
   parentPort?.postMessage({
@@ -1111,24 +1537,35 @@ try {
   sendFatal(error);
 }
 
+const longRequests = new Set();
+
 parentPort?.on("message", message => {
   if (!message || message.type !== "request" || typeof message.id !== "number") return;
   const { id, operation, payload = {} } = message;
-  try {
-    const value = handleRequest(operation, payload);
-    parentPort?.postMessage({ type: "response", id, value });
-    if (operation === "close") parentPort?.close();
-    else schedulePhysicalCleanupRetry();
-  } catch (error) {
-    parentPort?.postMessage({
-      type: "response",
-      id,
-      error: toWireError(error, {
-        operationId: payload.operationId,
-        recordId: payload.recordId,
-      }),
-    });
-    if (operation === "close") parentPort?.close();
-    else schedulePhysicalCleanupRetry();
+  const task = (async () => {
+    try {
+      if (operation === "close" && longRequests.size > 0) {
+        await Promise.allSettled(longRequests);
+      }
+      const value = await handleAsyncRequest(operation, payload);
+      parentPort?.postMessage({ type: "response", id, value });
+      if (operation === "close") parentPort?.close();
+      else schedulePhysicalCleanupRetry();
+    } catch (error) {
+      parentPort?.postMessage({
+        type: "response",
+        id,
+        error: toWireError(error, {
+          operationId: payload.operationId,
+          recordId: payload.recordId,
+        }),
+      });
+      if (operation === "close") parentPort?.close();
+      else schedulePhysicalCleanupRetry();
+    }
+  })();
+  if (operation === "backup" || operation === "restoreBackup") {
+    longRequests.add(task);
+    void task.finally(() => longRequests.delete(task));
   }
 });
