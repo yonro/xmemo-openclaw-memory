@@ -40,6 +40,7 @@ function withSharedCredential(token: string): { env: NodeJS.ProcessEnv; cleanup:
 describe("resolveXMemoMemoryConfig", () => {
   it("uses defaults when no config or env is provided", () => {
     const cfg = resolveXMemoMemoryConfig(emptyConfig(), {});
+    expect(cfg.mode).toBe("cloud");
     expect(cfg.baseUrl).toBe(DEFAULT_BASE_URL);
     expect(cfg.bucket).toBe(DEFAULT_BUCKET);
     expect(cfg.readBucket).toBe(DEFAULT_READ_BUCKET);
@@ -81,6 +82,21 @@ describe("resolveXMemoMemoryConfig", () => {
     expect(cfg.autoCapture).toBe(true);
     expect(cfg.captureMaxChars).toBe(1000);
     expect(cfg.customTriggers).toEqual(["save this"]);
+  });
+
+  it("keeps local mode keyless without resolving configured or ambient credentials", () => {
+    const cfg = resolveXMemoMemoryConfig(
+      pluginConfig({ mode: "local", apiKey: "must-not-be-read", token: "legacy-secret" }),
+      { XMEMO_KEY: "ambient-secret", MEMORY_OS_API_KEY: "fallback-secret" },
+    );
+    expect(cfg.mode).toBe("local");
+    expect(cfg.apiKey).toBeUndefined();
+    expect(cfg.credentialSource).toBeUndefined();
+  });
+
+  it("rejects unsupported memory modes", () => {
+    expect(() => resolveXMemoMemoryConfig(pluginConfig({ mode: "offline" }), {}))
+      .toThrow("Invalid XMemo mode");
   });
 
   it("falls back to env vars when config key is missing", () => {

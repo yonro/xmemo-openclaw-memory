@@ -47,6 +47,7 @@ function createConfig(
   }> = {},
 ) {
   return {
+    mode: "cloud" as const,
     baseUrl: "https://xmemo.dev",
     apiKey: overrides.apiKey ?? "key",
     bucket: overrides.bucket ?? "openclaw",

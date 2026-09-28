@@ -12,6 +12,15 @@ import {
 } from "./client.js";
 import { resolveXMemoMemoryConfig } from "./config.js";
 import { XMemoLocalCache } from "./local-cache.js";
+import {
+  CapabilityUnavailableError,
+  CloudProvider,
+  LocalProvider,
+  MemoryService,
+  closeSharedLocalKernels,
+  getSharedLocalKernel,
+  trustedLocalIdentity,
+} from "./memory-service.js";
 import { escapeMemoryForPrompt } from "./memory-text.js";
 import { asToolParamsRecord } from "./openclaw-compat.js";
 import { ResilientXMemoClient } from "./resilient-client.js";
@@ -22,6 +31,7 @@ import {
 } from "./search-policy.js";
 import { XMemoSearchManager } from "./search-manager.js";
 import { setXMemoStatusProvider } from "./prompt-section.js";
+import { LocalKernelError, type LocalHardDeleteReceipt, type LocalWriteReceipt } from "./local/kernel.js";
 import {
   hasRestrictedReadScope,
   matchesConfiguredReadScope,
@@ -51,6 +61,25 @@ type ContextualToolDefinition = {
 };
 
 const toolExecutionContext = new AsyncLocalStorage<OpenClawPluginToolContext>();
+const LOCAL_MEMORY_TOOLS = new Set([
+  "memory_search",
+  "memory_get",
+  "memory_store",
+  "memory_forget",
+  "xmemo_memory_list",
+  "xmemo_memory_get",
+  "xmemo_memory_update",
+]);
+
+function capabilityUnavailableResult(capability: string, mode: "local" | "hybrid"): AgentToolResult<unknown> {
+  const message = mode === "hybrid"
+    ? "XMemo capability_unavailable: hybrid mode is not implemented."
+    : `XMemo capability_unavailable: ${capability} is not available in local mode.`;
+  return {
+    content: [{ type: "text", text: message }],
+    details: { error: "capability_unavailable", capability, mode },
+  };
+}
 
 function registerContextualTool(
   api: OpenClawPluginApi,
@@ -59,8 +88,15 @@ function registerContextualTool(
 ): void {
   api.registerTool((context: OpenClawPluginToolContext) => ({
     ...tool,
-    execute: (toolCallId, params, signal) =>
-      toolExecutionContext.run(context, () => tool.execute(toolCallId, params, signal)),
+    execute: (toolCallId, params, signal) => toolExecutionContext.run(context, async () => {
+      const config = resolveToolConfig(api);
+      if (config.mode !== "cloud") deactivateCloudProvider(config.mode);
+      if (config.mode === "hybrid") return capabilityUnavailableResult("hybrid_mode", "hybrid");
+      if (config.mode === "local" && !LOCAL_MEMORY_TOOLS.has(tool.name)) {
+        return capabilityUnavailableResult(tool.name, "local");
+      }
+      return tool.execute(toolCallId, params, signal);
+    }),
   }), options);
 }
 
@@ -87,13 +123,13 @@ function writeIdentityMetadata(
 }
 
 async function isMemoryInConfiguredReadScope(
-  client: XMemoClient,
+  service: MemoryService,
   memoryId: string,
   cfg: ReturnType<typeof resolveXMemoMemoryConfig>,
   signal?: AbortSignal,
 ): Promise<boolean> {
   try {
-    const memory = await client.getMemoryDirect(memoryId, signal);
+    const memory = await service.getMemoryDirect(memoryId, signal);
     return memory.id === memoryId && matchesConfiguredReadScope(memory, cfg);
   } catch (error) {
     const status = typeof error === "object" && error !== null && "status" in error
@@ -106,7 +142,7 @@ async function isMemoryInConfiguredReadScope(
 
 function buildClient(api: OpenClawPluginApi): XMemoClient | null {
   const cfg = resolveToolConfig(api);
-  if (!cfg.apiKey) {
+  if (cfg.mode !== "cloud" || !cfg.apiKey) {
     return null;
   }
   return new XMemoClient(cfg.baseUrl, cfg.apiKey, cfg.agentId, cfg.agentInstanceId, cfg.authMode);
@@ -117,15 +153,27 @@ let _resilientClient: ResilientXMemoClient | null = null;
 let _resilientClientKey = "";
 const _lifecycleRegisteredApis = new WeakSet<object>();
 
-export function resetResilientClientForTesting(): void {
+function deactivateCloudProvider(mode: "local" | "hybrid"): void {
   _resilientClient?.stopOutboxSync();
   _resilientClient = null;
   _resilientClientKey = "";
+  setXMemoStatusProvider(() => ({
+    statusLine: mode === "local"
+      ? "XMemo local mode is active. The local vault is experimental; cloud-only tools are unavailable."
+      : "XMemo hybrid mode is unavailable because the capability is not implemented.",
+  }));
+}
+
+export async function resetResilientClientForTesting(): Promise<void> {
+  _resilientClient?.stopOutboxSync();
+  _resilientClient = null;
+  _resilientClientKey = "";
+  await closeSharedLocalKernels();
 }
 
 function buildResilientClient(api: OpenClawPluginApi): ResilientXMemoClient | null {
   const cfg = resolveToolConfig(api);
-  if (!cfg.apiKey) {
+  if (cfg.mode !== "cloud" || !cfg.apiKey) {
     _resilientClient?.stopOutboxSync();
     _resilientClient = null;
     _resilientClientKey = "";
@@ -163,11 +211,117 @@ function buildResilientClient(api: OpenClawPluginApi): ResilientXMemoClient | nu
   return _resilientClient;
 }
 
+async function buildMemoryService(api: OpenClawPluginApi): Promise<MemoryService> {
+  const cfg = resolveToolConfig(api);
+  if (cfg.mode === "local") {
+    deactivateCloudProvider("local");
+    const identity = trustedLocalIdentity(toolExecutionContext.getStore(), cfg.agentId);
+    return new MemoryService(cfg, undefined, new LocalProvider(await getSharedLocalKernel(), identity));
+  }
+  if (cfg.mode === "hybrid") {
+    deactivateCloudProvider("hybrid");
+    return new MemoryService(cfg, undefined, undefined);
+  }
+  const resilient = buildResilientClient(api);
+  return new MemoryService(
+    cfg,
+    resilient ? new CloudProvider(resilient.rawClient, resilient) : undefined,
+    undefined,
+  );
+}
+
 function buildErrorResult(error: unknown): AgentToolResult<unknown> {
+  if (error instanceof LocalKernelError) {
+    return {
+      content: [{ type: "text", text: `XMemo local memory operation failed (${error.category}): ${error.message}` }],
+      details: {
+        error: error.category,
+        errorType: error.category,
+        receipt: error.receipt,
+        storage_status: error.receipt.storageStatus,
+        sync_status: error.receipt.syncStatus,
+        index_status: error.receipt.indexStatus,
+        source: "local",
+        coverage: "local",
+      },
+    };
+  }
+  if (error instanceof CapabilityUnavailableError) {
+    return capabilityUnavailableResult("memory_operation", "hybrid");
+  }
   const message = error instanceof Error ? error.message : String(error);
   return {
     content: [{ type: "text", text: `XMemo memory tool failed: ${message}` }],
     details: { error: message },
+  };
+}
+
+function buildServiceReadErrorResult(error: unknown, service: MemoryService): AgentToolResult<unknown> {
+  if (service.mode !== "local") return buildUnavailableResult(error, service.circuitBreakerState);
+  if (error && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === "range_error") {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      content: [{ type: "text", text: message }],
+      details: { error: "range_out_of_bounds", code: "range_error", source: "local" },
+    };
+  }
+  return buildErrorResult(error);
+}
+
+function localReceiptDetails(receipt: LocalWriteReceipt | LocalHardDeleteReceipt, path?: string): Record<string, unknown> {
+  return {
+    action: "updated",
+    id: receipt.recordId,
+    ...(path ? { path } : {}),
+    source: "local",
+    coverage: "local",
+    storage_status: receipt.storageStatus,
+    sync_status: receipt.syncStatus,
+    index_status: receipt.indexStatus,
+    revision: "revisionId" in receipt ? receipt.revisionId : undefined,
+    physical_cleanup: "physicalCleanup" in receipt ? receipt.physicalCleanup : undefined,
+    receipt,
+  };
+}
+
+function localMemoryId(reference: string): { id: string } | { error: string } {
+  const trimmed = reference.trim();
+  if (!trimmed) return { error: "Memory id or path is required." };
+  if (trimmed.split(/[\\/]/).some((part) => part.trim() === "..")) {
+    return { error: `Path traversal not allowed: ${reference}` };
+  }
+  const parts = trimmed.split("/").filter(Boolean);
+  const id = parts[parts.length - 1];
+  if (!id || /\s/.test(id) || id.length > 256) return { error: `Invalid local memory id or path: ${reference}` };
+  return { id };
+}
+
+function localReadText(body: string, path: string, from?: number, lines?: number): {
+  text: string;
+  details: Record<string, unknown>;
+} {
+  const allLines = body.split("\n");
+  const start = Math.max(1, from ?? 1);
+  if (body.length > 0 && start > allLines.length) {
+    throw Object.assign(new Error(`Requested line ${start} is out of bounds (document has ${allLines.length} lines).`), {
+      code: "range_error",
+    });
+  }
+  const count = typeof lines === "number" ? Math.max(0, lines) : allLines.length;
+  const selected = body.length === 0 ? [] : allLines.slice(start - 1, start - 1 + count);
+  const selectedText = selected.join("\n");
+  return {
+    text: selectedText,
+    details: {
+      path,
+      from: start,
+      lines: selected.length,
+      totalLines: allLines.length,
+      truncated: body.length > 0 && start - 1 + selected.length < allLines.length,
+      source: "local",
+      coverage: "local",
+      read_status: "available",
+    },
   };
 }
 
@@ -433,12 +587,21 @@ const optionalPositiveInteger = (description: string) =>
   Type.Optional(Type.Integer({ description, minimum: 1 }));
 
 export function registerXMemoTools(api: OpenClawPluginApi): void {
+  try {
+    const mode = resolveXMemoMemoryConfig(api.config).mode;
+    if (mode !== "cloud") deactivateCloudProvider(mode);
+  } catch {
+    // Tool execution returns malformed mode configuration through the host boundary.
+  }
   const lifecycle = api.lifecycle;
   if (lifecycle?.registerRuntimeLifecycle && !_lifecycleRegisteredApis.has(api)) {
     lifecycle.registerRuntimeLifecycle({
       id: "xmemo-memory.outbox-sync",
       description: "Stop XMemo's local write recovery timer when the plugin runtime is disabled or unloaded.",
-      cleanup: () => _resilientClient?.stopOutboxSync(),
+      cleanup: async () => {
+        _resilientClient?.stopOutboxSync();
+        await closeSharedLocalKernels();
+      },
     });
     _lifecycleRegisteredApis.add(api);
   }
@@ -448,7 +611,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
       name: "memory_search",
       label: "Memory Search",
       description:
-        "Search all visible user-owned XMemo long-term memory by semantic similarity, including memories written by other connected agents. Use before answering questions about prior decisions, preferences, or project context.",
+        "Search visible XMemo long-term memory. Cloud mode uses semantic similarity and may include memories written by other connected agents; local mode uses keyword search in this experimental local vault.",
       parameters: Type.Object({
         query: Type.String({ description: "Search query" }),
         maxResults: optionalPositiveInteger("Max results (default: 8)"),
@@ -457,8 +620,8 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
         debug: Type.Optional(Type.Boolean({ description: "Return retrieval trace (default: false)" })),
       }),
       async execute(_toolCallId, params, signal) {
-        const resilient = buildResilientClient(api);
-        if (!resilient) {
+        const service = await buildMemoryService(api);
+        if (!service.isConfigured) {
           return {
             content: [
               {
@@ -470,7 +633,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           };
         }
 
-        const cfg = resolveToolConfig(api);
+        const cfg = service.config;
         const raw = asToolParamsRecord(params);
         const query = typeof raw.query === "string" ? raw.query.trim() : "";
         const maxResults = typeof raw.maxResults === "number" ? raw.maxResults : cfg.recallMaxItems;
@@ -483,6 +646,56 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
             content: [{ type: "text", text: "Query is required for memory_search." }],
             details: { error: "missing query" },
           };
+        }
+
+        if (service.mode === "local") {
+          try {
+            const records = await service.localSearch(query, maxResults);
+            const candidates = records.map((record) => ({
+              score: 0,
+              scoreKnown: false,
+              snippet: record.body,
+              path: `local/${record.recordId}`,
+            }));
+            const eligible = filterMemorySearchItems(candidates, minScore).map(({ item, score, scoreKnown }) => ({
+              score,
+              scoreKnown,
+              snippet: item.snippet,
+              path: item.path,
+            }));
+            const bounded = fitSearchResultsToBudget(
+              query,
+              eligible,
+              maxResults,
+              cfg.recallMaxTokens,
+              { fromCache: false, isFresh: true },
+            );
+            const trace: RetrievalTrace = {
+              originalQuery: query,
+              filters: { bucket: "local", ...(minScore !== undefined ? { minScore } : {}) },
+              strategies: [{ name: "local_fts", query, count: eligible.length }],
+              totalCandidates: eligible.length,
+            };
+            return {
+              content: [{ type: "text", text: bounded.text }],
+              details: {
+                count: bounded.items.length,
+                ids: records.slice(0, bounded.items.length).map((record) => record.recordId),
+                source: "local",
+                coverage: "local_fts",
+                index_status: "ready",
+                tokenBudget: {
+                  limit: cfg.recallMaxTokens,
+                  estimatedTokens: bounded.estimatedTokens,
+                  candidateCount: eligible.length,
+                  truncated: bounded.truncated,
+                },
+                ...(debug ? { trace } : {}),
+              },
+            };
+          } catch (error) {
+            return buildErrorResult(error);
+          }
         }
 
         const trace: RetrievalTrace = {
@@ -518,7 +731,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
 
         // L1: Semantic recall
         try {
-          const { result, fromCache, isFresh } = await resilient.recallContext(query, {
+          const { result, fromCache, isFresh } = await service.recallContext(query, {
             bucket: cfg.readBucket,
             scope: cfg.readScope ?? null,
             teamId: cfg.teamId ?? null,
@@ -572,7 +785,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
             error: error instanceof Error ? error.message : String(error),
           });
           if (failure.errorType === "auth" || failure.errorType === "request" || failure.errorType === "cancelled") {
-            return buildUnavailableResult(error, resilient.circuitBreakerState);
+            return buildUnavailableResult(error, service.circuitBreakerState);
           }
           partialFailures.push(failure);
         }
@@ -596,7 +809,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
               break;
             }
             try {
-              const { result, fromCache, isFresh } = await resilient.searchMemory(query, {
+              const { result, fromCache, isFresh } = await service.searchMemory(query, {
                 bucket: cfg.readBucket,
                 scope: cfg.readScope ?? null,
                 teamId: cfg.teamId ?? null,
@@ -661,7 +874,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
                 error: error instanceof Error ? error.message : String(error),
               });
               if (failure.errorType === "auth") {
-                return buildUnavailableResult(error, resilient.circuitBreakerState);
+                return buildUnavailableResult(error, service.circuitBreakerState);
               }
               partialFailures.push(failure);
               if (failure.errorType === "cancelled") break;
@@ -809,8 +1022,8 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
         lines: Type.Optional(Type.Integer({ description: "Line count", minimum: 1 })),
       }),
       async execute(_toolCallId, params, signal) {
-        const resilient = buildResilientClient(api);
-        if (!resilient) {
+        const service = await buildMemoryService(api);
+        if (!service.isConfigured) {
           return {
             content: [
               {
@@ -822,7 +1035,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           };
         }
 
-        const cfg = resolveToolConfig(api);
+        const cfg = service.config;
         const raw = asToolParamsRecord(params);
         const relPath = typeof raw.path === "string" ? raw.path.trim() : (typeof raw.id === "string" ? raw.id.trim() : "");
         if (!relPath) {
@@ -833,7 +1046,25 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
         }
 
         try {
-          const manager = new XMemoSearchManager(resilient.rawClient, cfg);
+          if (service.mode === "local") {
+            const parsed = localMemoryId(relPath);
+            if ("error" in parsed) {
+              return { content: [{ type: "text", text: parsed.error }], details: { error: "invalid_path", source: "local" } };
+            }
+            const record = await service.localGet(parsed.id);
+            const read = localReadText(
+              record.body,
+              `local/${record.recordId}`,
+              typeof raw.from === "number" ? raw.from : undefined,
+              typeof raw.lines === "number" ? raw.lines : undefined,
+            );
+            return {
+              content: [{ type: "text", text: read.text ? formatMemoryReadResult(read.details.path as string, read.text) : "(empty memory)" }],
+              details: { ...read.details, id: record.recordId, revision: record.revision.revisionId },
+            };
+          }
+
+          const manager = new XMemoSearchManager(service, cfg);
           const result = await manager.readFile(
             {
               relPath,
@@ -884,7 +1115,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
               details: { error: "range_error", code: "range_error", path: relPath },
             };
           }
-          return buildUnavailableResult(error, resilient.circuitBreakerState);
+          return buildServiceReadErrorResult(error, service);
         }
       },
     },
@@ -915,8 +1146,8 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
         ),
       }),
       async execute(_toolCallId, params, signal) {
-        const resilient = buildResilientClient(api);
-        if (!resilient) {
+        const service = await buildMemoryService(api);
+        if (!service.isConfigured) {
           return {
             content: [
               {
@@ -928,7 +1159,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           };
         }
 
-        const cfg = resolveToolConfig(api);
+        const cfg = service.config;
         const raw = asToolParamsRecord(params);
         const content = typeof raw.content === "string" ? raw.content.trim() : "";
         if (!content) {
@@ -947,6 +1178,28 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           ...userMetadata,
         });
 
+        if (service.mode === "local") {
+          try {
+            const receipt = await service.localCreate({
+              body: content,
+              title: content.split("\n", 1)[0].slice(0, 160),
+              metadata: {
+                ...metadata,
+                ...(typeof raw.path === "string" ? { path: raw.path } : {}),
+                memory_type: typeof raw.memory_type === "string" ? raw.memory_type : "semantic",
+                importance: typeof raw.importance === "number" ? raw.importance : 0.7,
+              },
+            });
+            const path = `local/${receipt.recordId}`;
+            return {
+              content: [{ type: "text", text: `Stored XMemo memory: "${content.slice(0, 80)}..."` }],
+              details: { ...localReceiptDetails(receipt, path), action: "created" },
+            };
+          } catch (error) {
+            return buildErrorResult(error);
+          }
+        }
+
         const payload: Record<string, unknown> = {
           content,
           path: typeof raw.path === "string" ? raw.path : cfg.bucket,
@@ -959,7 +1212,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           metadata,
         };
 
-        const writeResult = await resilient.resilientWrite(
+        const writeResult = await service.write(
           "remember",
           "/v1/remember",
           "POST",
@@ -968,7 +1221,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
             // Use replayWrite which attaches the idempotency key to the request,
             // ensuring that if the response is lost but the server processed it,
             // the subsequent outbox replay will be correctly deduplicated.
-            return await resilient.rawClient.replayWrite(
+            return await service.replayWrite(
               "/v1/remember",
               "POST",
               payload,
@@ -1017,8 +1270,8 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
         ),
       }),
       async execute(_toolCallId, params, signal) {
-        const resilient = buildResilientClient(api);
-        if (!resilient) {
+        const service = await buildMemoryService(api);
+        if (!service.isConfigured) {
           return {
             content: [
               {
@@ -1040,24 +1293,32 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           };
         }
 
-        const cfg = resolveToolConfig(api);
+        const cfg = service.config;
         try {
+          const mode = (typeof raw.mode === "string" ? raw.mode : "soft_delete") as
+            | "soft_delete"
+            | "hard_delete"
+            | "redact";
+          if (service.mode === "local") {
+            const receipt = await service.localForget(parsed.id, mode);
+            return {
+              content: [{ type: "text", text: `Forgotten XMemo memory ${parsed.id}.` }],
+              details: { ...localReceiptDetails(receipt), action: "deleted", mode },
+            };
+          }
           if (
             hasRestrictedReadScope(cfg) &&
-            !(await isMemoryInConfiguredReadScope(resilient.rawClient, parsed.id, cfg, signal))
+            !(await isMemoryInConfiguredReadScope(service, parsed.id, cfg, signal))
           ) {
             return {
               content: [{ type: "text", text: "Memory not found in the configured read scope." }],
               details: { error: "not_found_in_read_scope", id: parsed.id },
             };
           }
-          await resilient.forgetMemory(
+          await service.forgetMemory(
             parsed.id,
             {
-              mode: (typeof raw.mode === "string" ? raw.mode : "soft_delete") as
-                | "soft_delete"
-                | "hard_delete"
-                | "redact",
+              mode,
               reason: "deleted via openclaw memory_forget tool",
             },
             signal,
@@ -1362,8 +1623,8 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
         include_deleted: Type.Optional(Type.Boolean({ description: "Include soft-deleted memories (default: false)" })),
       }),
       async execute(_toolCallId, params, signal) {
-        const resilient = buildResilientClient(api);
-        if (!resilient) {
+        const service = await buildMemoryService(api);
+        if (!service.isConfigured) {
           return {
             content: [
               { type: "text", text: "XMemo is not configured. Set XMEMO_KEY to enable memory list." },
@@ -1372,7 +1633,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           };
         }
 
-        const cfg = resolveToolConfig(api);
+        const cfg = service.config;
         const raw = asToolParamsRecord(params);
         const query = typeof raw.query === "string" ? raw.query.trim() : "";
         const path = typeof raw.path === "string" ? raw.path.trim() : "";
@@ -1443,6 +1704,58 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
 
         const targetPath = path || pathHint;
 
+        if (service.mode === "local") {
+          if (includeDeleted) return capabilityUnavailableResult("include_deleted", "local");
+          try {
+            let records;
+            if (targetPath?.startsWith("local/")) {
+              const parsed = localMemoryId(targetPath);
+              if ("error" in parsed) return { content: [{ type: "text", text: parsed.error }], details: { error: "invalid_path" } };
+              const record = await service.localGet(parsed.id);
+              records = [record];
+            } else {
+              records = await service.localSearch(queryVal, Math.min(100, maxResults));
+            }
+            const filtered = records.filter((record) => {
+              const storedType = typeof record.metadata.memory_type === "string" ? record.metadata.memory_type.toLowerCase() : undefined;
+              const storedPath = typeof record.metadata.path === "string" ? record.metadata.path : undefined;
+              return (!memoryType || storedType === memoryType) && (!path || path.startsWith("local/") || storedPath === path);
+            });
+            const lines = filtered.map((record, index) => {
+              const preview = !full && record.body.length > maxChars
+                ? `${escapeMemoryForPrompt(record.body.slice(0, maxChars))}... [truncated (${record.body.length} chars), use xmemo_memory_get id="${record.recordId}" or pass full=true]`
+                : escapeMemoryForPrompt(record.body);
+              return `${index + 1}. [id: ${record.recordId}] [path: local/${record.recordId}] ${preview}`;
+            });
+            const responseText = filtered.length
+              ? `XMemo memories:\n\n${lines.join("\n\n")}`
+              : "No XMemo memories matched the query/path. This may be a wording mismatch rather than absence. Try alternate keywords.";
+            const localTrace: RetrievalTrace = {
+              originalQuery: queryVal,
+              filters: { memory_type: memoryType, bucket: "local", scope: null, teamId: null },
+              ...(path ? { pathHint: path } : {}),
+              strategies: [{ name: "local_fts", query: queryVal, count: filtered.length }],
+              totalCandidates: filtered.length,
+            };
+            return {
+              content: [{ type: "text", text: debug ? `${responseText}${"\n\n--- Debug Trace ---\n" + JSON.stringify(localTrace, null, 2)}` : responseText }],
+              details: {
+                count: filtered.length,
+                ids: filtered.map((record) => record.recordId),
+                memory_type: memoryType,
+                full,
+                maxChars,
+                source: "local",
+                coverage: "local_fts_active",
+                index_status: "ready",
+                ...(debug ? { trace: localTrace } : {}),
+              },
+            };
+          } catch (error) {
+            return buildErrorResult(error);
+          }
+        }
+
         type UnifiedResult = {
           id: string;
           score: number;
@@ -1468,7 +1781,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
 
         for (const candidatePath of pathCandidates) {
           try {
-            const { result, fromCache, isFresh } = await resilient.searchMemory(queryVal, {
+            const { result, fromCache, isFresh } = await service.searchMemory(queryVal, {
               bucket: cfg.readBucket,
               scope: cfg.readScope ?? null,
               teamId: cfg.teamId ?? null,
@@ -1613,8 +1926,8 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
         lines: Type.Optional(Type.Integer({ description: "Line count to read", minimum: 1 })),
       }),
       async execute(_toolCallId, params, signal) {
-        const resilient = buildResilientClient(api);
-        if (!resilient) {
+        const service = await buildMemoryService(api);
+        if (!service.isConfigured) {
           return {
             content: [
               {
@@ -1626,7 +1939,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           };
         }
 
-        const cfg = resolveToolConfig(api);
+        const cfg = service.config;
         const raw = asToolParamsRecord(params);
         const id = typeof raw.id === "string" ? raw.id.trim() : "";
         const path = typeof raw.path === "string" ? raw.path.trim() : "";
@@ -1656,6 +1969,21 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
         }
 
         try {
+          if (service.mode === "local") {
+            const parsed = localMemoryId(id || path);
+            if ("error" in parsed) return { content: [{ type: "text", text: parsed.error }], details: { error: "invalid_path", source: "local" } };
+            const record = await service.localGet(parsed.id);
+            const read = localReadText(
+              record.body,
+              `local/${record.recordId}`,
+              typeof raw.from === "number" ? raw.from : undefined,
+              typeof raw.lines === "number" ? raw.lines : undefined,
+            );
+            return {
+              content: [{ type: "text", text: formatMemoryReadResult(read.details.path as string, read.text) }],
+              details: { ...read.details, id: record.recordId, revision: record.revision.revisionId },
+            };
+          }
           let text: string | undefined;
           let matchedPath: string | undefined = path || undefined;
           let matchedId: string | undefined = id || undefined;
@@ -1668,8 +1996,8 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           if (effectiveId) {
             try {
               const memory = restrictedExactRead
-                ? await resilient.rawClient.getMemoryDirect(effectiveId, signal)
-                : await resilient.rawClient.getMemory(effectiveId, signal);
+                ? await service.getMemoryDirect(effectiveId, signal)
+                : await service.getMemory(effectiveId, signal);
               if (
                 (!restrictedExactRead || matchesConfiguredReadScope(memory, cfg)) &&
                 typeof memory?.content === "string" &&
@@ -1705,7 +2033,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           // 2. If not found by direct id or only path was provided, search via resilient.searchMemory
           if (text === undefined) {
             const queryTarget = effectiveId || path || id;
-            const searchRes = await resilient.searchMemory(
+            const searchRes = await service.searchMemory(
               queryTarget,
               {
                 path: path || undefined,
@@ -1794,7 +2122,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
             },
           };
         } catch (error) {
-          return buildUnavailableResult(error, resilient.circuitBreakerState);
+          return buildServiceReadErrorResult(error, service);
         }
       },
     },
@@ -1816,10 +2144,11 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           Type.Number({ description: "New importance 0-1", minimum: 0, maximum: 1 }),
         ),
         status: Type.Optional(Type.String({ description: "New status" })),
+        base_revision: Type.Optional(Type.String({ description: "Expected current local revision for a version-aware update" })),
       }),
       async execute(_toolCallId, params, signal) {
-        const client = buildClient(api);
-        if (!client) {
+        const service = await buildMemoryService(api);
+        if (!service.isConfigured) {
           return {
             content: [
               { type: "text", text: "XMemo is not configured. Set XMEMO_KEY to enable memory update." },
@@ -1852,22 +2181,43 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           };
         }
 
-        const cfg = resolveToolConfig(api);
+        const cfg = service.config;
         try {
+          if (service.mode === "local") {
+            const current = await service.localGet(parsed.id);
+            const metadata: Record<string, unknown> = { ...current.metadata };
+            if (typeof raw.path === "string") metadata.path = raw.path;
+            if (typeof raw.memory_type === "string") metadata.memory_type = raw.memory_type;
+            if (typeof raw.importance === "number") metadata.importance = raw.importance;
+            if (typeof raw.status === "string") metadata.status = raw.status;
+            const receipt = await service.localUpdate(parsed.id, {
+              body: typeof raw.content === "string" ? raw.content : current.body,
+              title: current.title,
+              metadata,
+              ...(typeof raw.base_revision === "string" ? { baseRevision: raw.base_revision } : {}),
+            });
+            return {
+              content: [{ type: "text", text: `Updated XMemo memory ${parsed.id}.` }],
+              details: {
+                ...localReceiptDetails(receipt, `local/${parsed.id}`),
+                action: "updated",
+                write_kind: receipt.writeKind,
+              },
+            };
+          }
           if (
             hasRestrictedReadScope(cfg) &&
-            !(await isMemoryInConfiguredReadScope(client, parsed.id, cfg, signal))
+            !(await isMemoryInConfiguredReadScope(service, parsed.id, cfg, signal))
           ) {
             return {
               content: [{ type: "text", text: "Memory not found in the configured read scope." }],
               details: { error: "not_found_in_read_scope", id: parsed.id },
             };
           }
-          const memory = await client.updateMemory(parsed.id, update, signal);
+          const memory = await service.updateMemory(parsed.id, update, signal);
 
           // Invalidate affected recall/search cache in the same identity and space
-          const resilient = buildResilientClient(api);
-          resilient?.invalidateCache({
+          service.invalidateCache({
             bucket: update.bucket ?? memory.bucket ?? cfg.bucket,
             scope: update.scope !== undefined ? update.scope : (memory.scope ?? cfg.scope ?? null),
             teamId: update.team_id !== undefined ? update.team_id : (cfg.teamId ?? null),

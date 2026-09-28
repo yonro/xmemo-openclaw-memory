@@ -51,6 +51,7 @@ const readme = fs.readFileSync(
 );
 
 const taggedConfigFields = [
+  "mode",
   "baseUrl",
   "apiKey",
   "token",
@@ -67,6 +68,25 @@ const taggedConfigFields = [
   "recallMaxTokens",
 ] as const;
 
+const previousToolNames = [
+  "memory_search",
+  "memory_get",
+  "memory_store",
+  "memory_forget",
+  "xmemo_memory_list",
+  "xmemo_memory_get",
+  "xmemo_memory_update",
+  "xmemo_todo_create",
+  "xmemo_todo_list",
+  "xmemo_todo_complete",
+  "xmemo_record_event",
+  "xmemo_restart_snapshot_save",
+  "xmemo_restart_snapshot_restore",
+  "xmemo_ledger_monthly_summary",
+  "xmemo_audit_events",
+  "xmemo_audit_consolidation",
+];
+
 function validate(value: Record<string, unknown>) {
   return validateJsonSchemaValue({
     schema: manifest.configSchema,
@@ -76,9 +96,20 @@ function validate(value: Record<string, unknown>) {
 }
 
 describe("xmemo-memory manifest config schema", () => {
+  it("preserves every tool name from the cloud-only contract", () => {
+    expect(manifest.contracts?.tools).toEqual(expect.arrayContaining(previousToolNames));
+    expect(new Set(manifest.contracts?.tools).size).toBe(manifest.contracts?.tools?.length);
+  });
+
   it("accepts a plain string apiKey", () => {
     const result = validate({ apiKey: "xmemo_test_key" });
     expect(result.ok).toBe(true);
+  });
+
+  it("accepts keyless local mode and keeps cloud as the default", () => {
+    expect(validate({ mode: "local" }).ok).toBe(true);
+    const properties = manifest.configSchema.properties as Record<string, { default?: unknown; enum?: unknown[] }>;
+    expect(properties.mode).toMatchObject({ default: "cloud", enum: ["cloud", "local", "hybrid"] });
   });
 
   it("keeps every config field accepted by previous tagged releases", () => {
@@ -164,6 +195,7 @@ describe("xmemo-memory public discovery metadata", () => {
     expect(manifest.uiHints?.apiKey?.sensitive).toBe(true);
     expect(manifest.uiHints?.apiKey?.advanced).toBe(false);
     expect(manifest.uiHints?.baseUrl?.advanced).toBe(false);
+    expect(manifest.uiHints?.mode?.advanced).toBe(false);
     expect(manifest.uiHints?.authMode?.advanced).toBe(true);
     expect(manifest.uiHints?.agentId?.advanced).toBe(false);
     expect(manifest.uiHints?.autoCapture?.advanced).toBe(false);
@@ -202,7 +234,7 @@ describe("xmemo-memory public discovery metadata", () => {
         configSignals: [
           {
             rootPath: "plugins.entries.xmemo-memory.config",
-            requiredAny: ["apiKey", "token"],
+            requiredAny: ["apiKey", "token", "mode"],
           },
         ],
       });

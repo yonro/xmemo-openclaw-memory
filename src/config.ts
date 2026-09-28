@@ -8,8 +8,10 @@ import { normalizeSecretInputString } from "openclaw/plugin-sdk/secret-input";
 import { resolvePluginConfigObject } from "./openclaw-compat.js";
 
 export type XMemoAuthMode = "api-key" | "bearer" | "both";
+export type XMemoMode = "cloud" | "local" | "hybrid";
 
 export type XMemoMemoryConfig = {
+  mode: XMemoMode;
   baseUrl: string;
   apiKey: string | undefined;
   credentialSource?: "config" | "env-secret-ref" | "env" | "shared-credential";
@@ -98,6 +100,12 @@ function normalizeAuthMode(input: string | undefined): XMemoAuthMode {
     return input;
   }
   return DEFAULT_AUTH_MODE;
+}
+
+function normalizeMode(input: unknown): XMemoMode {
+  if (input === undefined) return "cloud";
+  if (input === "cloud" || input === "local" || input === "hybrid") return input;
+  throw new Error("Invalid XMemo mode. Expected cloud, local, or hybrid.");
 }
 
 function optionalString(value: unknown): string | undefined {
@@ -220,10 +228,14 @@ export function resolveXMemoMemoryConfig(
 ): XMemoMemoryConfig {
   // Plugin config lives at plugins.entries["xmemo-memory"].config in resolved OpenClaw config.
   const pluginConfig = resolvePluginConfigObject(cfg, "xmemo-memory") ?? {};
-  const credential = resolveCredential(pluginConfig, env);
+  const mode = normalizeMode(pluginConfig.mode);
+  // Local mode is keyless by contract. Do not inspect credential config, environment
+  // variables, SecretRefs, or the shared credential file in this mode.
+  const credential = mode === "cloud" ? resolveCredential(pluginConfig, env) : { value: undefined };
   const explicitAuthMode = normalizeAuthMode(pluginConfig.authMode as string | undefined);
 
   const resolved = {
+    mode,
     baseUrl: normalizeBaseUrl(
       (pluginConfig.baseUrl as string | undefined) ?? resolveXMemoBaseUrl(env),
     ),

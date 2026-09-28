@@ -20,7 +20,7 @@ This catalog records the OpenClaw tool schemas captured from `registerXMemoTools
 | `xmemo_record_event` | `content` — event description / 事件描述 | `event_type`; default `note` / 默认note |
 | `xmemo_memory_list` | None in schema; runtime requires `query` or `path` / schema 无必填，执行时需提供query或path | `maxResults` ≥1, default 20 / 默认20; `debug` default false / 默认false; `memory_type` enum `semantic`, `episodic`, `working`, `procedural`, `identity` / 类型枚举; `full` default false / 默认false; `maxChars` 1–100000, default 500 / 默认500; `include_deleted` default false / 默认false |
 | `xmemo_memory_get` | None in schema; runtime requires `id` or `path` / schema 无必填，执行时需提供id或path | `from` start line ≥1 / 起始行≥1; `lines` ≥1 / 行数≥1; no default / 无默认值 |
-| `xmemo_memory_update` | `id` — memory ID / 记忆ID | `content`, `path`, `memory_type`, `status`; `importance` 0–1 / 重要度0–1; no default / 无默认值 |
+| `xmemo_memory_update` | `id` — memory ID / 记忆ID | `content`, `path`, `memory_type`, `status`; `importance` 0–1 / 重要度0–1; `base_revision` expected current local revision for a version-aware update / 本地版本更新时的预期当前版本; no default / 无默认值 |
 | `xmemo_restart_snapshot_save` | None / 无 | `label` optional / 可选标签 |
 | `xmemo_restart_snapshot_restore` | None / 无 | `snapshot_id`, `bucket`, `scope` optional / 均可选; no schema default / schema未声明默认值 |
 | `xmemo_ledger_monthly_summary` | None / 无 | `months` 1–24, default 6 / 默认6; `month` 1–12 and `year` are legacy aliases / 旧版兼容参数; optional `currency`, `transaction_type` / 可选币种与交易类型 |
@@ -348,6 +348,10 @@ This catalog records the OpenClaw tool schemas captured from `registerXMemoTools
         "status": {
           "type": "string",
           "description": "New status"
+        },
+        "base_revision": {
+          "type": "string",
+          "description": "Expected current local revision for a version-aware update"
         }
       }
     }

@@ -5,11 +5,32 @@ import type {
 import { XMemoClient } from "./client.js";
 import { resolveXMemoMemoryConfig } from "./config.js";
 import { XMemoSearchManager } from "./search-manager.js";
+import { CloudProvider, HYBRID_UNAVAILABLE_MESSAGE, LocalProvider, MemoryService, getSharedLocalKernel } from "./memory-service.js";
 
-export function createXMemoMemoryRuntime(_api: OpenClawPluginApi): MemoryPluginRuntime {
+export function createXMemoMemoryRuntime(api: OpenClawPluginApi): MemoryPluginRuntime {
+  try {
+    if (resolveXMemoMemoryConfig(api.config).mode === "hybrid") {
+      api.logger.warn(HYBRID_UNAVAILABLE_MESSAGE);
+    }
+  } catch {
+    // Tool and runtime calls surface malformed configuration with their normal error boundary.
+  }
   return {
     async getMemorySearchManager(params) {
       const cfg = resolveXMemoMemoryConfig(params.cfg);
+      if (cfg.mode === "hybrid") {
+        return { manager: null, error: HYBRID_UNAVAILABLE_MESSAGE };
+      }
+      if (cfg.mode === "local") {
+        try {
+          const identity = { kind: "direct" as const, actorRef: params.agentId || cfg.agentId };
+          const service = new MemoryService(cfg, undefined, new LocalProvider(await getSharedLocalKernel(), identity));
+          return { manager: new XMemoSearchManager(service, cfg) };
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : String(error);
+          return { manager: null, error: `XMemo local memory runtime failed: ${message}` };
+        }
+      }
       if (!cfg.apiKey) {
         return {
           manager: null,
@@ -25,7 +46,8 @@ export function createXMemoMemoryRuntime(_api: OpenClawPluginApi): MemoryPluginR
           cfg.agentInstanceId,
           cfg.authMode,
         );
-        const manager = new XMemoSearchManager(client, cfg);
+        const service = new MemoryService(cfg, new CloudProvider(client), undefined);
+        const manager = new XMemoSearchManager(service, cfg);
         return { manager };
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);

@@ -12,6 +12,7 @@ import { XMemoLocalCache } from "./local-cache.js";
 import { resolveXMemoMemoryConfig } from "./config.js";
 import { buildXMemoPromptSection } from "./prompt-section.js";
 import { registerXMemoTools, resetResilientClientForTesting } from "./tools.js";
+import { createXMemoMemoryRuntime } from "./runtime.js";
 
 type ToolResult = AgentToolResult<unknown>;
 
@@ -129,18 +130,19 @@ describe("memory_search failure-open", () => {
   let fetchMock: ReturnType<typeof vi.fn>;
   let dataDir: string;
 
-  beforeEach(() => {
-    resetResilientClientForTesting();
+  beforeEach(async () => {
+    await resetResilientClientForTesting();
     globalBreaker.recordSuccess();
     dataDir = mkdtempSync(join(tmpdir(), "xmemo-tools-test-"));
     vi.stubEnv("OPENCLAW_DATA_DIR", dataDir);
     vi.stubEnv("XMEMO_CONFIG_HOME", join(dataDir, "xmemo-config"));
+    vi.stubEnv("XMEMO_KEY", "ambient-key-must-not-be-read");
     fetchMock = vi.fn();
     global.fetch = fetchMock as unknown as typeof fetch;
   });
 
-  afterEach(() => {
-    resetResilientClientForTesting();
+  afterEach(async () => {
+    await resetResilientClientForTesting();
     globalBreaker.recordSuccess();
     vi.unstubAllEnvs();
     vi.useRealTimers();
@@ -831,9 +833,9 @@ describe("configured read-scope preflights for mutations", () => {
     global.fetch = fetchMock as unknown as typeof fetch;
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     globalBreaker.recordSuccess();
-    resetResilientClientForTesting();
+    await resetResilientClientForTesting();
     vi.restoreAllMocks();
   });
 
@@ -945,6 +947,153 @@ describe("configured read-scope preflights for mutations", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(requestUrl(0, fetchMock.mock.calls)).toContain("/v1/memories/inside-id/explain?");
     expect(requestUrl(1, fetchMock.mock.calls)).toBe("https://xmemo.dev/v1/memories/inside-id");
+  });
+});
+
+describe("local mode MemoryService routing", () => {
+  let dataDir: string;
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(async () => {
+    await resetResilientClientForTesting();
+    dataDir = mkdtempSync(join(tmpdir(), "xmemo-local-tools-test-"));
+    vi.stubEnv("OPENCLAW_DATA_DIR", dataDir);
+    vi.stubEnv("XMEMO_CONFIG_HOME", join(dataDir, "xmemo-config"));
+    vi.stubEnv("XMEMO_KEY", "ambient-key-must-not-be-read");
+    fetchMock = vi.fn(() => { throw new Error("network blocked in local-mode test"); });
+    global.fetch = fetchMock as unknown as typeof fetch;
+  });
+
+  afterEach(async () => {
+    await resetResilientClientForTesting();
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  it("routes store, search, list, exact reads, update, forget, and host SearchManager locally", async () => {
+    const { api, tools } = createApi(
+      { mode: "local", apiKey: "must-not-be-used" },
+      true,
+      { agentId: "agent-local" },
+    );
+    const stored = await tools.get("memory_store")!.execute("local-store", {
+      content: "violet marmalade release marker",
+      path: "projects/alpha",
+      memory_type: "episodic",
+    });
+    expect(stored.details).toMatchObject({ action: "created", source: "local", coverage: "local" });
+    expect((stored.details as Record<string, unknown>).storage_status).toBe("committed_local");
+    const id = String((stored.details as Record<string, unknown>).id);
+    const revision = String((stored.details as Record<string, unknown>).revision);
+
+    const search = await tools.get("memory_search")!.execute("local-search", { query: "violet marmalade" });
+    expect(textContent(search)).toContain("violet marmalade release marker");
+    expect(search.details).toMatchObject({ source: "local", coverage: "local_fts", index_status: "ready" });
+
+    const list = await tools.get("xmemo_memory_list")!.execute("local-list", { query: "violet marmalade" });
+    expect(textContent(list)).toContain(`[id: ${id}]`);
+    expect(list.details).toMatchObject({ source: "local", coverage: "local_fts_active" });
+
+    const get = await tools.get("memory_get")!.execute("local-get", { path: `local/${id}` });
+    expect(textContent(get)).toContain("violet marmalade release marker");
+    expect(get.details).toMatchObject({ source: "local", read_status: "available", revision });
+
+    const customGet = await tools.get("xmemo_memory_get")!.execute("local-custom-get", { id });
+    expect(textContent(customGet)).toContain("violet marmalade release marker");
+
+    const update = await tools.get("xmemo_memory_update")!.execute("local-update", {
+      id,
+      content: "violet marmalade updated marker",
+      base_revision: revision,
+    });
+    expect(update.details).toMatchObject({ action: "updated", source: "local", write_kind: "versioned_update" });
+
+    const afterUpdate = await tools.get("memory_get")!.execute("local-read-updated", { id });
+    expect(textContent(afterUpdate)).toContain("violet marmalade updated marker");
+
+    const runtime = createXMemoMemoryRuntime(api as never);
+    const { manager, error } = await runtime.getMemorySearchManager({ cfg: api.config, agentId: "agent-local" } as never);
+    expect(error).toBeUndefined();
+    expect(await manager?.search("violet marmalade")).toEqual([
+      expect.objectContaining({ path: `local/${id}`, snippet: "violet marmalade updated marker", source: "memory" }),
+    ]);
+
+    const forgotten = await tools.get("memory_forget")!.execute("local-forget", {
+      path: `local/${id}`,
+      mode: "hard_delete",
+    });
+    expect(forgotten.details).toMatchObject({ action: "deleted", source: "local", physical_cleanup: expect.any(String) });
+    expect(await manager?.search("violet marmalade")).toEqual([]);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps group-local records private to a trusted speaker and rejects missing group identity", async () => {
+    const group = "agent:agent-local:telegram:group:room-42";
+    const alice = createApi({ mode: "local" }, true, {
+      agentId: "agent-local",
+      sessionKey: group,
+      requesterSenderId: "alice",
+    });
+    const stored = await alice.tools.get("memory_store")!.execute("group-store", {
+      content: "group speaker private phrase",
+    });
+    const id = String((stored.details as Record<string, unknown>).id);
+
+    const bob = createApi({ mode: "local" }, true, {
+      agentId: "agent-local",
+      sessionKey: group,
+      requesterSenderId: "bob",
+    });
+    const search = await bob.tools.get("memory_search")!.execute("group-search", { query: "group speaker private" });
+    expect(search.details).toMatchObject({ count: 0, source: "local" });
+    const get = await bob.tools.get("memory_get")!.execute("group-get", { id });
+    expect(get.details).toMatchObject({ error: "not_found", errorType: "not_found" });
+    const customGet = await bob.tools.get("xmemo_memory_get")!.execute("group-custom-get", { id });
+    expect(customGet.details).toMatchObject({ error: "not_found", errorType: "not_found" });
+
+    const missingSpeaker = createApi({ mode: "local" }, true, { agentId: "agent-local", sessionKey: group });
+    const denied = await missingSpeaker.tools.get("memory_store")!.execute("group-missing-speaker", {
+      content: "must not be written",
+    });
+    expect(denied.details).toMatchObject({ error: "identity_denied", source: "local" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("uses host direct-sender identity consistently across tools and SearchManager", async () => {
+    const sessionKey = "agent:agent-local:telegram:direct:alice";
+    const alice = createApi({ mode: "local" }, true, {
+      agentId: "agent-local",
+      sessionKey,
+      requesterSenderId: "alice",
+    });
+    const stored = await alice.tools.get("memory_store")!.execute("direct-store", {
+      content: "direct owner violet lantern phrase",
+    });
+    expect(stored.details).toMatchObject({ source: "local", action: "created" });
+
+    const runtime = createXMemoMemoryRuntime(alice.api as never);
+    const { manager } = await runtime.getMemorySearchManager({ cfg: alice.api.config, agentId: "agent-local" } as never);
+    expect(await manager?.search("violet lantern", { sessionKey })).toHaveLength(1);
+    expect(await manager?.search("violet lantern", { sessionKey: "agent:agent-local:telegram:direct:bob" })).toEqual([]);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("gates cloud-only tools in local mode and refuses hybrid at startup and call time", async () => {
+    const local = createApi({ mode: "local" });
+    const todo = await local.tools.get("xmemo_todo_list")!.execute("local-todo", {});
+    expect(todo.details).toMatchObject({ error: "capability_unavailable", mode: "local" });
+
+    const hybrid = createApi({ mode: "hybrid", apiKey: "must-not-be-used" });
+    const search = await hybrid.tools.get("memory_search")!.execute("hybrid-search", { query: "should not run" });
+    expect(search.details).toMatchObject({ error: "capability_unavailable", mode: "hybrid" });
+    const runtime = createXMemoMemoryRuntime(hybrid.api as never);
+    const manager = await runtime.getMemorySearchManager({ cfg: hybrid.api.config, agentId: "agent-local" } as never);
+    expect(manager.manager).toBeNull();
+    expect(manager.error).toContain("capability_unavailable");
+    expect(hybrid.warningMessages).toContain("XMemo capability_unavailable: hybrid mode is not implemented.");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 

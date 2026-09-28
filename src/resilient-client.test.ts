@@ -17,6 +17,7 @@ function mockResponse(body: unknown, status = 200): Response {
 
 function config(overrides: Partial<XMemoMemoryConfig> = {}): XMemoMemoryConfig {
   return {
+    mode: "cloud",
     baseUrl: "https://xmemo.dev",
     apiKey: "key",
     bucket: "openclaw",
