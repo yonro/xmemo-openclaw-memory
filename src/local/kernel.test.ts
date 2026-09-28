@@ -23,6 +23,24 @@ async function createKernel(options: { dataDirectory?: string; busyTimeoutMs?: n
   return kernel;
 }
 
+async function physicalVaultBytes(dataDirectory: string): Promise<Buffer> {
+  const databasePath = resolveLocalVaultPath({ dataDirectory });
+  const files = [databasePath, `${databasePath}-wal`, `${databasePath}-shm`];
+  const buffers: Buffer[] = [];
+  for (const file of files) {
+    try {
+      buffers.push(await readFile(file));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  return Buffer.concat(buffers);
+}
+
+function expectTokensAbsent(bytes: Buffer, tokens: string[]): void {
+  for (const token of tokens) expect(bytes.includes(Buffer.from(token, "utf8")), token).toBe(false);
+}
+
 afterEach(async () => {
   for (const kernel of kernels.splice(0)) await kernel.close().catch(() => {});
   for (const directory of dataDirectories.splice(0)) await rm(directory, { recursive: true, force: true });
@@ -357,6 +375,135 @@ describe("isolated local SQLite kernel", () => {
     }
   });
 
+  it("physically scrubs hard-deleted content from the database and WAL before returning", async () => {
+    const dataDirectory = await mkdtemp(join(tmpdir(), "xmemo-hard-delete-bytes-"));
+    dataDirectories.push(dataDirectory);
+    const kernel = await createKernel({ dataDirectory });
+    const canaries = [
+      "hard-delete-title-raw-canary-7dcb",
+      "hard-delete-body-raw-canary-5f81",
+      "hard-delete-metadata-raw-canary-90aa",
+      "hard-delete-updated-body-raw-canary-f315",
+    ];
+    const created = await kernel.create({
+      title: canaries[0],
+      body: canaries[1],
+      metadata: { privateValue: canaries[2] },
+      operationId: "hard-delete-byte-scan-create",
+    }, directAlice);
+    const updated = await kernel.update(created.recordId, {
+      title: "public title after update",
+      body: canaries[3],
+      metadata: { privateValue: canaries[2] },
+      baseRevision: created.revisionId,
+      operationId: "hard-delete-byte-scan-update",
+    }, directAlice);
+
+    const deleted = await kernel.hardDelete(created.recordId, {
+      baseRevision: updated.revisionId,
+      operationId: "hard-delete-byte-scan-delete",
+    }, directAlice);
+
+    expect(deleted.physicalCleanup).toBe("complete");
+    expectTokensAbsent(await physicalVaultBytes(dataDirectory), canaries);
+    await kernel.close();
+
+    const reopened = await createKernel({ dataDirectory });
+    expectTokensAbsent(await physicalVaultBytes(dataDirectory), canaries);
+    await reopened.close();
+  });
+
+  it("physically scrubs redacted content from every database and WAL copy", async () => {
+    const dataDirectory = await mkdtemp(join(tmpdir(), "xmemo-redact-bytes-"));
+    dataDirectories.push(dataDirectory);
+    const kernel = await createKernel({ dataDirectory });
+    const canaries = [
+      "redact-body-raw-canary-2e74",
+      "redact-updated-body-raw-canary-c113",
+      "redact-metadata-raw-canary-41d9",
+    ];
+    const created = await kernel.create({
+      title: "public title",
+      body: canaries[0],
+      metadata: { removeMe: canaries[2], keep: "public" },
+      operationId: "redact-byte-scan-create",
+    }, directAlice);
+    const updated = await kernel.update(created.recordId, {
+      body: canaries[1],
+      metadata: { removeMe: canaries[2], keep: "still public" },
+      baseRevision: created.revisionId,
+      operationId: "redact-byte-scan-update",
+    }, directAlice);
+
+    const redacted = await kernel.redact(created.recordId, {
+      baseRevision: updated.revisionId,
+      fields: ["body"],
+      metadataKeys: ["removeMe"],
+      operationId: "redact-byte-scan-redact",
+    }, directAlice);
+
+    expect(redacted.physicalCleanup).toBe("complete");
+    expectTokensAbsent(await physicalVaultBytes(dataDirectory), canaries);
+    await kernel.close();
+
+    const reopened = await createKernel({ dataDirectory });
+    expectTokensAbsent(await physicalVaultBytes(dataDirectory), canaries);
+    await reopened.close();
+  });
+
+  it("persists pending physical cleanup when a reader blocks WAL truncation and completes it when idle", async () => {
+    const dataDirectory = await mkdtemp(join(tmpdir(), "xmemo-pending-cleanup-"));
+    dataDirectories.push(dataDirectory);
+    const kernel = await createKernel({ dataDirectory });
+    const canary = "redact-busy-reader-raw-canary-67c2";
+    const created = await kernel.create({
+      body: canary,
+      operationId: "redact-busy-reader-create",
+    }, directAlice);
+    const databasePath = resolveLocalVaultPath({ dataDirectory });
+    const reader = new DatabaseSync(databasePath, { readOnly: true });
+    const observer = new DatabaseSync(databasePath, { readOnly: true });
+    try {
+      reader.exec("BEGIN");
+      reader.prepare("SELECT current_body FROM records WHERE record_id = ?").get(created.recordId);
+
+      const redacted = await kernel.redact(created.recordId, {
+        baseRevision: created.revisionId,
+        fields: ["body"],
+        metadataKeys: [],
+        operationId: "redact-busy-reader-redact",
+      }, directAlice);
+
+      expect(redacted).toMatchObject({ writeKind: "redacted", physicalCleanup: "pending" });
+      expect(observer.prepare("SELECT status FROM physical_cleanup_jobs WHERE operation_id = ?")
+        .get("redact-busy-reader-redact")).toMatchObject({ status: "pending" });
+      expect((await physicalVaultBytes(dataDirectory)).includes(Buffer.from(canary))).toBe(true);
+
+      reader.exec("ROLLBACK");
+      const deadline = Date.now() + 5_000;
+      let cleanup = observer.prepare("SELECT status FROM physical_cleanup_jobs WHERE operation_id = ?")
+        .get("redact-busy-reader-redact");
+      while (cleanup?.status !== "complete" && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 50));
+        cleanup = observer.prepare("SELECT status FROM physical_cleanup_jobs WHERE operation_id = ?")
+          .get("redact-busy-reader-redact");
+      }
+      expect(cleanup).toMatchObject({ status: "complete" });
+      expect(JSON.parse(String(observer.prepare("SELECT response_json FROM operations WHERE operation_id = ?")
+        .get("redact-busy-reader-redact")?.response_json))).toMatchObject({ physicalCleanup: "complete" });
+      expectTokensAbsent(await physicalVaultBytes(dataDirectory), [canary]);
+    } finally {
+      try { if (reader.isTransaction) reader.exec("ROLLBACK"); } catch { /* Best effort during test cleanup. */ }
+      reader.close();
+      observer.close();
+    }
+
+    await kernel.close();
+    const reopened = await createKernel({ dataDirectory });
+    expectTokensAbsent(await physicalVaultBytes(dataDirectory), [canary]);
+    await reopened.close();
+  });
+
   it("migrates a version 1 soft-delete barrier without losing its restore path", async () => {
     const dataDirectory = await mkdtemp(join(tmpdir(), "xmemo-local-migrate-v1-"));
     const kernel = await createKernel({ dataDirectory });
@@ -383,7 +530,7 @@ describe("isolated local SQLite kernel", () => {
         INSERT INTO deletion_barriers_v1(record_id, barrier_revision_id, operation_id, created_at)
         SELECT record_id, barrier_revision_id, operation_id, created_at FROM deletion_barriers WHERE record_id = ?
       `).run(created.recordId);
-      database.exec("DROP TABLE deletion_barriers; ALTER TABLE deletion_barriers_v1 RENAME TO deletion_barriers; DROP TABLE operation_tombstones");
+      database.exec("DROP TABLE deletion_barriers; ALTER TABLE deletion_barriers_v1 RENAME TO deletion_barriers; DROP TABLE operation_tombstones; DROP TABLE physical_cleanup_jobs");
       database.prepare("UPDATE vault_metadata SET value = '1' WHERE key = 'schema_version'").run();
       database.exec("PRAGMA user_version = 1");
     } finally {
@@ -400,9 +547,9 @@ describe("isolated local SQLite kernel", () => {
     expect((await migrated.get(created.recordId, directAlice)).body).toBe("migration barrier keeps content");
     const verification = new DatabaseSync(databasePath, { readOnly: true });
     try {
-      expect(verification.prepare("PRAGMA user_version").get()).toMatchObject({ user_version: 2 });
+      expect(verification.prepare("PRAGMA user_version").get()).toMatchObject({ user_version: 3 });
       expect(verification.prepare("SELECT value FROM vault_metadata WHERE key = 'schema_version'").get())
-        .toMatchObject({ value: "2" });
+        .toMatchObject({ value: "3" });
     } finally {
       verification.close();
     }

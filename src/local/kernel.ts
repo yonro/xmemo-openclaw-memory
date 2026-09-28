@@ -128,6 +128,7 @@ export type LocalWriteReceipt = {
   storageStatus: "committed_local";
   syncStatus: "local_only";
   indexStatus: "ready";
+  physicalCleanup?: "pending" | "complete";
   writeKind: "created" | "versioned_update" | "unversioned_write" | "soft_deleted" | "conflict" | "restored" | "redacted";
   error: LocalConflict | null;
 };
@@ -139,6 +140,7 @@ export type LocalHardDeleteReceipt = {
   storageStatus: "committed_local";
   syncStatus: "local_only";
   indexStatus: "ready";
+  physicalCleanup: "pending" | "complete";
   writeKind: "hard_deleted";
   error: null;
 };

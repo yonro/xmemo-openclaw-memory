@@ -4,10 +4,11 @@ import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { parentPort, workerData } from "node:worker_threads";
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 const { databasePath, busyTimeoutMs } = workerData;
 let database;
 let vaultId;
+let cleanupRetryTimer;
 
 class DomainError extends Error {
   constructor(category, message, options = {}) {
@@ -134,9 +135,25 @@ const migrationTwo = `
   ) STRICT;
 `;
 
+const migrationThree = `
+  CREATE TABLE physical_cleanup_jobs (
+    operation_id TEXT PRIMARY KEY,
+    record_id TEXT NOT NULL,
+    operation_kind TEXT NOT NULL CHECK (operation_kind IN ('hard_delete', 'redact')),
+    status TEXT NOT NULL CHECK (status IN ('pending', 'complete')),
+    created_at TEXT NOT NULL,
+    completed_at TEXT
+  ) STRICT;
+
+  CREATE INDEX physical_cleanup_jobs_status ON physical_cleanup_jobs(status, created_at);
+
+  INSERT INTO record_fts(record_fts, rank) VALUES ('secure-delete', 1);
+`;
+
 const MIGRATIONS = [
   { version: 1, sql: migrationOne },
   { version: 2, sql: migrationTwo },
+  { version: 3, sql: migrationThree },
 ];
 
 function errorCode(error) {
@@ -275,6 +292,10 @@ function initializeDatabase() {
   // A damaged vault must remain byte-for-byte intact when open fails closed.
   assertDatabaseIntegrity();
 
+  database.exec("PRAGMA secure_delete = ON");
+  if (Number(database.prepare("PRAGMA secure_delete").get()?.secure_delete ?? 0) !== 1) {
+    throw new DomainError("validation", "Local storage requires SQLite secure_delete.");
+  }
   database.exec("PRAGMA journal_mode = WAL");
   database.exec("PRAGMA synchronous = FULL");
   database.exec("PRAGMA foreign_keys = ON");
@@ -315,11 +336,107 @@ function initializeDatabase() {
   }
   assertDatabaseIntegrity();
   try { chmodSync(databasePath, 0o600); } catch { /* Best effort on Windows. */ }
+  try { attemptPendingPhysicalCleanup(); } catch { /* A durable job is retried on an idle pass. */ }
+  schedulePhysicalCleanupRetry();
   return { vaultId: values.get("vault_id"), schemaVersion: storedVersion };
 }
 
-function operationResult(operationId, requestHash, work, recordIdHint) {
+function pendingPhysicalCleanupJobs(operationId) {
+  return operationId
+    ? database.prepare("SELECT operation_id FROM physical_cleanup_jobs WHERE operation_id = ? AND status = 'pending'").all(operationId)
+    : database.prepare("SELECT operation_id FROM physical_cleanup_jobs WHERE status = 'pending' ORDER BY created_at").all();
+}
+
+function hasPendingPhysicalCleanup() {
+  if (!database) return false;
+  try {
+    return Boolean(database.prepare("SELECT 1 FROM physical_cleanup_jobs WHERE status = 'pending' LIMIT 1").get());
+  } catch {
+    return true;
+  }
+}
+
+function checkpointWalTruncate() {
+  const checkpoint = database.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get();
+  const busy = Number(checkpoint?.busy ?? 1);
+  const log = Number(checkpoint?.log ?? -1);
+  const checkpointed = Number(checkpoint?.checkpointed ?? -1);
+  return busy === 0 && (log < 0 || log === checkpointed);
+}
+
+function markPhysicalCleanupComplete(operationIds) {
+  if (operationIds.length === 0) return;
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    const readResponse = database.prepare("SELECT response_json FROM operations WHERE operation_id = ?");
+    const updateResponse = database.prepare("UPDATE operations SET response_json = ? WHERE operation_id = ?");
+    const completeJob = database.prepare(`
+      UPDATE physical_cleanup_jobs
+      SET status = 'complete', completed_at = ?
+      WHERE operation_id = ? AND status = 'pending'
+    `);
+    const now = new Date().toISOString();
+    for (const operationId of operationIds) {
+      const responseRow = readResponse.get(operationId);
+      if (responseRow) {
+        try {
+          const response = JSON.parse(String(responseRow.response_json));
+          response.physicalCleanup = "complete";
+          updateResponse.run(JSON.stringify(response), operationId);
+        } catch {
+          // Keep the physical job durable rather than claiming completion for a bad receipt.
+          throw new DomainError("corrupt_store", safeMessage("corrupt_store"), { operationId });
+        }
+      }
+      completeJob.run(now, operationId);
+    }
+    database.exec("COMMIT");
+  } catch (error) {
+    try { if (database.isTransaction) database.exec("ROLLBACK"); } catch { /* Preserve the cleanup error. */ }
+    throw error;
+  }
+}
+
+function attemptPendingPhysicalCleanup(operationId) {
+  if (!database || database.isTransaction) return false;
+  const jobs = pendingPhysicalCleanupJobs(operationId);
+  if (jobs.length === 0) return true;
+
+  let checkpointed = false;
+  try { checkpointed = checkpointWalTruncate(); } catch { /* Keep pending on busy or I/O errors. */ }
+  if (!checkpointed) return false;
+
+  // Complete only the jobs observed before the checkpoint. A job committed by
+  // another process after the checkpoint remains pending for the next idle pass.
+  markPhysicalCleanupComplete(jobs.map(job => String(job.operation_id)));
+  return true;
+}
+
+function schedulePhysicalCleanupRetry() {
+  if (!database || cleanupRetryTimer || !hasPendingPhysicalCleanup()) return;
+  cleanupRetryTimer = setTimeout(() => {
+    cleanupRetryTimer = undefined;
+    try { attemptPendingPhysicalCleanup(); } catch { /* Durable state remains pending. */ }
+    schedulePhysicalCleanupRetry();
+  }, 250);
+  cleanupRetryTimer.unref?.();
+}
+
+function clearPhysicalCleanupRetry() {
+  if (cleanupRetryTimer) clearTimeout(cleanupRetryTimer);
+  cleanupRetryTimer = undefined;
+}
+
+function storedOperationResult(operationId, fallback) {
+  const stored = database.prepare("SELECT response_json FROM operations WHERE operation_id = ?").get(operationId);
+  if (!stored) return fallback;
+  try { return JSON.parse(String(stored.response_json)); } catch { return fallback; }
+}
+
+function operationResult(operationId, requestHash, work, recordIdHint, options = {}) {
   let transactionStarted = false;
+  let committed = false;
+  let result;
   try {
     database.exec("BEGIN IMMEDIATE");
     transactionStarted = true;
@@ -336,21 +453,30 @@ function operationResult(operationId, requestHash, work, recordIdHint) {
       if (String(previous.request_hash) !== requestHash) {
         throw new DomainError("validation", "operation_id was already used for a different mutation.", { operationId, recordId: recordIdHint });
       }
-      const response = JSON.parse(String(previous.response_json));
+      result = JSON.parse(String(previous.response_json));
       database.exec("COMMIT");
-      return response;
+      committed = true;
+    } else {
+      result = work();
+      const recordId = String(result.recordId ?? recordIdHint ?? "");
+      if (!recordId) throw new DomainError("validation", "Mutation did not produce a record identifier.", { operationId });
+      if (options.physicalCleanupKind) {
+        result.physicalCleanup = "pending";
+      }
+      database.prepare(
+        "INSERT INTO operations(operation_id, request_hash, record_id, response_json, created_at) VALUES (?, ?, ?, ?, ?)",
+      ).run(operationId, requestHash, recordId, JSON.stringify(result), new Date().toISOString());
+      if (options.physicalCleanupKind) {
+        database.prepare(`
+          INSERT INTO physical_cleanup_jobs(operation_id, record_id, operation_kind, status, created_at, completed_at)
+          VALUES (?, ?, ?, 'pending', ?, NULL)
+        `).run(operationId, recordId, options.physicalCleanupKind, new Date().toISOString());
+      }
+      database.exec("COMMIT");
+      committed = true;
     }
-
-    const result = work();
-    const recordId = String(result.recordId ?? recordIdHint ?? "");
-    if (!recordId) throw new DomainError("validation", "Mutation did not produce a record identifier.", { operationId });
-    database.prepare(
-      "INSERT INTO operations(operation_id, request_hash, record_id, response_json, created_at) VALUES (?, ?, ?, ?, ?)",
-    ).run(operationId, requestHash, recordId, JSON.stringify(result), new Date().toISOString());
-    database.exec("COMMIT");
-    return result;
   } catch (error) {
-    let storageStatus = "not_committed";
+    let storageStatus = committed ? "unknown" : "not_committed";
     if (transactionStarted && database?.isTransaction) {
       try {
         database.exec("ROLLBACK");
@@ -359,7 +485,7 @@ function operationResult(operationId, requestHash, work, recordIdHint) {
       }
     }
     if (error instanceof DomainError) {
-      error.storageStatus = storageStatus;
+      if (!committed) error.storageStatus = storageStatus;
       throw error;
     }
     const category = categoryFor(error);
@@ -370,6 +496,13 @@ function operationResult(operationId, requestHash, work, recordIdHint) {
       indexStatus: storageStatus === "unknown" ? "unknown" : "unchanged",
     });
   }
+
+  if (options.physicalCleanupKind) {
+    try { attemptPendingPhysicalCleanup(operationId); } catch { /* Return the durable pending receipt below. */ }
+    schedulePhysicalCleanupRetry();
+    return storedOperationResult(operationId, result);
+  }
+  return result;
 }
 
 function nextLocalRevision(recordId) {
@@ -760,6 +893,7 @@ function hardDeleteRecord(payload) {
         barrier_id, record_id, barrier_revision_id, operation_id, barrier_kind, created_at, cleared_at
       ) VALUES (?, ?, NULL, ?, 'hard_delete', ?, NULL)
     `).run(barrierId, recordId, operationId, now);
+    database.exec("INSERT INTO record_fts(record_fts) VALUES ('rebuild')");
     return {
       operationId,
       recordId,
@@ -770,7 +904,7 @@ function hardDeleteRecord(payload) {
       writeKind: "hard_deleted",
       error: null,
     };
-  }, recordId);
+  }, recordId, { physicalCleanupKind: "hard_delete" });
 }
 
 function redactRecord(payload) {
@@ -859,8 +993,9 @@ function redactRecord(payload) {
         barrier_id, record_id, barrier_revision_id, operation_id, barrier_kind, created_at, cleared_at
       ) VALUES (?, ?, ?, ?, 'redact', ?, NULL)
     `).run(randomUUID(), recordId, revisionId, operationId, now);
+    database.exec("INSERT INTO record_fts(record_fts) VALUES ('rebuild')");
     return makeReceipt(operationId, recordId, localRevision, revisionId, "redacted");
-  }, recordId);
+  }, recordId, { physicalCleanupKind: "redact" });
 }
 
 function decodeRecord(row) {
@@ -948,6 +1083,7 @@ function handleRequest(operation, payload) {
     case "redact": return redactRecord(payload);
     case "search": return searchRecords(payload);
     case "close":
+      clearPhysicalCleanupRetry();
       database.close();
       database = undefined;
       return undefined;
@@ -961,6 +1097,7 @@ function sendFatal(error) {
     type: "fatal",
     error: toWireError(error instanceof DomainError ? error : new DomainError(category, safeMessage(category))),
   });
+  clearPhysicalCleanupRetry();
   try { database?.close(); } catch { /* Best effort after failed open. */ }
   database = undefined;
   parentPort?.close();
@@ -981,6 +1118,7 @@ parentPort?.on("message", message => {
     const value = handleRequest(operation, payload);
     parentPort?.postMessage({ type: "response", id, value });
     if (operation === "close") parentPort?.close();
+    else schedulePhysicalCleanupRetry();
   } catch (error) {
     parentPort?.postMessage({
       type: "response",
@@ -990,5 +1128,7 @@ parentPort?.on("message", message => {
         recordId: payload.recordId,
       }),
     });
+    if (operation === "close") parentPort?.close();
+    else schedulePhysicalCleanupRetry();
   }
 });
