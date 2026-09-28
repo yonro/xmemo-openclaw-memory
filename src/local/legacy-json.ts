@@ -47,7 +47,6 @@ export type LegacyImportLedgerEntry = {
   storedStatus?: "held";
   replayEnabled?: false;
   payload?: unknown;
-  quarantinePreview?: unknown;
   effect?: { operation: string; endpoint: string; method: string; payload: Record<string, unknown>; idempotencyKey: string };
 };
 
@@ -230,23 +229,21 @@ function safeCacheCopy(value: Record<string, unknown>): unknown {
 
 function quarantine(
   base: Omit<LegacyImportLedgerEntry, "disposition">,
-  entry: SourceEntry,
   reasonCode: string,
 ): LegacyImportLedgerEntry {
   return {
     ...base,
     disposition: "quarantined",
     reasonCode,
-    quarantinePreview: sanitizeTransferValue(entry.value),
   };
 }
 
 function classifyCache(entry: SourceEntry, targetAccountRef: string | undefined): LegacyImportLedgerEntry {
   const base = sourceEntry("recall_cache", entry);
   if (!isObject(entry.value) || typeof entry.value.operation !== "string" || !("response" in entry.value)) {
-    return quarantine(base, entry, "invalid_cache_entry");
+    return quarantine(base, "invalid_cache_entry");
   }
-  if (!targetAccountRef) return quarantine(base, entry, "target_account_undetermined");
+  if (!targetAccountRef) return quarantine(base, "target_account_undetermined");
   const payload = safeCacheCopy(entry.value);
   return {
     ...base,
@@ -262,12 +259,12 @@ const REMEMBER_FIELDS = new Set(["content", "path", "bucket", "scope", "team_id"
 
 function classifyOutbox(entry: SourceEntry, targetAccountRef: string | undefined): LegacyImportLedgerEntry {
   const base = sourceEntry("write_outbox", entry);
-  if (!isObject(entry.value)) return quarantine(base, entry, "invalid_outbox_entry");
+  if (!isObject(entry.value)) return quarantine(base, "invalid_outbox_entry");
   const status = statusOf(entry.value);
   if (status === "sent") return { ...base, disposition: "skipped", reasonCode: "already_confirmed_sent" };
-  if (status === "processing") return quarantine(base, entry, "processing_outcome_unknown");
-  if (status === "unknown") return quarantine(base, entry, "invalid_outbox_status");
-  if (!targetAccountRef) return quarantine(base, entry, "target_account_undetermined");
+  if (status === "processing") return quarantine(base, "processing_outcome_unknown");
+  if (status === "unknown") return quarantine(base, "invalid_outbox_status");
+  if (!targetAccountRef) return quarantine(base, "target_account_undetermined");
   const operation = entry.value.operation;
   const endpoint = entry.value.endpoint;
   const method = entry.value.method;
@@ -275,13 +272,13 @@ function classifyOutbox(entry: SourceEntry, targetAccountRef: string | undefined
   if (operation !== "remember" || endpoint !== "/v1/remember" || method !== "POST"
     || !isObject(payload) || typeof payload.content !== "string"
     || typeof entry.value.idempotencyKey !== "string" || !entry.value.idempotencyKey.trim()) {
-    return quarantine(base, entry, "unsupported_or_ambiguous_effect");
+    return quarantine(base, "unsupported_or_ambiguous_effect");
   }
   if (Object.keys(payload).some(key => !REMEMBER_FIELDS.has(key))) {
-    return quarantine(base, entry, "unsupported_payload_field");
+    return quarantine(base, "unsupported_payload_field");
   }
   if (containsCredential(payload) || containsRawIdentity(payload) || containsCredential(entry.value.idempotencyKey)) {
-    return quarantine(base, entry, "sensitive_data_in_payload");
+    return quarantine(base, "sensitive_data_in_payload");
   }
   return {
     ...base,
@@ -333,7 +330,17 @@ export function importLegacyJson(options: {
       && previous.targetAccountHash !== row.targetAccountHash) {
       throw new Error("A previously imported legacy entry is bound to a different target account.");
     }
+    if (previous && previous.disposition === "imported" && row.disposition === "quarantined") {
+      ledgerRows.set(row.sourceKey, row);
+      ledgerChanged = true;
+      quarantined += 1;
+      return;
+    }
     if (previous) {
+      if (JSON.stringify(previous) !== JSON.stringify(row)) {
+        ledgerRows.set(row.sourceKey, row);
+        ledgerChanged = true;
+      }
       skipped += 1;
       return;
     }
@@ -356,7 +363,7 @@ export function importLegacyJson(options: {
 
 export function readLegacyImportLedger(path: string): {
   entries: LegacyImportLedgerEntry[];
-  quarantined: Array<Pick<LegacyImportLedgerEntry, "sourceKind" | "sourceHash" | "sourceOrdinal" | "sourceEntryHash" | "category" | "reasonCode" | "quarantinePreview">>;
+  quarantined: Array<Pick<LegacyImportLedgerEntry, "sourceKind" | "sourceHash" | "sourceOrdinal" | "sourceEntryHash" | "category" | "reasonCode">>;
 } {
   const entries = readLedger(resolve(path));
   const quarantined = entries.filter(row => row.disposition === "quarantined").map(row => ({
@@ -366,7 +373,6 @@ export function readLegacyImportLedger(path: string): {
     sourceEntryHash: row.sourceEntryHash,
     category: row.category,
     reasonCode: row.reasonCode,
-    quarantinePreview: row.quarantinePreview,
   }));
   return { entries, quarantined };
 }

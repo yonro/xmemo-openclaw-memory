@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, openSync, writeSync } from "node:fs";
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,6 +15,16 @@ const helperParams = JSON.parse(process.env.XMEMO_LOCAL_KERNEL_HELPER_PARAMS ?? 
 
 function sleep(milliseconds: number): Promise<void> {
   return new Promise(resolveSleep => setTimeout(resolveSleep, milliseconds));
+}
+
+async function writeJsonHandoff(path: string, value: unknown): Promise<void> {
+  const temporaryPath = `${path}.tmp-${process.pid}-${randomUUID()}`;
+  try {
+    await writeFile(temporaryPath, JSON.stringify(value), { flag: "wx" });
+    await rename(temporaryPath, path);
+  } finally {
+    await rm(temporaryPath, { force: true }).catch(() => {});
+  }
 }
 
 async function waitForFile(path: string, child?: ChildProcess, timeoutMs = 30_000): Promise<string> {
@@ -120,7 +131,7 @@ if (helperMode === "cross-process-writer") {
     try {
       const base = await kernel.get(helperParams.recordId, directIdentity);
       if (base.revision.revisionId !== helperParams.baseRevision) throw new Error("Child observed an unexpected base revision.");
-      await writeFile(helperParams.readyFile, JSON.stringify({ pid: process.pid }), { flag: "wx" });
+      await writeJsonHandoff(helperParams.readyFile, { pid: process.pid });
       await waitForFile(helperParams.startFile);
       const created = await kernel.create({
         body: "cross-process child-created record",
@@ -164,7 +175,7 @@ if (helperMode === "cross-process-writer") {
     const database = new DatabaseSync(helperParams.databasePath);
     try {
       database.exec("BEGIN IMMEDIATE");
-      await writeFile(helperParams.readyFile, JSON.stringify({ pid: process.pid }), { flag: "wx" });
+      await writeJsonHandoff(helperParams.readyFile, { pid: process.pid });
       await waitForFile(helperParams.releaseFile);
       database.exec("ROLLBACK");
     } finally {

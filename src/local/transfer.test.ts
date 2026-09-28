@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { importLegacyJson, previewLegacyJson, readLegacyImportLedger } from "./legacy-json.js";
 import { LocalMemoryKernel, type TrustedLocalIdentityContext } from "./kernel.js";
 import { exportLocalJsonl, importLocalJsonl } from "./jsonl-transfer.js";
+import { containsCredential, sanitizeTransferText } from "./transfer-privacy.js";
 
 const directAlice: TrustedLocalIdentityContext = { kind: "direct", actorRef: "transfer-test-alice" };
 const directBob: TrustedLocalIdentityContext = { kind: "direct", actorRef: "transfer-test-bob" };
@@ -115,6 +116,111 @@ describe("local transfer", () => {
       .toMatchObject({ imported: 0, quarantined: 0, skipped: 2, sourceEntries: 2, reconciled: true });
     expect(readFileSync(recallCachePath)).toEqual(sourceBefore[0]);
     expect(readFileSync(writeOutboxPath)).toEqual(sourceBefore[1]);
+  });
+
+  it("detects and redacts credential formats without copying quarantined payloads", async () => {
+    const credentials = [
+      "xmemo_S3CR3TKEYS3CR3TKEYS3CR3TKEY",
+      "sk-1234567890abcdefghijklmnop",
+      "ghp_1234567890abcdefghijklmnopqrst",
+      "gho_1234567890abcdefghijklmnopqrst",
+      "github_pat_1234567890abcdefghijklmnopqrst",
+      "xoxb-1234567890-1234567890-1234567890",
+      "AKIA1234567890123456",
+      "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTYifQ.signature123456",
+      "Bearer abcdefghijklmnop",
+      "api_key=supersecretvalue",
+    ];
+    for (const credential of credentials) {
+      expect(containsCredential(credential), credential).toBe(true);
+      expect(sanitizeTransferText(`value ${credential} end`)).not.toContain(credential);
+    }
+
+    const token = credentials[0];
+    const source = temporaryDirectory("xmemo-legacy-secret-source-");
+    const recallCachePath = join(source, "recall-cache.json");
+    const writeOutboxPath = join(source, "write-outbox.json");
+    const ledgerPath = join(temporaryDirectory("xmemo-legacy-secret-target-"), "migration-ledger.jsonl");
+    writeFileSync(recallCachePath, JSON.stringify({
+      version: 1,
+      entries: { cached: { operation: "recall_context", response: { items: [{ content: `cached ${token}` }] } } },
+    }));
+    writeFileSync(writeOutboxPath, JSON.stringify({
+      version: 1,
+      records: {
+        pending: {
+          operation: "remember",
+          endpoint: "/v1/remember",
+          method: "POST",
+          payload: { content: `held ${token}` },
+          idempotencyKey: "safe-idempotency-key",
+          status: "pending",
+        },
+      },
+    }));
+    const sourceBefore = [readFileSync(recallCachePath), readFileSync(writeOutboxPath)];
+
+    const preview = previewLegacyJson({ recallCachePath, writeOutboxPath });
+    expect(JSON.stringify(preview)).not.toContain(token);
+    const imported = importLegacyJson({ recallCachePath, writeOutboxPath, ledgerPath, targetAccountRef: "account:verified" });
+    expect(imported).toMatchObject({ imported: 1, quarantined: 1, skipped: 0, sourceEntries: 2, reconciled: true });
+    const ledgerText = readFileSync(ledgerPath, "utf8");
+    expect(ledgerText).not.toContain(token);
+    const ledger = readLegacyImportLedger(ledgerPath);
+    expect(ledger.entries.find(entry => entry.importedKind === "cache_copy")?.payload)
+      .toMatchObject({ response: { items: [{ content: "cached [REDACTED]" }] } });
+    expect(ledger.quarantined).toEqual([expect.objectContaining({
+      sourceKind: "write_outbox",
+      category: "remember",
+      reasonCode: "sensitive_data_in_payload",
+    })]);
+    expect(ledger.quarantined[0]).not.toHaveProperty("quarantinePreview");
+    expect(ledger.entries.find(entry => entry.disposition === "quarantined"))
+      .not.toHaveProperty("effect");
+    expect(readFileSync(recallCachePath)).toEqual(sourceBefore[0]);
+    expect(readFileSync(writeOutboxPath)).toEqual(sourceBefore[1]);
+
+    const cacheEntry = ledger.entries.find(entry => entry.importedKind === "cache_copy");
+    const outboxEntry = ledger.entries.find(entry => entry.sourceKind === "write_outbox");
+    expect(cacheEntry?.targetAccountHash).toBeTruthy();
+    expect(outboxEntry?.disposition).toBe("quarantined");
+    const oldLedgerRows = ledger.entries.map(entry => {
+      if (entry.importedKind === "cache_copy") {
+        return { ...entry, payload: { response: { items: [{ content: `cached ${token}` }] } } };
+      }
+      if (entry.sourceKind === "write_outbox") {
+        return {
+          ...entry,
+          disposition: "imported" as const,
+          targetAccountHash: cacheEntry?.targetAccountHash,
+          importedKind: "held_outbox" as const,
+          storedStatus: "held" as const,
+          replayEnabled: false as const,
+          effect: {
+            operation: "remember",
+            endpoint: "/v1/remember",
+            method: "POST",
+            payload: { content: `held ${token}` },
+            idempotencyKey: "safe-idempotency-key",
+          },
+        };
+      }
+      return entry;
+    });
+    writeFileSync(ledgerPath, `${oldLedgerRows.map(row => JSON.stringify(row)).join("\n")}\n`);
+    const refreshed = importLegacyJson({ recallCachePath, writeOutboxPath, ledgerPath, targetAccountRef: "account:verified" });
+    expect(refreshed).toMatchObject({ imported: 0, quarantined: 1, skipped: 1, sourceEntries: 2, reconciled: true });
+    const refreshedText = readFileSync(ledgerPath, "utf8");
+    expect(refreshedText).not.toContain(token);
+    expect(readLegacyImportLedger(ledgerPath).quarantined[0]).toMatchObject({ reasonCode: "sensitive_data_in_payload" });
+    expect(readFileSync(recallCachePath)).toEqual(sourceBefore[0]);
+    expect(readFileSync(writeOutboxPath)).toEqual(sourceBefore[1]);
+
+    const sourceKernel = await openKernel(temporaryDirectory("xmemo-jsonl-secret-source-"));
+    await sourceKernel.create({ body: `export ${token}`, operationId: "transfer-create-xmemo-secret" }, directAlice);
+    const jsonl = await exportLocalJsonl(sourceKernel, directAlice);
+    expect(jsonl).not.toContain(token);
+    expect(JSON.parse(jsonl.trim())).toMatchObject({ body: "export [REDACTED]" });
   });
 
   it("round-trips active JSONL records by content hash while excluding deleted, redacted, identity, and credential data", async () => {
