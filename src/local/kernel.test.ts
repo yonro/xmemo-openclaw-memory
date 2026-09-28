@@ -152,6 +152,262 @@ describe("isolated local SQLite kernel", () => {
     }
   });
 
+  it("pages revision history and restores a soft-deleted record as a new revision", async () => {
+    const kernel = await createKernel();
+    const created = await kernel.create({ body: "history first revision" }, directAlice);
+    const updated = await kernel.update(created.recordId, {
+      body: "history second revision",
+      baseRevision: created.revisionId,
+    }, directAlice);
+    const conflict = await kernel.update(created.recordId, {
+      body: "history preserved conflict branch",
+      baseRevision: created.revisionId,
+      operationId: "history-conflict-operation",
+    }, directAlice);
+    expect(conflict.writeKind).toBe("conflict");
+
+    const firstPage = await kernel.history(created.recordId, directAlice, { limit: 2 });
+    expect(firstPage.revisions).toHaveLength(2);
+    expect(firstPage.nextBeforeLocalRevision).toBeDefined();
+    await expect(kernel.history(created.recordId, directBob)).rejects.toMatchObject({ category: "not_found" });
+    const secondPage = await kernel.history(created.recordId, directAlice, {
+      limit: 2,
+      beforeLocalRevision: firstPage.nextBeforeLocalRevision,
+    });
+    const beforeDelete = [...firstPage.revisions, ...secondPage.revisions];
+    expect(new Set(beforeDelete.map(revision => revision.revisionId)).size).toBe(beforeDelete.length);
+    expect(beforeDelete.map(revision => revision.state).sort()).toEqual(["conflict", "current", "historical"]);
+    expect(beforeDelete.find(revision => revision.revisionId === updated.revisionId)?.body)
+      .toBe("history second revision");
+
+    const deleted = await kernel.softDelete(created.recordId, {
+      baseRevision: updated.revisionId,
+      operationId: "history-soft-delete",
+    }, directAlice);
+    const restored = await kernel.restore(created.recordId, {
+      fromRevisionId: created.revisionId,
+      baseRevision: deleted.revisionId,
+      operationId: "history-restore",
+    }, directAlice);
+    expect(restored).toMatchObject({ writeKind: "restored", storageStatus: "committed_local" });
+    expect(restored.revisionId).not.toBe(created.revisionId);
+    expect(restored.localRevision).toBeGreaterThan(deleted.localRevision);
+    expect((await kernel.get(created.recordId, directAlice)).body).toBe("history first revision");
+    const latestHistory = await kernel.history(created.recordId, directAlice, { limit: 20 });
+    expect(latestHistory.revisions.find(revision => revision.revisionId === deleted.revisionId)?.state).toBe("deleted");
+    expect(latestHistory.revisions.find(revision => revision.revisionId === restored.revisionId))
+      .toMatchObject({ state: "current", parents: [deleted.revisionId, created.revisionId] });
+
+    const database = new DatabaseSync(resolveLocalVaultPath({ dataDirectory: dataDirectories.at(-1) }), { readOnly: true });
+    try {
+      expect(database.prepare("SELECT cleared_at FROM deletion_barriers WHERE record_id = ? AND barrier_kind = 'soft_delete'")
+        .get(created.recordId)).toMatchObject({ cleared_at: expect.any(String) });
+    } finally {
+      database.close();
+    }
+  });
+
+  it("hard-deletes all revision content and permanently blocks old operation replays and late writes", async () => {
+    const kernel = await createKernel();
+    const recordId = "hard-delete-opaque-record";
+    const secretBody = "hard delete sensitive body phrase";
+    const secretTitle = "hard delete sensitive title";
+    const created = await kernel.create({
+      recordId,
+      body: secretBody,
+      title: secretTitle,
+      metadata: { privateKey: "hard-delete-sensitive-metadata" },
+      operationId: "hard-delete-old-create",
+    }, directAlice);
+    const updated = await kernel.update(recordId, {
+      body: "hard delete second sensitive body",
+      title: "hard delete second sensitive title",
+      metadata: { privateKey: "hard-delete-second-sensitive-metadata" },
+      baseRevision: created.revisionId,
+      operationId: "hard-delete-old-update",
+    }, directAlice);
+    const deleted = await kernel.hardDelete(recordId, {
+      baseRevision: updated.revisionId,
+      operationId: "hard-delete-final-operation",
+    }, directAlice);
+    expect(deleted).toMatchObject({ writeKind: "hard_deleted", storageStatus: "committed_local" });
+    expect(deleted.barrierId).toBeTruthy();
+    await expect(kernel.get(recordId, directAlice)).rejects.toMatchObject({ category: "not_found" });
+    expect(await kernel.search("hard delete sensitive", directAlice)).toHaveLength(0);
+    await expect(kernel.create({
+      recordId,
+      body: secretBody,
+      title: secretTitle,
+      metadata: { privateKey: "hard-delete-sensitive-metadata" },
+      operationId: "hard-delete-late-create",
+    }, directAlice)).rejects.toMatchObject({ category: "not_found" });
+    await expect(kernel.create({
+      recordId,
+      body: secretBody,
+      title: secretTitle,
+      metadata: { privateKey: "hard-delete-sensitive-metadata" },
+      operationId: "hard-delete-old-create",
+    }, directAlice)).rejects.toMatchObject({ category: "not_found" });
+    await expect(kernel.update(recordId, {
+      body: secretBody,
+      baseRevision: updated.revisionId,
+      operationId: "hard-delete-late-update",
+    }, directAlice)).rejects.toMatchObject({ category: "not_found" });
+    expect(await kernel.hardDelete(recordId, {
+      baseRevision: updated.revisionId,
+      operationId: "hard-delete-final-operation",
+    }, directAlice)).toEqual(deleted);
+
+    const database = new DatabaseSync(resolveLocalVaultPath({ dataDirectory: dataDirectories.at(-1) }), { readOnly: true });
+    try {
+      expect(database.prepare("SELECT 1 FROM records WHERE record_id = ?").get(recordId)).toBeUndefined();
+      expect(database.prepare("SELECT 1 FROM revisions WHERE record_id = ?").get(recordId)).toBeUndefined();
+      expect(database.prepare("SELECT 1 FROM operations WHERE operation_id IN (?, ?)")
+        .get("hard-delete-old-create", "hard-delete-old-update")).toBeUndefined();
+      expect(database.prepare("SELECT count(*) AS count FROM operation_tombstones WHERE operation_id IN (?, ?)")
+        .get("hard-delete-old-create", "hard-delete-old-update")).toMatchObject({ count: 2 });
+      expect(database.prepare("SELECT barrier_kind, barrier_revision_id FROM deletion_barriers WHERE record_id = ? AND barrier_id = ?")
+        .get(recordId, deleted.barrierId)).toMatchObject({ barrier_kind: "hard_delete", barrier_revision_id: null });
+      const remaining = JSON.stringify(database.prepare("SELECT * FROM operations WHERE record_id = ?").all(recordId));
+      expect(remaining).not.toContain(secretBody);
+      expect(remaining).not.toContain(secretTitle);
+      expect(remaining).not.toContain("hard-delete-sensitive-metadata");
+    } finally {
+      database.close();
+    }
+  });
+
+  it("redacts selected fields from every revision and FTS without reopening stale-write paths", async () => {
+    const kernel = await createKernel();
+    const created = await kernel.create({
+      body: "redact first private body phrase",
+      title: "redaction keeps this title",
+      metadata: { keep: "approved audit note", secret: "private metadata phrase" },
+      operationId: "redact-old-create",
+    }, directAlice);
+    const updated = await kernel.update(created.recordId, {
+      body: "redact second private body phrase",
+      title: "redaction keeps this newer title",
+      metadata: { keep: "second approved note", secret: "second private metadata phrase" },
+      baseRevision: created.revisionId,
+      operationId: "redact-old-update",
+    }, directAlice);
+    const priorHistory = await kernel.history(created.recordId, directAlice, { limit: 20 });
+    const priorHashes = new Map(priorHistory.revisions.map(revision => [revision.revisionId, revision.contentHash]));
+    const redacted = await kernel.redact(created.recordId, {
+      baseRevision: updated.revisionId,
+      fields: ["body"],
+      metadataKeys: ["secret"],
+      operationId: "redact-content-operation",
+    }, directAlice);
+    expect(redacted).toMatchObject({ writeKind: "redacted", storageStatus: "committed_local" });
+    const current = await kernel.get(created.recordId, directAlice);
+    expect(current.body).toBe("");
+    expect(current.title).toBe("redaction keeps this newer title");
+    expect(current.metadata).toEqual({ keep: "second approved note" });
+    expect(await kernel.search("private body phrase", directAlice)).toHaveLength(0);
+    expect((await kernel.search("keeps this newer title", directAlice)).map(record => record.recordId)).toContain(created.recordId);
+    const history = await kernel.history(created.recordId, directAlice, { limit: 20 });
+    expect(history.revisions).toHaveLength(priorHistory.revisions.length + 1);
+    for (const revision of history.revisions) {
+      expect(revision.body).toBe("");
+      expect(JSON.stringify(revision.metadata)).not.toContain("private metadata phrase");
+      if (priorHashes.has(revision.revisionId)) expect(revision.contentHash).not.toBe(priorHashes.get(revision.revisionId));
+    }
+
+    const revisionCount = history.revisions.length;
+    await expect(kernel.update(created.recordId, {
+      body: "redact first private body phrase",
+      baseRevision: created.revisionId,
+      operationId: "redact-stale-late-update",
+    }, directAlice)).rejects.toMatchObject({ category: "conflict", receipt: { storageStatus: "not_committed" } });
+    await expect(kernel.create({
+      recordId: created.recordId,
+      body: "redact first private body phrase",
+      operationId: "redact-old-create",
+    }, directAlice)).rejects.toMatchObject({ category: "not_found" });
+    expect((await kernel.history(created.recordId, directAlice, { limit: 20 })).revisions).toHaveLength(revisionCount);
+    expect(await kernel.redact(created.recordId, {
+      baseRevision: updated.revisionId,
+      fields: ["body"],
+      metadataKeys: ["secret"],
+      operationId: "redact-content-operation",
+    }, directAlice)).toEqual(redacted);
+
+    const restored = await kernel.restore(created.recordId, {
+      fromRevisionId: created.revisionId,
+      baseRevision: redacted.revisionId,
+      operationId: "redact-restore-prior-revision",
+    }, directAlice);
+    expect(restored.writeKind).toBe("restored");
+    expect((await kernel.get(created.recordId, directAlice)).body).toBe("");
+    expect(await kernel.search("private body phrase", directAlice)).toHaveLength(0);
+    const restoredHistory = await kernel.history(created.recordId, directAlice, { limit: 20 });
+    expect(restoredHistory.revisions).toHaveLength(revisionCount + 1);
+    expect(restoredHistory.revisions.every(revision => revision.body === "")).toBe(true);
+
+    const database = new DatabaseSync(resolveLocalVaultPath({ dataDirectory: dataDirectories.at(-1) }), { readOnly: true });
+    try {
+      expect(database.prepare("SELECT 1 FROM operations WHERE operation_id IN (?, ?)")
+        .get("redact-old-create", "redact-old-update")).toBeUndefined();
+      expect(database.prepare("SELECT count(*) AS count FROM operation_tombstones WHERE operation_id IN (?, ?)")
+        .get("redact-old-create", "redact-old-update")).toMatchObject({ count: 2 });
+    } finally {
+      database.close();
+    }
+  });
+
+  it("migrates a version 1 soft-delete barrier without losing its restore path", async () => {
+    const dataDirectory = await mkdtemp(join(tmpdir(), "xmemo-local-migrate-v1-"));
+    const kernel = await createKernel({ dataDirectory });
+    const created = await kernel.create({ body: "migration barrier keeps content" }, directAlice);
+    const deleted = await kernel.softDelete(created.recordId, {
+      baseRevision: created.revisionId,
+      operationId: "migration-v1-soft-delete",
+    }, directAlice);
+    await kernel.close();
+
+    const databasePath = resolveLocalVaultPath({ dataDirectory });
+    const database = new DatabaseSync(databasePath);
+    try {
+      database.exec("PRAGMA foreign_keys = OFF");
+      database.exec(`
+        CREATE TABLE deletion_barriers_v1 (
+          record_id TEXT PRIMARY KEY REFERENCES records(record_id) ON DELETE CASCADE,
+          barrier_revision_id TEXT NOT NULL REFERENCES revisions(revision_id),
+          operation_id TEXT NOT NULL UNIQUE,
+          created_at TEXT NOT NULL
+        ) STRICT
+      `);
+      database.prepare(`
+        INSERT INTO deletion_barriers_v1(record_id, barrier_revision_id, operation_id, created_at)
+        SELECT record_id, barrier_revision_id, operation_id, created_at FROM deletion_barriers WHERE record_id = ?
+      `).run(created.recordId);
+      database.exec("DROP TABLE deletion_barriers; ALTER TABLE deletion_barriers_v1 RENAME TO deletion_barriers; DROP TABLE operation_tombstones");
+      database.prepare("UPDATE vault_metadata SET value = '1' WHERE key = 'schema_version'").run();
+      database.exec("PRAGMA user_version = 1");
+    } finally {
+      database.close();
+    }
+
+    const migrated = await createKernel({ dataDirectory });
+    const restored = await migrated.restore(created.recordId, {
+      fromRevisionId: created.revisionId,
+      baseRevision: deleted.revisionId,
+      operationId: "migration-v1-restore",
+    }, directAlice);
+    expect(restored.writeKind).toBe("restored");
+    expect((await migrated.get(created.recordId, directAlice)).body).toBe("migration barrier keeps content");
+    const verification = new DatabaseSync(databasePath, { readOnly: true });
+    try {
+      expect(verification.prepare("PRAGMA user_version").get()).toMatchObject({ user_version: 2 });
+      expect(verification.prepare("SELECT value FROM vault_metadata WHERE key = 'schema_version'").get())
+        .toMatchObject({ value: "2" });
+    } finally {
+      verification.close();
+    }
+  });
+
   it("indexes English and CJK substrings and never returns historical text", async () => {
     const kernel = await createKernel();
     const created = await kernel.create({ body: "记忆系统 supports immediate local memory search" }, directAlice);

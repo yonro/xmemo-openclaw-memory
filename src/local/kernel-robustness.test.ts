@@ -159,6 +159,19 @@ if (helperMode === "cross-process-writer") {
       await sleep(Math.floor(Math.random() * 5));
     }
   }, 120_000);
+} else if (helperMode === "write-lock-holder") {
+  it("holds the requested SQLite write lock until released", async () => {
+    const database = new DatabaseSync(helperParams.databasePath);
+    try {
+      database.exec("BEGIN IMMEDIATE");
+      await writeFile(helperParams.readyFile, JSON.stringify({ pid: process.pid }), { flag: "wx" });
+      await waitForFile(helperParams.releaseFile);
+      database.exec("ROLLBACK");
+    } finally {
+      if (database.isTransaction) database.exec("ROLLBACK");
+      database.close();
+    }
+  }, 120_000);
 } else {
   const dataDirectories: string[] = [];
   const kernels: LocalMemoryKernel[] = [];
@@ -280,6 +293,90 @@ if (helperMode === "cross-process-writer") {
       } catch (error) {
         throw new Error(`${String(error)}\nCross-process helper output:\n${child.output()}`);
       }
+    }, 60_000);
+
+    it("reports a cross-process busy lock without writing and retries the same operation ids", async () => {
+      const dataDirectory = await mkdtemp(join(tmpdir(), "xmemo-local-cross-process-busy-"));
+      dataDirectories.push(dataDirectory);
+      const kernel = await openKernel(dataDirectory, 50);
+      const base = await kernel.create({
+        recordId: "cross-process-busy-update-target",
+        body: "unchanged before lock release",
+        operationId: "cross-process-busy-base",
+      }, directIdentity);
+      const readyFile = join(dataDirectory, "lock-ready.json");
+      const releaseFile = join(dataDirectory, "release-lock");
+      const child = spawnVitestHelper("write-lock-holder", {
+        databasePath: resolveLocalVaultPath({ dataDirectory }),
+        readyFile,
+        releaseFile,
+      });
+      childProcesses.push(child);
+
+      try {
+        const ready = await readJsonFile<{ pid: number }>(readyFile, child.child);
+        expect(ready.pid).not.toBe(process.pid);
+        expect(ready.pid).toBe(child.child.pid);
+
+        await expect(kernel.create({
+          recordId: "cross-process-busy-create-target",
+          body: "crossprocessbusycreatephrase",
+          operationId: "cross-process-busy-create",
+        }, directIdentity)).rejects.toMatchObject({
+          category: "storage_busy",
+          receipt: {
+            operationId: "cross-process-busy-create",
+            storageStatus: "not_committed",
+            error: { category: "storage_busy" },
+          },
+        });
+        await expect(kernel.update(base.recordId, {
+          body: "crossprocessbusyupdatephrase",
+          baseRevision: base.revisionId,
+          operationId: "cross-process-busy-update",
+        }, directIdentity)).rejects.toMatchObject({
+          category: "storage_busy",
+          receipt: {
+            operationId: "cross-process-busy-update",
+            storageStatus: "not_committed",
+            error: { category: "storage_busy" },
+          },
+        });
+
+        const database = new DatabaseSync(resolveLocalVaultPath({ dataDirectory }), { readOnly: true });
+        try {
+          expect(database.prepare("SELECT 1 FROM records WHERE record_id = 'cross-process-busy-create-target'").get()).toBeUndefined();
+          expect(database.prepare("SELECT count(*) AS count FROM revisions WHERE record_id = ?").get(base.recordId))
+            .toMatchObject({ count: 1 });
+          expect(database.prepare("SELECT count(*) AS count FROM operations WHERE operation_id IN (?, ?)")
+            .get("cross-process-busy-create", "cross-process-busy-update")).toMatchObject({ count: 0 });
+        } finally {
+          database.close();
+        }
+        expect(await kernel.search("crossprocessbusycreatephrase", directIdentity)).toEqual([]);
+        expect(await kernel.search("crossprocessbusyupdatephrase", directIdentity)).toEqual([]);
+        expect((await kernel.get(base.recordId, directIdentity)).body).toBe("unchanged before lock release");
+      } finally {
+        await writeFile(releaseFile, "release").catch(() => {});
+        await waitForExit(child, 30_000);
+      }
+
+      const created = await kernel.create({
+        recordId: "cross-process-busy-create-target",
+        body: "crossprocessbusycreatephrase",
+        operationId: "cross-process-busy-create",
+      }, directIdentity);
+      const updated = await kernel.update(base.recordId, {
+        body: "crossprocessbusyupdatephrase",
+        baseRevision: base.revisionId,
+        operationId: "cross-process-busy-update",
+      }, directIdentity);
+      expect(created.storageStatus).toBe("committed_local");
+      expect(updated.writeKind).toBe("versioned_update");
+      expect((await kernel.get(created.recordId, directIdentity)).body).toBe("crossprocessbusycreatephrase");
+      expect((await kernel.get(base.recordId, directIdentity)).body).toBe("crossprocessbusyupdatephrase");
+      expect(await kernel.search("crossprocessbusycreatephrase", directIdentity)).toHaveLength(1);
+      expect(await kernel.search("crossprocessbusyupdatephrase", directIdentity)).toHaveLength(1);
     }, 60_000);
 
     it("ignores only an unterminated trailing acknowledgement line", () => {

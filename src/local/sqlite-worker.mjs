@@ -4,7 +4,7 @@ import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { parentPort, workerData } from "node:worker_threads";
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 const { databasePath, busyTimeoutMs } = workerData;
 let database;
 let vaultId;
@@ -106,7 +106,38 @@ const migrationOne = `
   END;
 `;
 
-const MIGRATIONS = [{ version: 1, sql: migrationOne }];
+const migrationTwo = `
+  CREATE TABLE deletion_barriers_v2 (
+    barrier_id TEXT PRIMARY KEY,
+    record_id TEXT NOT NULL,
+    barrier_revision_id TEXT,
+    operation_id TEXT NOT NULL UNIQUE,
+    barrier_kind TEXT NOT NULL CHECK (barrier_kind IN ('soft_delete', 'redact', 'hard_delete')),
+    created_at TEXT NOT NULL,
+    cleared_at TEXT
+  ) STRICT;
+
+  INSERT INTO deletion_barriers_v2(
+    barrier_id, record_id, barrier_revision_id, operation_id, barrier_kind, created_at, cleared_at
+  )
+  SELECT lower(hex(randomblob(16))), record_id, barrier_revision_id, operation_id, 'soft_delete', created_at, NULL
+  FROM deletion_barriers;
+
+  DROP TABLE deletion_barriers;
+  ALTER TABLE deletion_barriers_v2 RENAME TO deletion_barriers;
+  CREATE INDEX deletion_barriers_record_kind ON deletion_barriers(record_id, barrier_kind, cleared_at);
+
+  CREATE TABLE operation_tombstones (
+    operation_id TEXT PRIMARY KEY,
+    record_id TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  ) STRICT;
+`;
+
+const MIGRATIONS = [
+  { version: 1, sql: migrationOne },
+  { version: 2, sql: migrationTwo },
+];
 
 function errorCode(error) {
   return typeof error?.code === "string" ? error.code : "";
@@ -292,6 +323,12 @@ function operationResult(operationId, requestHash, work, recordIdHint) {
   try {
     database.exec("BEGIN IMMEDIATE");
     transactionStarted = true;
+    const tombstone = database.prepare(
+      "SELECT 1 FROM operation_tombstones WHERE operation_id = ?",
+    ).get(operationId);
+    if (tombstone) {
+      throw new DomainError("not_found", safeMessage("not_found"), { operationId, recordId: recordIdHint });
+    }
     const previous = database.prepare(
       "SELECT request_hash, response_json FROM operations WHERE operation_id = ?",
     ).get(operationId);
@@ -371,6 +408,10 @@ function createRecord(payload) {
 
   return operationResult(operationId, requestHash, () => {
     const recordId = recordIdHint ?? randomUUID();
+    const hardDeleteBarrier = database.prepare(
+      "SELECT 1 FROM deletion_barriers WHERE record_id = ? AND barrier_kind = 'hard_delete'",
+    ).get(recordId);
+    if (hardDeleteBarrier) throw new DomainError("not_found", safeMessage("not_found"), { operationId, recordId });
     const existing = database.prepare("SELECT 1 FROM records WHERE record_id = ?").get(recordId);
     if (existing) throw new DomainError("validation", "recordId already exists.", { operationId, recordId });
     const now = new Date().toISOString();
@@ -393,15 +434,40 @@ function createRecord(payload) {
   }, recordIdHint);
 }
 
-function currentRecord(recordId, scope) {
+function recordAtCurrentRevision(recordId, scope, includeDeleted = false) {
   const row = database.prepare(`
     SELECT r.*, v.revision_id, v.parents_json, v.base_revision, v.operation_id, v.content_hash
     FROM records AS r
     JOIN revisions AS v ON v.revision_id = r.current_revision_id
-    WHERE r.record_id = ? AND r.owner_ref = ? AND r.collection_ref = ? AND r.deleted_at IS NULL
+    WHERE r.record_id = ? AND r.owner_ref = ? AND r.collection_ref = ?
+      ${includeDeleted ? "" : "AND r.deleted_at IS NULL"}
   `).get(recordId, scope.ownerRef, scope.collectionRef);
   if (!row) throw new DomainError("not_found", safeMessage("not_found"), { recordId });
   return row;
+}
+
+function currentRecord(recordId, scope) {
+  return recordAtCurrentRevision(recordId, scope, false);
+}
+
+function currentRecordIncludingDeleted(recordId, scope) {
+  return recordAtCurrentRevision(recordId, scope, true);
+}
+
+function retireOperationsForRecord(recordId) {
+  const rows = database.prepare("SELECT operation_id FROM operations WHERE record_id = ?").all(recordId);
+  const insertTombstone = database.prepare(
+    "INSERT OR IGNORE INTO operation_tombstones(operation_id, record_id, created_at) VALUES (?, ?, ?)",
+  );
+  const createdAt = new Date().toISOString();
+  for (const row of rows) insertTombstone.run(String(row.operation_id), recordId, createdAt);
+  database.prepare("DELETE FROM operations WHERE record_id = ?").run(recordId);
+}
+
+function hasActiveBarrier(recordId, barrierKind) {
+  return Boolean(database.prepare(
+    "SELECT 1 FROM deletion_barriers WHERE record_id = ? AND barrier_kind = ? AND cleared_at IS NULL LIMIT 1",
+  ).get(recordId, barrierKind));
 }
 
 function isRevisionForRecord(recordId, revisionId) {
@@ -448,6 +514,13 @@ function updateRecord(payload) {
     const current = currentRecord(recordId, scope);
     if (baseRevision !== null && !isRevisionForRecord(recordId, baseRevision)) {
       throw new DomainError("not_found", "base_revision does not belong to this local record.", { operationId, recordId });
+    }
+    if (hasActiveBarrier(recordId, "redact")
+      && (baseRevision === null || baseRevision !== String(current.current_revision_id))) {
+      throw new DomainError("conflict", "A redaction barrier rejects writes that are not based on the current redacted revision.", {
+        operationId,
+        recordId,
+      });
     }
     if (baseRevision !== null && baseRevision !== String(current.current_revision_id)) {
       return conflictBranch({ operationId, recordId, current, baseRevision, title, body, metadataJson });
@@ -526,10 +599,267 @@ function softDeleteRecord(payload) {
       WHERE record_id = ? AND owner_ref = ? AND collection_ref = ? AND deleted_at IS NULL
     `).run(localRevision, revisionId, now, now, recordId, scope.ownerRef, scope.collectionRef);
     database.prepare(`
-      INSERT INTO deletion_barriers(record_id, barrier_revision_id, operation_id, created_at)
-      VALUES (?, ?, ?, ?)
-    `).run(recordId, revisionId, operationId, now);
+      INSERT INTO deletion_barriers(barrier_id, record_id, barrier_revision_id, operation_id, barrier_kind, created_at, cleared_at)
+      VALUES (?, ?, ?, ?, 'soft_delete', ?, NULL)
+    `).run(randomUUID(), recordId, revisionId, operationId, now);
     return makeReceipt(operationId, recordId, localRevision, revisionId, "soft_deleted");
+  }, recordId);
+}
+
+function decodeHistoryRevision(row, recordId) {
+  try {
+    return {
+      revisionId: String(row.revision_id),
+      localRevision: Number(row.local_revision),
+      parents: JSON.parse(String(row.parents_json)),
+      baseRevision: row.base_revision === null ? null : String(row.base_revision),
+      operationId: String(row.operation_id),
+      contentHash: String(row.content_hash),
+      state: String(row.revision_state),
+      isDeleted: Number(row.is_deleted) === 1,
+      title: String(row.title),
+      body: String(row.body),
+      metadata: JSON.parse(String(row.metadata_json)),
+      createdAt: String(row.created_at),
+    };
+  } catch {
+    throw new DomainError("corrupt_store", safeMessage("corrupt_store"), { recordId });
+  }
+}
+
+function historyRecord(payload) {
+  const recordId = requireText(payload.recordId, "recordId", { maxLength: 200 });
+  const scope = requireScope(payload.scope);
+  const limit = Number(payload.limit ?? 20);
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+    throw new DomainError("validation", "History limit must be between 1 and 100.", { recordId });
+  }
+  const beforeLocalRevision = payload.beforeLocalRevision === undefined || payload.beforeLocalRevision === null
+    ? null
+    : Number(payload.beforeLocalRevision);
+  if (beforeLocalRevision !== null && (!Number.isInteger(beforeLocalRevision) || beforeLocalRevision < 1)) {
+    throw new DomainError("validation", "History cursor must be a positive local revision.", { recordId });
+  }
+  const exists = database.prepare(`
+    SELECT 1 FROM records WHERE record_id = ? AND owner_ref = ? AND collection_ref = ?
+  `).get(recordId, scope.ownerRef, scope.collectionRef);
+  if (!exists) throw new DomainError("not_found", safeMessage("not_found"), { recordId });
+
+  const rows = beforeLocalRevision === null
+    ? database.prepare(`
+      SELECT * FROM revisions WHERE record_id = ?
+      ORDER BY local_revision DESC, revision_id DESC LIMIT ?
+    `).all(recordId, limit + 1)
+    : database.prepare(`
+      SELECT * FROM revisions WHERE record_id = ? AND local_revision < ?
+      ORDER BY local_revision DESC, revision_id DESC LIMIT ?
+    `).all(recordId, beforeLocalRevision, limit + 1);
+  const hasMore = rows.length > limit;
+  const pageRows = hasMore ? rows.slice(0, limit) : rows;
+  const revisions = pageRows.map(row => decodeHistoryRevision(row, recordId));
+  return {
+    revisions,
+    nextBeforeLocalRevision: hasMore && revisions.length > 0
+      ? revisions[revisions.length - 1].localRevision
+      : null,
+  };
+}
+
+function restoreRecord(payload) {
+  const operationId = requireText(payload.operationId, "operationId", { maxLength: 200 });
+  const recordId = requireText(payload.recordId, "recordId", { maxLength: 200 });
+  const scope = requireScope(payload.scope);
+  const fromRevisionId = requireText(payload.fromRevisionId, "fromRevisionId", { maxLength: 200 });
+  const baseRevision = requireText(payload.baseRevision, "baseRevision", { maxLength: 200 });
+  const requestHash = digest({ operation: "restore", recordId, scope, fromRevisionId, baseRevision });
+
+  return operationResult(operationId, requestHash, () => {
+    const current = currentRecordIncludingDeleted(recordId, scope);
+    if (!isRevisionForRecord(recordId, baseRevision)) {
+      throw new DomainError("not_found", "base_revision does not belong to this local record.", { operationId, recordId });
+    }
+    if (baseRevision !== String(current.current_revision_id)) {
+      throw new DomainError("conflict", "Restore requires the current revision as its base.", { operationId, recordId });
+    }
+    const source = database.prepare(`
+      SELECT * FROM revisions WHERE record_id = ? AND revision_id = ?
+    `).get(recordId, fromRevisionId);
+    if (!source) throw new DomainError("not_found", "from_revision does not belong to this local record.", { operationId, recordId });
+    if (String(source.revision_state) === "deleted" || Number(source.is_deleted) === 1) {
+      throw new DomainError("validation", "A deleted revision cannot be used as restore content.", { operationId, recordId });
+    }
+
+    let metadata;
+    try {
+      metadata = JSON.parse(String(source.metadata_json));
+    } catch {
+      throw new DomainError("corrupt_store", safeMessage("corrupt_store"), { operationId, recordId });
+    }
+    if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+      throw new DomainError("corrupt_store", safeMessage("corrupt_store"), { operationId, recordId });
+    }
+    const title = String(source.title);
+    const body = String(source.body);
+    const metadataJson = String(source.metadata_json);
+    const localRevision = nextLocalRevision(recordId);
+    const revisionId = randomUUID();
+    const now = new Date().toISOString();
+    const parents = String(current.current_revision_id) === fromRevisionId
+      ? [String(current.current_revision_id)]
+      : [String(current.current_revision_id), fromRevisionId];
+    const contentHash = hashContent(title, body, metadataJson);
+
+    database.prepare("UPDATE revisions SET revision_state = 'historical' WHERE revision_id = ? AND revision_state = 'current'")
+      .run(String(current.current_revision_id));
+    database.prepare(`
+      INSERT INTO revisions(
+        revision_id, record_id, local_revision, parents_json, base_revision, operation_id,
+        content_hash, title, body, metadata_json, revision_state, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'current', ?)
+    `).run(revisionId, recordId, localRevision, JSON.stringify(parents), baseRevision,
+      operationId, contentHash, title, body, metadataJson, now);
+    database.prepare(`
+      UPDATE records
+      SET local_revision = ?, current_revision_id = ?, current_title = ?, current_body = ?,
+          metadata_json = ?, updated_at = ?, deleted_at = NULL
+      WHERE record_id = ? AND owner_ref = ? AND collection_ref = ?
+    `).run(localRevision, revisionId, title, body, metadataJson, now, recordId, scope.ownerRef, scope.collectionRef);
+    database.prepare(`
+      UPDATE deletion_barriers SET cleared_at = ?
+      WHERE record_id = ? AND barrier_kind = 'soft_delete' AND cleared_at IS NULL
+    `).run(now, recordId);
+    return makeReceipt(operationId, recordId, localRevision, revisionId, "restored");
+  }, recordId);
+}
+
+function hardDeleteRecord(payload) {
+  const operationId = requireText(payload.operationId, "operationId", { maxLength: 200 });
+  const recordId = requireText(payload.recordId, "recordId", { maxLength: 200 });
+  const scope = requireScope(payload.scope);
+  const baseRevision = requireText(payload.baseRevision, "baseRevision", { maxLength: 200 });
+  const requestHash = digest({ operation: "hardDelete", recordId, scope, baseRevision });
+
+  return operationResult(operationId, requestHash, () => {
+    const current = currentRecordIncludingDeleted(recordId, scope);
+    if (!isRevisionForRecord(recordId, baseRevision)) {
+      throw new DomainError("not_found", "base_revision does not belong to this local record.", { operationId, recordId });
+    }
+    if (baseRevision !== String(current.current_revision_id)) {
+      throw new DomainError("conflict", "Hard delete requires the current revision as its base.", { operationId, recordId });
+    }
+
+    const now = new Date().toISOString();
+    retireOperationsForRecord(recordId);
+    database.prepare("UPDATE deletion_barriers SET barrier_revision_id = NULL WHERE record_id = ?").run(recordId);
+    database.prepare(`
+      DELETE FROM records WHERE record_id = ? AND owner_ref = ? AND collection_ref = ?
+    `).run(recordId, scope.ownerRef, scope.collectionRef);
+    const barrierId = randomUUID();
+    database.prepare(`
+      INSERT INTO deletion_barriers(
+        barrier_id, record_id, barrier_revision_id, operation_id, barrier_kind, created_at, cleared_at
+      ) VALUES (?, ?, NULL, ?, 'hard_delete', ?, NULL)
+    `).run(barrierId, recordId, operationId, now);
+    return {
+      operationId,
+      recordId,
+      barrierId,
+      storageStatus: "committed_local",
+      syncStatus: "local_only",
+      indexStatus: "ready",
+      writeKind: "hard_deleted",
+      error: null,
+    };
+  }, recordId);
+}
+
+function redactRecord(payload) {
+  const operationId = requireText(payload.operationId, "operationId", { maxLength: 200 });
+  const recordId = requireText(payload.recordId, "recordId", { maxLength: 200 });
+  const scope = requireScope(payload.scope);
+  const baseRevision = requireText(payload.baseRevision, "baseRevision", { maxLength: 200 });
+  if (!Array.isArray(payload.fields) || !Array.isArray(payload.metadataKeys)) {
+    throw new DomainError("validation", "Redaction fields and metadataKeys must be arrays.", { operationId, recordId });
+  }
+  const fields = [...new Set(payload.fields.map(field => requireText(field, "redaction field", { maxLength: 20 })))];
+  const allowedFields = new Set(["title", "body"]);
+  if (fields.some(field => !allowedFields.has(field))) {
+    throw new DomainError("validation", "Redaction may select only title or body fields.", { operationId, recordId });
+  }
+  const metadataKeys = [...new Set(payload.metadataKeys.map(key => requireText(key, "metadata key", { maxLength: 200 })))];
+  if (fields.length === 0 && metadataKeys.length === 0) {
+    throw new DomainError("validation", "Redaction must select at least one content field or metadata key.", { operationId, recordId });
+  }
+  const requestHash = digest({ operation: "redact", recordId, scope, baseRevision, fields, metadataKeys });
+
+  return operationResult(operationId, requestHash, () => {
+    const current = currentRecordIncludingDeleted(recordId, scope);
+    if (!isRevisionForRecord(recordId, baseRevision)) {
+      throw new DomainError("not_found", "base_revision does not belong to this local record.", { operationId, recordId });
+    }
+    if (baseRevision !== String(current.current_revision_id)) {
+      throw new DomainError("conflict", "Redaction requires the current revision as its base.", { operationId, recordId });
+    }
+
+    const redactMetadata = metadataJson => {
+      let metadata;
+      try {
+        metadata = JSON.parse(metadataJson);
+      } catch {
+        throw new DomainError("corrupt_store", safeMessage("corrupt_store"), { operationId, recordId });
+      }
+      if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+        throw new DomainError("corrupt_store", safeMessage("corrupt_store"), { operationId, recordId });
+      }
+      for (const key of metadataKeys) delete metadata[key];
+      return JSON.stringify(metadata);
+    };
+    const priorRevisions = database.prepare("SELECT * FROM revisions WHERE record_id = ?").all(recordId);
+    if (priorRevisions.length === 0) throw new DomainError("corrupt_store", safeMessage("corrupt_store"), { operationId, recordId });
+    const updateRevision = database.prepare(`
+      UPDATE revisions SET title = ?, body = ?, metadata_json = ?, content_hash = ?
+      WHERE revision_id = ?
+    `);
+
+    retireOperationsForRecord(recordId);
+    for (const revision of priorRevisions) {
+      const title = fields.includes("title") ? "" : String(revision.title);
+      const body = fields.includes("body") ? "" : String(revision.body);
+      const metadataJson = redactMetadata(String(revision.metadata_json));
+      updateRevision.run(title, body, metadataJson,
+        hashContent(title, body, metadataJson, Number(revision.is_deleted) === 1), String(revision.revision_id));
+    }
+
+    const title = fields.includes("title") ? "" : String(current.current_title);
+    const body = fields.includes("body") ? "" : String(current.current_body);
+    const metadataJson = redactMetadata(String(current.metadata_json));
+    const localRevision = nextLocalRevision(recordId);
+    const revisionId = randomUUID();
+    const now = new Date().toISOString();
+    const isDeleted = current.deleted_at !== null;
+    const state = isDeleted ? "deleted" : "current";
+    database.prepare("UPDATE revisions SET revision_state = 'historical' WHERE revision_id = ? AND revision_state = 'current'")
+      .run(String(current.current_revision_id));
+    database.prepare(`
+      INSERT INTO revisions(
+        revision_id, record_id, local_revision, parents_json, base_revision, operation_id,
+        content_hash, title, body, metadata_json, revision_state, is_deleted, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(revisionId, recordId, localRevision, JSON.stringify([String(current.current_revision_id)]),
+      baseRevision, operationId, hashContent(title, body, metadataJson, isDeleted), title, body, metadataJson,
+      state, isDeleted ? 1 : 0, now);
+    database.prepare(`
+      UPDATE records
+      SET local_revision = ?, current_revision_id = ?, current_title = ?, current_body = ?,
+          metadata_json = ?, updated_at = ?
+      WHERE record_id = ? AND owner_ref = ? AND collection_ref = ?
+    `).run(localRevision, revisionId, title, body, metadataJson, now, recordId, scope.ownerRef, scope.collectionRef);
+    database.prepare(`
+      INSERT INTO deletion_barriers(
+        barrier_id, record_id, barrier_revision_id, operation_id, barrier_kind, created_at, cleared_at
+      ) VALUES (?, ?, ?, ?, 'redact', ?, NULL)
+    `).run(randomUUID(), recordId, revisionId, operationId, now);
+    return makeReceipt(operationId, recordId, localRevision, revisionId, "redacted");
   }, recordId);
 }
 
@@ -612,6 +942,10 @@ function handleRequest(operation, payload) {
     case "get": return getRecord(payload);
     case "update": return updateRecord(payload);
     case "softDelete": return softDeleteRecord(payload);
+    case "history": return historyRecord(payload);
+    case "restore": return restoreRecord(payload);
+    case "hardDelete": return hardDeleteRecord(payload);
+    case "redact": return redactRecord(payload);
     case "search": return searchRecords(payload);
     case "close":
       database.close();

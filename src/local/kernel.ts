@@ -48,12 +48,52 @@ export type LocalSoftDeleteInput = {
   operationId?: string;
 };
 
+export type LocalRestoreInput = {
+  fromRevisionId: string;
+  baseRevision: string;
+  operationId?: string;
+};
+
+export type LocalHardDeleteInput = {
+  baseRevision: string;
+  operationId?: string;
+};
+
+export type LocalRedactInput = {
+  baseRevision: string;
+  fields?: Array<"title" | "body">;
+  metadataKeys?: string[];
+  operationId?: string;
+};
+
+export type LocalHistoryOptions = {
+  limit?: number;
+  beforeLocalRevision?: number | null;
+};
+
 export type LocalRevision = {
   revisionId: string;
   parents: string[];
   baseRevision: string | null;
   operationId: string;
   contentHash: string;
+};
+
+export type LocalRevisionState = "current" | "historical" | "conflict" | "deleted";
+
+export type LocalHistoryRevision = LocalRevision & {
+  localRevision: number;
+  state: LocalRevisionState;
+  isDeleted: boolean;
+  title: string;
+  body: string;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+};
+
+export type LocalHistoryPage = {
+  revisions: LocalHistoryRevision[];
+  nextBeforeLocalRevision: number | null;
 };
 
 export type LocalRecord = {
@@ -88,8 +128,19 @@ export type LocalWriteReceipt = {
   storageStatus: "committed_local";
   syncStatus: "local_only";
   indexStatus: "ready";
-  writeKind: "created" | "versioned_update" | "unversioned_write" | "soft_deleted" | "conflict";
+  writeKind: "created" | "versioned_update" | "unversioned_write" | "soft_deleted" | "conflict" | "restored" | "redacted";
   error: LocalConflict | null;
+};
+
+export type LocalHardDeleteReceipt = {
+  operationId: string;
+  recordId: string;
+  barrierId: string;
+  storageStatus: "committed_local";
+  syncStatus: "local_only";
+  indexStatus: "ready";
+  writeKind: "hard_deleted";
+  error: null;
 };
 
 export type LocalErrorReceipt = {
@@ -377,6 +428,65 @@ export class LocalMemoryKernel {
       operationId: input.operationId ?? randomUUID(),
       recordId,
       baseRevision: input.baseRevision ?? null,
+      scope: deriveScope(this.vaultId, identity),
+    });
+  }
+
+  async history(
+    recordId: string,
+    identity: TrustedLocalIdentityContext,
+    options: LocalHistoryOptions = {},
+  ): Promise<LocalHistoryPage> {
+    await this.readyPromise;
+    return await this.request<LocalHistoryPage>("history", {
+      recordId,
+      limit: options.limit,
+      beforeLocalRevision: options.beforeLocalRevision,
+      scope: deriveScope(this.vaultId, identity),
+    });
+  }
+
+  async restore(
+    recordId: string,
+    input: LocalRestoreInput,
+    identity: TrustedLocalIdentityContext,
+  ): Promise<LocalWriteReceipt> {
+    await this.readyPromise;
+    return await this.request<LocalWriteReceipt>("restore", {
+      operationId: input.operationId ?? randomUUID(),
+      recordId,
+      fromRevisionId: input.fromRevisionId,
+      baseRevision: input.baseRevision,
+      scope: deriveScope(this.vaultId, identity),
+    });
+  }
+
+  async hardDelete(
+    recordId: string,
+    input: LocalHardDeleteInput,
+    identity: TrustedLocalIdentityContext,
+  ): Promise<LocalHardDeleteReceipt> {
+    await this.readyPromise;
+    return await this.request<LocalHardDeleteReceipt>("hardDelete", {
+      operationId: input.operationId ?? randomUUID(),
+      recordId,
+      baseRevision: input.baseRevision,
+      scope: deriveScope(this.vaultId, identity),
+    });
+  }
+
+  async redact(
+    recordId: string,
+    input: LocalRedactInput,
+    identity: TrustedLocalIdentityContext,
+  ): Promise<LocalWriteReceipt> {
+    await this.readyPromise;
+    return await this.request<LocalWriteReceipt>("redact", {
+      operationId: input.operationId ?? randomUUID(),
+      recordId,
+      baseRevision: input.baseRevision,
+      fields: input.fields ?? [],
+      metadataKeys: input.metadataKeys ?? [],
       scope: deriveScope(this.vaultId, identity),
     });
   }
