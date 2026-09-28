@@ -1075,8 +1075,14 @@ describe("local mode MemoryService routing", () => {
 
     const runtime = createXMemoMemoryRuntime(alice.api as never);
     const { manager } = await runtime.getMemorySearchManager({ cfg: alice.api.config, agentId: "agent-local" } as never);
-    expect(await manager?.search("violet lantern", { sessionKey })).toHaveLength(1);
+    const results = await manager?.search("violet lantern", { sessionKey });
+    expect(results).toHaveLength(1);
+    await expect(manager!.readFile({ relPath: results![0]!.path })).resolves.toMatchObject({
+      text: "direct owner violet lantern phrase",
+    });
     expect(await manager?.search("violet lantern", { sessionKey: "agent:agent-local:telegram:direct:bob" })).toEqual([]);
+    await expect(manager!.readFile({ relPath: `local/${String((stored.details as Record<string, unknown>).id)}` }))
+      .rejects.toMatchObject({ category: "not_found" });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 

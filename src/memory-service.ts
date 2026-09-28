@@ -126,8 +126,8 @@ export class LocalProvider {
     return this.kernel.search(query, identity, limit);
   }
 
-  get(id: string): Promise<LocalRecord> {
-    return this.kernel.get(id, this.identity);
+  get(id: string, identity = this.identity): Promise<LocalRecord> {
+    return this.kernel.get(id, identity);
   }
 
   create(input: { body: string; title?: string; metadata?: Record<string, unknown> }): Promise<LocalWriteReceipt> {
@@ -248,8 +248,8 @@ export class MemoryService {
     return this.localProvider().search(query, limit, identity);
   }
 
-  localGet(id: string): Promise<LocalRecord> {
-    return this.localProvider().get(id);
+  localGet(id: string, identity?: TrustedLocalIdentityContext): Promise<LocalRecord> {
+    return this.localProvider().get(id, identity);
   }
 
   localCreate(input: { body: string; title?: string; metadata?: Record<string, unknown> }): Promise<LocalWriteReceipt> {
