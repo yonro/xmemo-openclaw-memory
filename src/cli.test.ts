@@ -407,7 +407,9 @@ describe("xmemo local CLI", () => {
       const exportResult = JSON.parse(String(captured.pop())) as Record<string, unknown>;
       expect(exportResult).toMatchObject({ records: 1, outputPath });
       expect(readFileSync(outputPath, "utf8")).toContain("cli export violet note");
-      expect(statSync(outputPath).mode & 0o777).toBe(0o600);
+      if (process.platform !== "win32") {
+        expect(statSync(outputPath).mode & 0o777).toBe(0o600);
+      }
 
       const cacheBytes = JSON.stringify({ version: 1, entries: {} });
       const outboxBytes = JSON.stringify({ version: 1, records: {} });
