@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { closeSync, existsSync, fsyncSync, openSync, writeSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -48,7 +48,7 @@ function spawnVitestHelper(mode: string, params: Record<string, string>): ChildH
   environment.XMEMO_LOCAL_KERNEL_HELPER_MODE = mode;
   environment.XMEMO_LOCAL_KERNEL_HELPER_PARAMS = JSON.stringify(params);
 
-  const child = spawn(process.execPath, [cliPath, "run", testFile, "--reporter=dot", "--no-color"], {
+  const child = spawn(process.execPath, [cliPath, "run", testFile, "--pool=threads", "--reporter=dot", "--no-color"], {
     cwd: process.cwd(),
     env: environment,
     stdio: ["ignore", "pipe", "pipe"],
@@ -82,7 +82,36 @@ async function readJsonFile<T>(path: string, child?: ChildProcess): Promise<T> {
 }
 
 function parseLines<T>(text: string): T[] {
-  return text.split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line) as T);
+  const lines = text.split(/\r?\n/);
+  if (!text.endsWith("\n")) lines.pop();
+  return lines.filter(Boolean).map(line => JSON.parse(line) as T);
+}
+
+async function inspectCrashDatabase(dataDirectory: string): Promise<string> {
+  const databasePath = resolveLocalVaultPath({ dataDirectory });
+  const files = await Promise.all([databasePath, `${databasePath}-wal`, `${databasePath}-shm`].map(async path => {
+    try {
+      return `${path.split(/[\\/]/).at(-1)}=${(await stat(path)).size} bytes`;
+    } catch {
+      return `${path.split(/[\\/]/).at(-1)}=missing`;
+    }
+  }));
+  let sqlite = "unreadable";
+  try {
+    const database = new DatabaseSync(databasePath, { readOnly: true });
+    try {
+      const integrity = database.prepare("PRAGMA quick_check(1)").get();
+      const userVersion = database.prepare("PRAGMA user_version").get();
+      const records = database.prepare("SELECT count(*) AS count FROM records").get();
+      sqlite = `quick_check=${String(integrity?.quick_check)} user_version=${String(userVersion?.user_version)} records=${String(records?.count)}`;
+    } finally {
+      database.close();
+    }
+  } catch (error) {
+    sqlite = `read_error=${error instanceof Error ? error.message : String(error)}`;
+  }
+  const names = await readdir(dataDirectory).catch(() => []);
+  return `files=[${files.join(", ")}] entries=${JSON.stringify(names)} sqlite={${sqlite}}`;
 }
 
 if (helperMode === "cross-process-writer") {
@@ -133,7 +162,7 @@ if (helperMode === "cross-process-writer") {
 } else {
   const dataDirectories: string[] = [];
   const kernels: LocalMemoryKernel[] = [];
-  const childProcesses: ChildProcess[] = [];
+  const childProcesses: ChildHandle[] = [];
 
   async function openKernel(dataDirectory: string, busyTimeoutMs = 2_000): Promise<LocalMemoryKernel> {
     const kernel = await LocalMemoryKernel.open({ dataDirectory, busyTimeoutMs });
@@ -142,8 +171,13 @@ if (helperMode === "cross-process-writer") {
   }
 
   afterEach(async () => {
-    for (const child of childProcesses.splice(0)) {
-      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    const children = childProcesses.splice(0);
+    for (const handle of children) {
+      if (handle.child.exitCode === null && handle.child.signalCode === null) handle.child.kill("SIGKILL");
+    }
+    await Promise.allSettled(children.map(handle => waitForExit(handle, 30_000)));
+    if (children.some(handle => handle.child.pid !== undefined && handle.child.exitCode === null && handle.child.signalCode === null)) {
+      throw new Error("A local-kernel helper is still running; leaving its data directory intact.");
     }
     await Promise.all(kernels.splice(0).map(kernel => kernel.close().catch(() => {})));
     for (const directory of dataDirectories.splice(0)) await rm(directory, { recursive: true, force: true });
@@ -203,11 +237,12 @@ if (helperMode === "cross-process-writer") {
         createReceiptFile: childCreateReceiptFile,
         updateReceiptFile: childUpdateReceiptFile,
       });
-      childProcesses.push(child.child);
+      childProcesses.push(child);
 
       try {
         const ready = await readJsonFile<{ pid: number }>(readyFile, child.child);
         expect(ready.pid).not.toBe(process.pid);
+        expect(ready.pid).toBe(child.child.pid);
         const parentCreatePromise = parentKernel.create({
           body: "cross-process parent-created record",
           operationId: `${runId}-parent-create`,
@@ -247,16 +282,24 @@ if (helperMode === "cross-process-writer") {
       }
     }, 60_000);
 
+    it("ignores only an unterminated trailing acknowledgement line", () => {
+      const complete = JSON.stringify({ runId: "complete", recordId: "known" });
+      expect(parseLines<{ runId: string; recordId: string }>(`${complete}\n{"runId":"partial`)).toEqual([
+        { runId: "complete", recordId: "known" },
+      ]);
+    });
+
     it("preserves every acknowledged record across five randomized SIGKILL process crashes", async () => {
-      const dataDirectory = await mkdtemp(join(tmpdir(), "xmemo-local-crash-durability-"));
-      dataDirectories.push(dataDirectory);
-      const acknowledgementFile = join(dataDirectory, "acknowledged.jsonl");
       const allAcknowledged: Array<{ runId: string; pid: number; recordId: string; body: string }> = [];
+      let recoveredCount = 0;
 
       for (let run = 0; run < 5; run += 1) {
+        const dataDirectory = await mkdtemp(join(tmpdir(), "xmemo-local-crash-durability-"));
+        dataDirectories.push(dataDirectory);
+        const acknowledgementFile = join(dataDirectory, "acknowledged.jsonl");
         const runId = `crash-${process.version.replace(/[^a-z0-9]/gi, "")}-${run}-${Date.now()}`;
         const child = spawnVitestHelper("crash-durability-writer", { dataDirectory, acknowledgementFile, runId });
-        childProcesses.push(child.child);
+        childProcesses.push(child);
         const line = await waitForFile(acknowledgementFile, child.child, 45_000);
         const recordsForRun = parseLines<{ runId: string; pid: number; recordId: string; body: string }>(line)
           .filter(record => record.runId === runId);
@@ -270,6 +313,7 @@ if (helperMode === "cross-process-writer") {
         }
         expect(recordsForRun.length, `run ${run} must acknowledge a write before SIGKILL`).toBeGreaterThan(0);
         expect(recordsForRun[0].pid).not.toBe(process.pid);
+        expect(recordsForRun[0].pid).toBe(child.child.pid);
         await sleep(Math.floor(Math.random() * 75));
         child.child.kill("SIGKILL");
         const exit = await waitForExit(child, 30_000);
@@ -277,17 +321,26 @@ if (helperMode === "cross-process-writer") {
 
         const afterKill = parseLines<{ runId: string; pid: number; recordId: string; body: string }>(
           await readFile(acknowledgementFile, "utf8"),
-        );
-        allAcknowledged.splice(0, allAcknowledged.length, ...afterKill);
-        const recovered = await openKernel(dataDirectory);
-        for (const acknowledged of allAcknowledged) {
+        ).filter(record => record.runId === runId);
+        expect(afterKill.length).toBeGreaterThan(0);
+        allAcknowledged.push(...afterKill);
+        let recovered: LocalMemoryKernel;
+        try {
+          recovered = await openKernel(dataDirectory);
+        } catch (error) {
+          throw new Error(`Could not reopen crash run ${run}; acknowledged=${afterKill.length}; ${await inspectCrashDatabase(dataDirectory)}`, { cause: error });
+        }
+        for (const acknowledged of afterKill) {
           const record = await recovered.get(acknowledged.recordId, directIdentity);
           expect(record.body).toBe(acknowledged.body);
+          recoveredCount += 1;
         }
         await recovered.close();
       }
 
       expect(allAcknowledged.length).toBeGreaterThanOrEqual(5);
+      expect(recoveredCount).toBe(allAcknowledged.length);
+      console.info(`[kernel crash durability] node=${process.version} killRuns=5 acknowledged=${allAcknowledged.length} recovered=${recoveredCount} evidence=process-crash-only`);
     }, 180_000);
 
     it("fails closed on runtime corruption without changing damaged database bytes", async () => {
