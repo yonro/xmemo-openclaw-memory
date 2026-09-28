@@ -55,6 +55,9 @@ jobs:
       - name: Install locked dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Build package and local SQLite Worker
+        run: pnpm build
+
       - name: Run SQLite platform probe
         run: node probes/sqlite/probe.mjs
 
@@ -65,6 +68,14 @@ jobs:
       - name: Run disposable macOS disk-image probe
         if: runner.os == 'macOS'
         run: sh probes/sqlite/disk-full-macos.sh
+
+      - name: Run LocalMemoryKernel disk-full recovery on Linux tmpfs
+        if: runner.os == 'Linux'
+        run: sh probes/sqlite/disk-full-kernel-linux.sh
+
+      - name: Run LocalMemoryKernel disk-full recovery on macOS disk image
+        if: runner.os == 'macOS'
+        run: sh probes/sqlite/disk-full-kernel-macos.sh
 
       - name: Test
         run: pnpm test

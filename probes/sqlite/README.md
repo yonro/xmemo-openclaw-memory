@@ -20,4 +20,6 @@ The disk-full script creates and mounts a disposable 96 MiB HFS+ disk image unde
 
 On Linux, the CI matrix runs `sh probes/sqlite/disk-full-linux.sh`. It mounts a disposable 128 MiB tmpfs under the system temporary directory, leaves a 2 MiB reserve, and uses the same SQLite full-disk assertions. If the runner disallows the mount or the available space cannot be determined, the step reports the probe as unavailable and does not write against the host filesystem.
 
+The P1b LocalMemoryKernel API proof runs from the same Node matrix after `pnpm build`: `disk-full-kernel-linux.sh` mounts its own disposable tmpfs, and `disk-full-kernel-macos.sh` creates its own disposable HFS+ image. `kernel-disk-full.mjs` refuses to run unless the supplied volume contains `.xmemo-disposable-volume`; it verifies a committed API write stays readable while the volume is full, a failing API write returns `storage_full/not_committed`, and writes succeed again after removing the filler file. Windows does not run this volume-specific proof because this workflow does not create disposable Windows volumes.
+
 Node 22.19.0, 24.21.0, and the local Node version are the runtime matrix used for ADR-L01. Run the same command with each executable on a native target platform. Do not infer Linux or Windows support from macOS results.

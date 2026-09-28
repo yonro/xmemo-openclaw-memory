@@ -190,6 +190,13 @@ function requireScope(scope) {
   return { ownerRef, collectionRef };
 }
 
+function assertDatabaseIntegrity() {
+  const integrity = database.prepare("PRAGMA quick_check(1)").get();
+  if (String(integrity?.quick_check ?? "") !== "ok") {
+    throw new DomainError("corrupt_store", safeMessage("corrupt_store"));
+  }
+}
+
 function initializeDatabase() {
   mkdirSync(dirname(databasePath), { recursive: true, mode: 0o700 });
   try { chmodSync(dirname(databasePath), 0o700); } catch { /* Best effort on Windows. */ }
@@ -233,6 +240,10 @@ function initializeDatabase() {
     }
   }
 
+  // Check existing pages before changing journal mode or other persistent settings.
+  // A damaged vault must remain byte-for-byte intact when open fails closed.
+  assertDatabaseIntegrity();
+
   database.exec("PRAGMA journal_mode = WAL");
   database.exec("PRAGMA synchronous = FULL");
   database.exec("PRAGMA foreign_keys = ON");
@@ -271,10 +282,7 @@ function initializeDatabase() {
   if (storedVersion !== SCHEMA_VERSION || !values.get("vault_id")) {
     throw new DomainError("corrupt_store", safeMessage("corrupt_store"));
   }
-  const integrity = database.prepare("PRAGMA quick_check(1)").get();
-  if (String(integrity?.quick_check ?? "") !== "ok") {
-    throw new DomainError("corrupt_store", safeMessage("corrupt_store"));
-  }
+  assertDatabaseIntegrity();
   try { chmodSync(databasePath, 0o600); } catch { /* Best effort on Windows. */ }
   return { vaultId: values.get("vault_id"), schemaVersion: storedVersion };
 }

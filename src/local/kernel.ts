@@ -12,7 +12,8 @@ export type LocalErrorCategory =
   | "validation"
   | "not_found"
   | "identity_denied"
-  | "unsupported_schema_version";
+  | "unsupported_schema_version"
+  | "worker_failure";
 
 export type TrustedLocalIdentityContext = {
   /** Host-derived identity only. Never copy this value from request text or metadata. */
@@ -278,14 +279,19 @@ export class LocalMemoryKernel {
       if (raw.error) pending.reject(errorFromWire(raw.error));
       else pending.resolve(raw.value);
     });
-    this.worker.on("error", (error: Error) => this.fail(error));
+    this.worker.on("error", () => this.fail(new LocalKernelError({
+      storageStatus: "unknown",
+      syncStatus: "local_only",
+      indexStatus: "unknown",
+      error: { category: "worker_failure", message: "Local storage worker crashed; the operation outcome may be unknown." },
+    })));
     this.worker.on("exit", (code: number) => {
-      if (this.closed || code === 0) return;
-      this.fail(this.failed ?? new LocalKernelError({
+      if (this.closed || this.failed) return;
+      this.fail(new LocalKernelError({
         storageStatus: "unknown",
         syncStatus: "local_only",
         indexStatus: "unknown",
-        error: { category: "corrupt_store", message: `Local storage worker exited unexpectedly (${code}).` },
+        error: { category: "worker_failure", message: `Local storage worker exited unexpectedly (${code}); operation outcome may be unknown.` },
       }));
     });
   }
@@ -433,6 +439,7 @@ export class LocalMemoryKernel {
   }
 
   private fail(error: Error): void {
+    if (this.failed) return;
     this.failed = error;
     this.rejectReady(error);
     for (const request of this.pending.values()) request.reject(error);
