@@ -18,4 +18,6 @@ sh probes/sqlite/disk-full-macos.sh
 
 The disk-full script creates and mounts a disposable 96 MiB HFS+ disk image under the system temporary directory, fills it to a 2 MiB reserve, checks for SQLite's explicit full-disk error, then detaches and deletes the image. It never uses a repository or user data path. On other operating systems, disk exhaustion must be exercised with that platform's disposable-volume tooling; do not substitute an unbounded write to the host filesystem.
 
+On Linux, the CI matrix runs `sh probes/sqlite/disk-full-linux.sh`. It mounts a disposable 128 MiB tmpfs under the system temporary directory, leaves a 2 MiB reserve, and uses the same SQLite full-disk assertions. If the runner disallows the mount or the available space cannot be determined, the step reports the probe as unavailable and does not write against the host filesystem.
+
 Node 22.19.0, 24.21.0, and the local Node version are the runtime matrix used for ADR-L01. Run the same command with each executable on a native target platform. Do not infer Linux or Windows support from macOS results.

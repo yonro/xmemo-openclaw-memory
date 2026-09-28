@@ -1,0 +1,77 @@
+name: SQLite platform probe
+
+on:
+  push:
+    branches:
+      - ci/sqlite-platform-probe
+    paths:
+      - .github/workflows/sqlite-platform-probe.yml
+      - probes/sqlite/**
+      - package.json
+      - pnpm-lock.yaml
+      - index.ts
+      - index.test.ts
+      - src/**
+      - test/**
+      - tsconfig*.json
+      - vitest.config.ts
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    if: github.ref == 'refs/heads/ci/sqlite-platform-probe'
+    name: ${{ matrix.os }} / Node ${{ matrix.node-version }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - ubuntu-24.04-arm
+          - windows-latest
+          - macos-latest
+        node-version:
+          - 22.19.0
+          - 24.x
+          - 26.10.0
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+          run_install: false
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run SQLite platform probe
+        run: node probes/sqlite/probe.mjs
+
+      - name: Run disposable Linux tmpfs disk-full probe
+        if: runner.os == 'Linux'
+        run: sh probes/sqlite/disk-full-linux.sh
+
+      - name: Run disposable macOS disk-image probe
+        if: runner.os == 'macOS'
+        run: sh probes/sqlite/disk-full-macos.sh
+
+      - name: Test
+        run: pnpm test
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
