@@ -148,7 +148,7 @@ async function processLockProbe(directory) {
   setup.exec('PRAGMA journal_mode = WAL; CREATE TABLE lock_probe (value TEXT NOT NULL)');
   setup.close();
 
-  const holder = await waitForLine(['--role', 'lock-holder', file, '700'], line => line === 'READY');
+  const holder = await waitForLine(['--role', 'lock-holder', file, '2500'], line => line === 'READY');
   await holder.ready;
   const readStarted = performance.now();
   const reader = dbOpen(file);
