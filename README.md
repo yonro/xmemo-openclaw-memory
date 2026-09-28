@@ -2,24 +2,27 @@
 
 [![XMemo logo](./assets/icon.png)](https://xmemo.dev)
 
-**Native, user-owned long-term memory for OpenClaw agents.**
+**A native OpenClaw memory plugin for persistent cloud memory and cross-agent recall.**
 
-Replace the active OpenClaw memory backend with XMemo for durable recall,
-cross-agent context, continuity tools, and governed cloud memory.
+XMemo for OpenClaw connects your agent to XMemo for long-term memory, semantic
+search, exact memory reads, TODOs, restart snapshots, and audit tools. The
+current documented version is **1.0.18** and requires an authenticated XMemo
+service. Standalone local memory and local/cloud Hybrid are planned capabilities.
 
 | Specification | Details |
 | :--- | :--- |
 | **Plugin ID** | `xmemo-memory` (Native `kind: "memory"` provider) |
 | **Compatibility** | OpenClaw `≥ 2026.6.9` |
-| **Tools Included** | 15 native memory & governance tools |
-| **Data Ownership** | User-owned, private cloud or local storage |
+| **Tools Included** | 16 native memory & governance tools |
+| **Storage today** | XMemo service; local recall cache and write outbox |
+| **Local / Hybrid** | Planned; not available as standalone memory modes in 1.0.18 |
 | **Cross-Agent** | Shared recall with Claude, ChatGPT, Codex, Hermes, Cursor |
 | **Official Hub** | [ClawHub Plugin](https://clawhub.ai/plugins/@xmemo/openclaw-memory) · [Companion Skill](https://clawhub.ai/xmemo/xmemo) |
 | **Source Code** | [GitHub Repository](https://github.com/yonro/xmemo-openclaw-memory) |
 
 [English](README.md) · [简体中文](README_CN.md)
 
-[Quick start](#quick-start) · [Architecture](#architecture) · [Tools](#tool-catalog) · [Configuration](#configuration) · [Operations](#operations) · [Security](#security-and-privacy)
+[Quick start](#quick-start) · [Architecture](#architecture) · [Tools](#tool-catalog) · [Configuration](#configuration) · [Operations](#operations) · [Security](#security-and-privacy) · [FAQ](#frequently-asked-questions) · [Product facts](docs/PRODUCT-FACTS.md)
 
 ---
 
@@ -30,12 +33,28 @@ cross-agent context, continuity tools, and governed cloud memory.
 
 The plugin talks directly to XMemo. No local embedding model or vector database
 is required. Memories written by approved XMemo clients can be recalled across
-OpenClaw, ChatGPT, Hermes, Codex, Claude, Cursor, and other connected agents.
+OpenClaw, ChatGPT, Hermes, Codex, Claude, Cursor, and other connected agents,
+subject to the credential permissions and configured read scope.
 
 > [!NOTE]
 > This is an external OpenClaw plugin distributed through
 > [ClawHub](https://clawhub.ai/plugins/@xmemo/openclaw-memory). It is not bundled
 > in the default OpenClaw release.
+
+## Available now and planned
+
+| Capability | 1.0.18 | Planned direction |
+| --- | --- | --- |
+| Cloud long-term memory and semantic recall | Available with a configured XMemo service | Retain compatibility and improve reliability |
+| Cross-agent memory | Available within authorized XMemo scopes | Explicit identity and sharing controls |
+| Local state | Recall cache and an outbox for supported writes | Transactional local memory database |
+| Standalone local memory without cloud credentials | Not available | Local reads, writes, full-text and semantic search |
+| Local/cloud Hybrid | Not available | Local commits, background sync, conflict and deletion handling |
+
+The local cache is not a complete copy of your memory and cannot search unseen
+queries offline. The Hybrid direction is a development plan, not an installation
+option or a performance claim. See [versioned product facts](docs/PRODUCT-FACTS.md)
+for the current capability boundary.
 
 ## Architecture
 
@@ -48,7 +67,7 @@ OpenClaw, ChatGPT, Hermes, Codex, Claude, Cursor, and other connected agents.
 | **OpenClaw role** | Native `kind: "memory"` provider |
 | **Minimum host** | OpenClaw `2026.6.9` |
 | **Hosted service** | `https://xmemo.dev` |
-| **Tools** | 15 native memory and governance tools |
+| **Tools** | 16 native memory and governance tools |
 | **CLI** | `openclaw xmemo` |
 
 ## Why this plugin
@@ -61,8 +80,9 @@ OpenClaw, ChatGPT, Hermes, Codex, Claude, Cursor, and other connected agents.
   in XMemo.
 - **Operational continuity** — TODOs, timeline events, and restart snapshots are
   available beside core memory operations.
-- **Resilient by default** — a user-scoped recall cache and write outbox absorb
-  transient network failures.
+- **Limited offline fallback** — eligible search requests can use previously
+  cached results; supported writes can enter a local outbox during transient
+  failures. See the [limits](#local-cache-and-write-outbox) before relying on it.
 - **Explicit automation** — auto-capture is opt-in, permission-gated, filtered,
   and secret-aware.
 
@@ -87,6 +107,18 @@ $xmemoKey = Read-Host "XMemo API key"
 $xmemoKey | openclaw xmemo setup --stdin
 Remove-Variable xmemoKey
 ```
+
+### Sign in with browser authorization
+
+After installation, you can authorize the plugin without copying an API key:
+
+```bash
+openclaw xmemo login
+openclaw xmemo status
+```
+
+Open the URL printed by the command and confirm the displayed device code in
+your browser. The command saves the credential and selects the memory slot.
 
 ### Install from npm
 
@@ -113,7 +145,7 @@ openclaw xmemo status
 
 ## Tool catalog
 
-The plugin registers 15 tools. `memory_*` tools are used by the OpenClaw agent
+The plugin registers 16 tools. `memory_*` tools are used by the OpenClaw agent
 during a turn; they are not standalone shell commands.
 
 ### Core memory
@@ -121,7 +153,8 @@ during a turn; they are not standalone shell commands.
 | Tool | Purpose |
 | --- | --- |
 | `memory_search` | Semantic recall across visible XMemo memory |
-| `memory_get` | Fetch an exact memory by reference |
+| `memory_get` | Read a memory by the ID or path returned by native search |
+| `xmemo_memory_get` | Read a specific XMemo record by ID or path, with line pagination |
 | `memory_store` | Save durable memory |
 | `memory_forget` | Delete an exact memory |
 | `xmemo_memory_list` | Browse or search memories using query/path hints |
@@ -147,6 +180,16 @@ during a turn; they are not standalone shell commands.
 | `xmemo_audit_consolidation` | Read authorized audit consolidation |
 
 Ledger and audit tools require the corresponding API-key scopes.
+
+The [bilingual tool schema catalog](docs/TOOL-CATALOG.md) records the live
+parameter names, required fields, constraints, defaults, and descriptions. For
+`memory_search`, `minScore` accepts a real similarity threshold from 0 to 1;
+results without a known score do not satisfy that threshold. The native host
+search manager reports `searchCapabilities` with `supportedSources: ["memory"]`,
+`sessionKeyFilter: "unsupported"`, and `unsupportedSources: ["sessions"]`.
+Runtime inspection also reports `configured`, `connected`, and, when present,
+`lastError`. Its `backend` is `builtin` as OpenClaw's compatibility
+identifier; `provider` is `xmemo-memory` for this plugin.
 
 ## Native plugin, Skill, and MCP
 
@@ -217,7 +260,7 @@ Configuration belongs under
 | `autoCapture` | `false` | Opt-in high-signal capture |
 | `captureMaxChars` | `500` | Maximum eligible capture length |
 | `recallMaxItems` | `8` | Maximum recalled items |
-| `recallMaxTokens` | `4000` | Context-pack token budget |
+| `recallMaxTokens` | `12000` | Context-pack token budget |
 
 Previous tagged configurations remain compatible. The deprecated `token` field
 is still accepted as an alias for `apiKey`; new setup writes `apiKey`.
@@ -283,14 +326,15 @@ default to `X-API-Key` unless `authMode` is set explicitly.
 Non-localhost `http://` service URLs are rejected. Use HTTPS outside local
 development.
 
-## Local resilience
+## Local cache and write outbox
 
-The plugin maintains a small user-scoped recall cache and write outbox:
+The plugin maintains a service-and-credential-scoped recall cache and write
+outbox. This is cloud fallback state, not a standalone local memory engine:
 
 | File | Behavior |
 | --- | --- |
-| `recall-cache.json` | Five-minute fresh cache with up to 24-hour stale fallback |
-| `write-outbox.json` | Queues transiently failed writes with retry backoff |
+| `recall-cache.json` | Previously fetched recall/search results; five-minute freshness marker and up to 24-hour fallback age |
+| `write-outbox.json` | Queues supported writes, including `memory_store`, on transient failure |
 
 Storage root:
 
@@ -302,8 +346,16 @@ The scope hash is derived from the service URL and a credential hash; the
 credential itself is never written to the path. Directories and files use
 owner-only permissions where supported.
 
-Idempotent writes can replay automatically. Non-idempotent writes are held for
-manual handling to avoid duplicate side effects.
+Outbox replay is triggered opportunistically by successful requests through the
+resilient client; it is not a continuous background synchronization service.
+Not every write path uses the outbox. A queued result is not confirmation that
+the cloud saved the memory, and there is currently no outbox management CLI.
+
+The JSON state contains plaintext memory content and queries; file permissions
+are not encryption. The current cache/outbox is not a backup and does not provide
+transactional multi-process durability. Avoid sharing its data directory between
+concurrent plugin processes. A later Hybrid engine must meet separate recovery
+and synchronization acceptance criteria before it is documented as available.
 
 ## Auto-capture
 
@@ -338,13 +390,13 @@ memory trigger. At most three eligible messages are captured per processed turn.
 ```bash
 openclaw xmemo setup --stdin
 openclaw xmemo setup --env XMEMO_KEY
-openclaw xmemo setup --dry-run
+openclaw xmemo setup --env XMEMO_KEY --dry-run
 openclaw xmemo status
 openclaw xmemo status --json
 ```
 
-`openclaw xmemo login` and `openclaw xmemo key set` remain deprecated aliases
-for compatibility.
+`openclaw xmemo login` is the supported browser-authorization command. Only
+`openclaw xmemo key set` is a deprecated alias for `setup`.
 
 ### Health check
 
@@ -365,8 +417,12 @@ Inspect the loaded plugin runtime:
 openclaw plugins inspect xmemo-memory --runtime --json
 ```
 
-The output should list the 15 tools, the `xmemo` CLI, memory capability, and
-registered lifecycle hooks.
+The output should list the 16 tools, the `xmemo` CLI, memory capability, and
+registered lifecycle hooks. Its provider status includes `configured`,
+`connected`, `searchCapabilities`, and optional `lastError`. The search manager
+supports `memory` only; session-key filtering and session search are unsupported.
+OpenClaw's `backend` field is `builtin` for compatibility; `provider` is
+`xmemo-memory` for this plugin.
 
 ### Retrieval troubleshooting
 
@@ -374,7 +430,7 @@ An empty semantic search result does not always prove absence. Retry with:
 
 - alternate wording or synonyms
 - the saved path
-- the source agent
+- source-agent words as query hints, not as an authorization filter
 - an approximate time
 - `xmemo_memory_list` for path-oriented browsing
 - `debug: true` for query expansion and tracing
@@ -386,15 +442,15 @@ An empty semantic search result does not always prove absence. Retry with:
 | Feature | `xmemo_memory_get` | `memory_search` / `xmemo_memory_list` |
 | :--- | :--- | :--- |
 | **Purpose** | Authoritative single-memory retrieval | Heuristic discovery & exploration |
-| **Resolution** | Direct `/explain` endpoint projection | Multi-strategy L1 semantic recall + L2 search |
-| **Fallback** | Authoritative only; **never** falls back to `results[0]` or stale search cache | Falls back to transient offline cache during network outages |
+| **Resolution** | Direct `/explain` read when possible, then live search matched by ID or path | Multi-strategy L1 semantic recall + L2 search |
+| **Fallback** | Does not accept an arbitrary first result or stale search cache as the requested record | Eligible tool requests can use previously cached results on transient failure |
 | **Failure Mode** | Fails closed on not-found, deleted, or unauthorized | Returns empty or degraded notification |
 
 ### Supported References
 
 - **Explicit UUID**: `id: "31ca3aa2-d058-4da8-8dae-5a341e305d61"`
 - **Canonical Path**: `path: "openclaw/31ca3aa2-d058-4da8-8dae-5a341e305d61"` or `path: "openclaw/docs/31ca3aa2-d058-4da8-8dae-5a341e305d61"`
-- **Validation**: Path traversal (`../`), null bytes, or malformed IDs fail fast before any network request is issued.
+- **Validation**: Path traversal segments (`..`) are rejected. Use IDs and paths returned by discovery tools; the current API also accepts record identifiers that are not UUIDs.
 
 ### Line Ranges & EOF Pagination
 
@@ -406,13 +462,14 @@ An empty semantic search result does not always prove absence. Retry with:
 ### Cache & Offline Failure Semantics
 
 - **Transient-Only Fallback**: Stale cache is returned **only** on transient infrastructure failures (network loss, timeouts, HTTP 5xx, HTTP 429).
-- **Deterministic Rejection**: HTTP 401 Unauthorized, HTTP 403 Forbidden, HTTP 404 Not Found, and `AbortError` **never** serve cached content, ensuring revoked permissions or deleted memories do not leak.
+- **Authorization rejection**: HTTP 401/403 does not trigger fallback for that request; it also clears the credential-scoped recall cache and disables cached fallback until a later request succeeds. HTTP 404 and `AbortError` do not fall back for that request. None of this provides immediate cross-device deletion or permission-change notifications during an offline window.
 - **Degradation Transparency**: When operating from cache, tool response text explicitly prefixes `[Degraded / Offline Cache: fromCache=true, isFresh=...]`, and `details` exposes `{ fromCache: true, isFresh: boolean }`.
-- **Mutation Invalidation**: Successful `memory_store`, `xmemo_memory_update`, `memory_forget`, or `xmemo_restart_snapshot_restore` operations immediately purge affected local cache entries for the matching bucket, scope, and team, while preserving queued outbox writes.
+- **Mutation invalidation**: Successful `memory_store`, `xmemo_memory_update`, `memory_forget`, or `xmemo_restart_snapshot_restore` operations invalidate matching local recall cache entries while preserving queued outbox writes. This is local invalidation, not cross-device invalidation.
+- **Coverage**: The native host search manager and explicit tools do not yet share all fallback and filtering behavior. These cache guarantees describe the resilient tool path.
 
 ### Ledger & Audit Permission Prerequisites
 
-- `xmemo_ledger_summary` and `xmemo_audit_events` require specialized account permissions (e.g. `ledger:read`, `audit:read`). Standard memory tokens lacking these scopes return HTTP 401/403 by design.
+- `xmemo_ledger_monthly_summary` and `xmemo_audit_events` require specialized account permissions (e.g. `ledger:read`, `audit:read`). Standard memory tokens lacking these scopes return HTTP 401/403 by design.
 
 ## Migration from another memory provider
 
@@ -421,7 +478,8 @@ Selecting `xmemo-memory` replaces the active backend. Existing memories in
 store but are no longer queried automatically.
 
 Migrate selected content by reading it from the previous provider and writing it
-to XMemo, or use an XMemo import workflow. Do not delete the old store until the
+to XMemo, using the supported tools. An automated importer is not included in this plugin.
+Do not delete the old store until the
 migration has been verified.
 
 ## Security and privacy
@@ -440,6 +498,60 @@ migration has been verified.
 For sensitive environments, place the OpenClaw data directory on an encrypted
 user profile or encrypted disk, and clear local XMemo state when rotating
 accounts or retiring a device.
+
+## Frequently asked questions
+
+### What is XMemo for OpenClaw?
+
+It is the external `@xmemo/openclaw-memory` plugin, registered as the native
+`xmemo-memory` memory provider. It gives OpenClaw access to XMemo cloud memory
+through 16 tools and the host memory lifecycle.
+
+### Does XMemo work without a cloud account or internet connection?
+
+Version 1.0.18 requires a configured XMemo service and credential for memory
+operations. Previously cached search results may be available during eligible
+transient failures, but the plugin cannot provide full local memory without
+cloud configuration. Standalone local memory and Hybrid are planned.
+
+### Do I need a local embedding model or vector database?
+
+Not for the current cloud plugin. The XMemo service performs semantic retrieval.
+The planned local engine would add its own local storage and retrieval without
+requiring a cloud account; model and packaging choices are not yet a released
+configuration contract.
+
+### Can OpenClaw share memory with ChatGPT, Claude, or Codex?
+
+Yes, when those clients connect to XMemo and their credentials authorize access
+to the same memories. The plugin reads visible buckets by default; `readBucket`
+and `readScope` can narrow retrieval. These settings do not grant additional
+permissions or automatically connect another client.
+
+### Does XMemo automatically upload every conversation?
+
+No. Auto-capture is disabled by default and needs conversation-access permission
+when enabled. Capture applies trigger and content filters, which are heuristic,
+not a guarantee that every sensitive value is detected. Explicit tool writes
+and eligible captured content are sent to the configured XMemo service.
+
+### Does installing this plugin migrate my existing local memory?
+
+No. Selecting `xmemo-memory` changes the active memory provider; the previous
+provider's files remain in its store. Export or read selected records, write them
+to XMemo, and verify the results before removing the source data.
+
+### Should I install the plugin, the Skill, or the MCP connection?
+
+For OpenClaw, use the native plugin for memory operations and the optional
+companion Skill for usage guidance. The Skill does not execute memory operations
+by itself. Hosted MCP is a separate integration for MCP-compatible clients.
+
+### Is XMemo already the fastest or most accurate local memory plugin?
+
+No such claim is made. The current release is a cloud memory plugin; the local
+and Hybrid roadmap must be validated with reproducible retrieval, latency,
+recovery, and compatibility evidence before comparative claims are published.
 
 ## Development
 

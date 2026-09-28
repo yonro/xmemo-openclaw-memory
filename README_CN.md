@@ -2,32 +2,45 @@
 
 [![XMemo logo](./assets/icon.png)](https://xmemo.dev)
 
-**专为 OpenClaw 智能体打造的原生、用户私有的长期记忆系统。**
+**面向 OpenClaw 的原生记忆插件，提供持久云记忆与跨智能体召回。**
 
-将 OpenClaw 的活动记忆后端替换为 XMemo，获得持久语义召回、跨智能体上下文共享、任务连续性工具以及受控的云端记忆。
+XMemo for OpenClaw 将智能体连接到 XMemo，提供长期记忆、语义搜索、精确读取、TODO、重启快照和审计工具。本文当前对应 **1.0.18**，使用记忆功能需要已认证的 XMemo 服务。独立本地记忆与本地/云端 Hybrid 是后续规划能力。
 
 | 规格指标 | 详情 |
 | :--- | :--- |
 | **插件标识 (Plugin ID)** | `xmemo-memory`（原生 `kind: "memory"` 提供者） |
 | **兼容要求** | OpenClaw `≥ 2026.6.9` |
-| **内置工具** | 15 个原生记忆与治理工具 |
-| **数据所有权** | 用户自主掌控，私有云或本地存储 |
+| **内置工具** | 16 个原生记忆与治理工具 |
+| **当前存储** | XMemo 服务；本地保存召回缓存与写入待发箱 |
+| **本地 / Hybrid** | 规划中；1.0.18 尚不提供独立本地或混合记忆模式 |
 | **跨智能体协作** | 与 Claude、ChatGPT、Codex、Hermes、Cursor 共享召回 |
 | **官方 Hub** | [ClawHub 插件](https://clawhub.ai/plugins/@xmemo/openclaw-memory) · [配套 Skill](https://clawhub.ai/xmemo/xmemo) |
 | **源代码** | [GitHub 仓库](https://github.com/yonro/xmemo-openclaw-memory) |
 
 [English](README.md) · [简体中文](README_CN.md)
 
-[快速开始](#快速开始) · [架构设计](#架构设计) · [工具目录](#工具目录) · [配置指南](#配置指南) · [运维操作](#运维操作) · [安全与隐私](#安全与隐私)
+[快速开始](#快速开始) · [架构设计](#架构设计) · [工具目录](#工具目录) · [配置指南](#配置指南) · [运维操作](#运维操作) · [安全与隐私](#安全与隐私) · [常见问题](#常见问题) · [产品事实](docs/PRODUCT-FACTS.md)
 
 ---
 
 `@xmemo/openclaw-memory` 是 [OpenClaw](https://github.com/openclaw/openclaw) 的原生 XMemo 记忆提供者插件。它注册为 `kind: "memory"`，当选中 `xmemo-memory` 记忆槽位时，即成为 OpenClaw 的活动长期记忆后端。
 
-该插件直接与 XMemo 云服务通信，无需在本地部署 embedding 模型或向量数据库。由授权 XMemo 客户端写入的记忆，可在 OpenClaw、ChatGPT、Hermes、Codex、Claude、Cursor 等所有已连接的智能体间无缝共享召回。
+该插件直接与 XMemo 云服务通信，无需在本地部署 embedding 模型或向量数据库。由授权 XMemo 客户端写入的记忆，可在 OpenClaw、ChatGPT、Hermes、Codex、Claude、Cursor 等已连接的智能体间召回，具体范围取决于凭据权限和读取配置。
 
 > [!NOTE]
 > 这是一个通过 [ClawHub](https://clawhub.ai/plugins/@xmemo/openclaw-memory) 分发的外部 OpenClaw 插件，未内置在 OpenClaw 默认发行版中。
+
+## 当前能力与后续规划
+
+| 能力 | 1.0.18 | 后续方向 |
+| --- | --- | --- |
+| 云端长期记忆与语义召回 | 配置 XMemo 服务后可用 | 保持兼容并增强可靠性 |
+| 跨智能体记忆 | 在已授权的 XMemo 范围内可用 | 明确身份归属与共享控制 |
+| 本地状态 | 召回缓存及部分写入的待发箱 | 事务型本地记忆库 |
+| 无云凭据的独立本地记忆 | 尚不可用 | 本地读写、全文与语义检索 |
+| 本地/云端 Hybrid | 尚不可用 | 本地提交、后台同步、冲突与删除处理 |
+
+本地缓存并非完整的记忆副本，无法离线检索从未缓存的查询。Hybrid 是研发方向，尚不是可用的安装选项，也不是已经达成的性能承诺。详见[按版本记录的产品事实](docs/PRODUCT-FACTS.md)。
 
 ## 架构设计
 
@@ -40,7 +53,7 @@
 | **OpenClaw 角色** | 原生 `kind: "memory"` 提供者 |
 | **最低宿主版本** | OpenClaw `2026.6.9` |
 | **托管云服务** | `https://xmemo.dev` |
-| **内置工具** | 15 个原生记忆与治理工具 |
+| **内置工具** | 16 个原生记忆与治理工具 |
 | **CLI 命名空间** | `openclaw xmemo` |
 
 ## 为什么选择本插件
@@ -49,7 +62,7 @@
 - **跨智能体上下文** — 默认读取用户可见的所有 XMemo 记忆桶，使 OpenClaw 能复用其他授权客户端沉淀的记忆。
 - **无需本地向量栈** — 语义搜索、持久化与数据治理完全交由 XMemo 处理。
 - **运行连续性** — 除了核心记忆外，还提供 TODO 清单、时间线里程碑和会话重启快照。
-- **默认弹性容灾** — 用户隔离的召回缓存与写入待发箱（Outbox）可轻松化解瞬时网络波动。
+- **有限的离线回退** — 符合条件的检索可使用已有缓存；已接入待发箱的写入可在瞬时故障时排队。使用前请了解[当前边界](#本地缓存与写入待发箱)。
 - **明确受控的自动化** — 自动捕获功能默认关闭，开启需显式授权、具备启发过滤与敏感凭据防护。
 
 ## 快速开始
@@ -71,6 +84,17 @@ $xmemoKey = Read-Host "XMemo API key"
 $xmemoKey | openclaw xmemo setup --stdin
 Remove-Variable xmemoKey
 ```
+
+### 通过浏览器授权登录
+
+安装后，也可以通过设备授权流程登录，无需复制 API Key：
+
+```bash
+openclaw xmemo login
+openclaw xmemo status
+```
+
+手动打开命令输出的网址，在浏览器中核对并确认设备码。命令随后保存凭据并选择记忆槽位。
 
 ### 通过 npm 安装
 
@@ -97,14 +121,15 @@ openclaw xmemo status
 
 ## 工具目录
 
-插件共注册了 15 个工具。其中 `memory_*` 工具由 OpenClaw 智能体在对话决策轮次中自动调用，并非独立的终端 Shell 命令。
+插件共注册了 16 个工具。其中 `memory_*` 工具由 OpenClaw 智能体在对话决策轮次中自动调用，并非独立的终端 Shell 命令。
 
 ### 核心记忆工具
 
 | 工具名 | 用途 |
 | --- | --- |
 | `memory_search` | 在可见的 XMemo 记忆空间中进行语义召回 |
-| `memory_get` | 根据精确引用获取单条记忆详情 |
+| `memory_get` | 根据原生搜索返回的 ID 或路径读取记忆 |
+| `xmemo_memory_get` | 按 ID 或路径读取指定 XMemo 记录，支持按行分页 |
 | `memory_store` | 存储持久化长期记忆 |
 | `memory_forget` | 遗忘/删除指定引用的记忆 |
 | `xmemo_memory_list` | 结合查询/路径提示浏览与检索记忆 |
@@ -131,6 +156,8 @@ openclaw xmemo status
 
 账目与审计工具调用需要 API-Key 具备对应的高级治理权限。
 
+[中英文工具 schema 目录](docs/TOOL-CATALOG.md)记录实时注册的参数名、必填项、约束、默认值与描述。`memory_search` 的 `minScore` 接受 0 到 1 的真实相似度阈值；没有已知分数的结果不会通过该阈值。原生 host search manager 的 `searchCapabilities` 为 `supportedSources: ["memory"]`、`sessionKeyFilter: "unsupported"`、`unsupportedSources: ["sessions"]`。运行时详情还会报告 `configured`、`connected`，并在有错误时提供 `lastError`。其中 `backend` 为 `builtin` 是 OpenClaw 的兼容标识；`provider` 为 `xmemo-memory` 才标识本插件。
+
 ## 原生插件、Skill 与 MCP 的关系
 
 这三个组件相辅相成，但职责边界清晰：
@@ -141,7 +168,7 @@ openclaw xmemo status
 | **OpenClaw 插件** | 独占活动记忆槽位，执行原生记忆工具底层读写 | 是 |
 | **托管版 XMemo MCP** | 为通用 MCP 兼容客户端提供便携记忆工具集 | 是 |
 
-对于 OpenClaw，推荐的最佳组合是 **本插件 + [XMemo Skill](https://clawhub.ai/xmemo/xmemo)**。Skill 负责引导智能体行为模式，插件负责底层可靠落地。
+对于 OpenClaw，推荐的最佳组合是 **本插件 + [XMemo Skill](https://clawhub.ai/xmemo/xmemo)**。Skill 负责引导智能体行为模式，插件负责执行读写。
 
 位于 `https://xmemo.dev/mcp` 的托管 MCP 可以与原生插件共存，但会引入重复的工具定义。在 OpenClaw 中优先推荐使用原生插件，仅在需要通用回退时再挂载 MCP。
 
@@ -194,7 +221,7 @@ openclaw xmemo status
 | `autoCapture` | `false` | 是否开启高价值对话内容自动捕获 |
 | `captureMaxChars` | `500` | 自动捕获单条消息的最大允许长度 |
 | `recallMaxItems` | `8` | 语义召回单次返回的最大记忆数量 |
-| `recallMaxTokens` | `4000` | 上下文注入包的最大 Token 配额 |
+| `recallMaxTokens` | `12000` | 上下文注入包的最大 Token 配额 |
 
 旧版本的历史配置保持完全兼容。废弃的 `token` 字段仍作为 `apiKey` 的别名支持；新安装与 setup 均会生成 `apiKey`。
 
@@ -210,7 +237,7 @@ openclaw xmemo status
 }
 ```
 
-高级管理员可通过指定具体的 `readBucket` 和 `readScope` 来收敛读取权限。
+可通过指定 `readBucket` 和 `readScope` 来缩小检索范围；这些过滤项不会授予或替代服务端访问权限。
 
 ## 身份认证
 
@@ -237,6 +264,8 @@ openclaw xmemo status
 
 目前仅支持 `env` 类型的 SecretRef；配置中若传入未支持的 `file` 或 `exec` 类型，Schema 校验将拒绝加载。
 
+XMemo CLI 共享凭据默认使用 Bearer 认证；其他凭据默认使用 `X-API-Key`，也可以通过 `authMode` 显式指定。
+
 ### 环境变量速查
 
 | 环境变量 | 作用 |
@@ -250,14 +279,14 @@ openclaw xmemo status
 
 除 `localhost` 开发环境外，所有非安全 `http://` 服务地址均会被拒绝。生产环境必须使用 HTTPS。
 
-## 本地容灾与弹性保障
+## 本地缓存与写入待发箱
 
-插件在本地维护轻量级的用户隔离召回缓存与待发箱（Outbox）：
+插件按服务地址和凭据划分本地召回缓存与待发箱（Outbox）。它们是云请求的辅助状态，尚不是独立本地记忆引擎：
 
 | 本地文件 | 容灾行为 |
 | --- | --- |
-| `recall-cache.json` | 5 分钟热缓存；网络中断时支持最长 24 小时的陈旧回退 |
-| `write-outbox.json` | 写入失败时进入排队待发箱，采用指数退避重试 |
+| `recall-cache.json` | 保存已获取的召回/搜索结果；5 分钟新鲜度标记，最长 24 小时回退期限 |
+| `write-outbox.json` | 已接入的写入（包括 `memory_store`）在瞬时故障时进入队列 |
 
 本地数据持久化路径：
 
@@ -267,11 +296,13 @@ openclaw xmemo status
 
 作用域哈希值（Scope Hash）由服务 URL 与凭据哈希共同派生，路径中绝不包含明文凭据。目录与文件均采用宿主操作系统所支持的仅限所有者权限。
 
-幂等的写入操作会自动重放；非幂等操作会挂起待人工确认，防止产生重复副作用。
+队列重放由 resilient client 成功请求后机会性触发，尚不是持续运行的后台同步服务。并非所有写入路径都接入待发箱；「已排队」也不等于云端已经保存成功。目前没有待发箱管理 CLI。
+
+本地 JSON 包含明文记忆正文和查询，文件权限不等于加密。当前缓存与待发箱不是备份，也不提供事务型多进程持久性保证；避免多个插件进程共用同一数据目录。后续 Hybrid 引擎必须通过独立的恢复与同步验收后，才能作为已交付能力介绍。
 
 ## 自动捕获 (Auto-capture)
 
-自动捕获默认保持关闭。开启后，插件会在每轮对话成功完成时进行语义启发式扫描，提炼高信号的用户偏好、重要决策与关键事实。
+自动捕获默认保持关闭。开启后，插件会在每轮对话成功完成时按触发词和内容规则筛选用户偏好、重要决策与关键事实。
 
 ```json
 {
@@ -299,10 +330,12 @@ openclaw xmemo status
 ```bash
 openclaw xmemo setup --stdin
 openclaw xmemo setup --env XMEMO_KEY
-openclaw xmemo setup --dry-run
+openclaw xmemo setup --env XMEMO_KEY --dry-run
 openclaw xmemo status
 openclaw xmemo status --json
 ```
+
+`openclaw xmemo login` 是受支持的浏览器授权命令；只有 `openclaw xmemo key set` 是 `setup` 的已弃用别名。
 
 ### 健康检查与诊断
 
@@ -323,7 +356,7 @@ openclaw xmemo status --json
 openclaw plugins inspect xmemo-memory --runtime --json
 ```
 
-输出中应包含 15 个原生工具、`xmemo` CLI 命名空间、记忆能力声明以及已注册的生命周期钩子。
+输出中应包含 16 个原生工具、`xmemo` CLI 命名空间、记忆能力声明以及已注册的生命周期钩子。provider status 包含 `configured`、`connected`、`searchCapabilities` 和可选 `lastError`。搜索管理器仅支持 `memory`；不支持会话搜索或 session-key 过滤。OpenClaw 的 `backend` 字段为 `builtin` 以满足兼容契约；`provider` 为 `xmemo-memory`。
 
 ### 检索排查技巧
 
@@ -331,31 +364,85 @@ openclaw plugins inspect xmemo-memory --runtime --json
 
 - 更换同义词或精简提问语句
 - 结合原先保存时的分类路径检索
-- 指定来源智能体进行过滤
+- 在查询中加入来源智能体线索；它不是授权过滤条件
 - 缩小大概的时间范围
 - 调用 `xmemo_memory_list` 按照路径目录浏览
 - 传入 `debug: true` 查看服务端查询扩展与命中轨迹
+
+## 记忆操作约定
+
+### 精确读取与探索检索
+
+`memory_search` 和 `xmemo_memory_list` 用于发现候选记忆。`xmemo_memory_get` 优先按 ID 直接读取；必要时进行实时搜索，再按 ID、路径或完整路径后缀匹配，不把任意第一条结果或陈旧搜索缓存当作目标正文。`memory_get` 提供原生记忆读取入口。
+
+- 使用发现工具返回的 ID 或路径，例如 `openclaw/<uuid>`。路径中的 `..` 段会被拒绝；当前接口也接受非 UUID 的记录标识。
+- `from` 为从 1 开始的起始行；`lines` 限制返回行数。
+- `xmemo_memory_get` 超过正文末行时返回 `range_out_of_bounds`；仅在仍有未读行时标记 `truncated`。
+
+### 缓存与故障语义
+
+- 符合条件的网络错误、超时、HTTP 5xx、429 等瞬时故障可以触发已有缓存回退；它不能生成未缓存的检索结果。
+- 当次请求的 401/403 不触发缓存回退；它还会清空该凭据范围的召回缓存，并关闭缓存回退，直到后续请求成功。404 与 `AbortError` 也不会在当次请求回退。离线期间仍无法即时收到跨设备删除或权限变更通知。
+- 缓存回退的工具文本带有 `[Degraded / Offline Cache: fromCache=true, isFresh=...]` 标记，并在 `details` 中返回 `fromCache` 与 `isFresh`。
+- 成功的 `memory_store`、`xmemo_memory_update`、`memory_forget` 和 `xmemo_restart_snapshot_restore` 会使匹配的本地召回缓存失效，保留排队写入；这不等同于跨设备失效通知。
+- 宿主原生搜索 manager 与显式工具尚未完全共享过滤及容错行为；上述缓存规则描述的是 resilient 工具路径。
+
+`xmemo_ledger_monthly_summary`、`xmemo_audit_events` 等治理工具需要相应权限，例如 `ledger:read`、`audit:read`；普通记忆凭据可能无法调用。
 
 ## 从其他记忆方案迁移
 
 选中 `xmemo-memory` 将接管 OpenClaw 的活动记忆。原有保存在 `memory-core`、`memory-lancedb` 等旧后端中的数据仍保留在原处，但不再会被自动查询。
 
-可通过读取旧后端内容并批量写入 XMemo 完成平滑迁移，或使用 XMemo 官方导入工具。在确认新环境数据完备前，请勿删除原有存储。
+可读取旧后端中的选定内容，再通过受支持的工具写入 XMemo。本插件尚未提供自动迁移器。在确认新环境数据完备前，请勿删除原有存储。
 
 ## 安全与隐私
 
 | 安全机制 | 默认策略 |
 | --- | --- |
-| **凭据管理** | 推荐使用 `--stdin`、环境 SecretRef 或系统受保护凭据 |
+| **凭据管理** | 推荐使用 `--stdin`、环境 SecretRef 或用户级共享凭据 |
 | **网络传输** | 除 localhost 外全流程强制 HTTPS TLS 加密 |
 | **自动捕获** | 默认禁用，开启必须显式授权 |
 | **捕获过滤** | 自动识别过滤 API Key、Token 等已知凭据特征 |
-| **身份标识** | 仅上报非敏感的 Agent ID 与实例哈希，用于来源归属 |
+| **身份标识** | 使用非敏感的 Agent ID 与实例标识进行来源归属 |
 | **本地状态** | 严格限制文件权限的用户级独立存储 |
 | **破坏性操作** | 遗忘与删除必须提供确切的记忆引用 ID |
 | **元数据透明** | 公开服务发现与 NPM 包元数据中绝不包含任何用户凭据 |
 
 在安全级别较高的生产环境中，建议将 OpenClaw 数据目录置于加密磁盘或加密用户目录中，并在切换账户或设备退役时清理本地 XMemo 状态。
+
+## 常见问题
+
+### XMemo for OpenClaw 是什么？
+
+它是包名为 `@xmemo/openclaw-memory` 的外部插件，以 `xmemo-memory` 注册为 OpenClaw 原生记忆提供者，通过 16 个工具及宿主记忆生命周期连接 XMemo 云记忆。
+
+### 没有云账号或网络时，XMemo 能独立运行吗？
+
+1.0.18 的记忆操作需要已配置的 XMemo 服务和凭据。部分瞬时故障下可以读取已有搜索缓存，但没有云配置时尚不能提供完整本地记忆。独立本地记忆与 Hybrid 正在规划中。
+
+### 需要自己部署本地 embedding 模型或向量数据库吗？
+
+当前云插件不需要，语义检索由 XMemo 服务执行。规划中的本地引擎会增加不依赖云账号的本地存储和检索；模型及资源交付方式尚未成为已发布的配置契约。
+
+### 能与 ChatGPT、Claude 或 Codex 共享记忆吗？
+
+可以，前提是这些客户端已连接 XMemo，且各自凭据有权访问同一批记忆。插件默认读取可见记忆桶，可通过 `readBucket` 和 `readScope` 缩小检索范围。这些配置不会扩大权限，也不会自动连接其他客户端。
+
+### 插件会自动上传所有对话吗？
+
+不会。自动捕获默认关闭，启用还需要对话访问权限。触发词和内容过滤是启发式规则，不能保证发现全部敏感信息。显式工具写入及符合条件的捕获内容会发送至配置的 XMemo 服务。
+
+### 安装后会自动迁移已有本地记忆吗？
+
+不会。选择 `xmemo-memory` 只是切换活动记忆提供者，旧提供者的文件仍保留在原存储中。应先导出或读取选定记录、写入 XMemo 并验证结果，再考虑删除原始数据。
+
+### 应该安装插件、Skill 还是 MCP？
+
+OpenClaw 使用原生插件执行记忆操作，可搭配 Skill 获取使用指引。Skill 本身不执行记忆读写。托管 MCP 则是面向 MCP 兼容客户端的独立接入方式。
+
+### XMemo 已经是最快、最准确的本地记忆插件吗？
+
+当前没有这样的结论。现有版本是云记忆插件；本地与 Hybrid 方案需要完成可复现的检索质量、延迟、恢复和兼容性评测，才能发布有证据支持的比较结论。
 
 ## 本地开发与构建
 

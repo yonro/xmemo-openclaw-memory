@@ -57,7 +57,7 @@
   <text class="label" x="382" y="270">Native plugin</text>
   <text class="body" x="382" y="304">kind: memory</text>
   <text class="body" x="382" y="330">slot: xmemo-memory</text>
-  <text class="caption" x="382" y="356">15 tools + CLI + hooks</text>
+  <text class="caption" x="382" y="356">16 tools + CLI + hooks</text>
 
   <rect class="cloud" x="666" y="122" width="246" height="220" rx="16"/>
   <rect class="accent-pink" x="666" y="122" width="7" height="220" rx="3"/>
@@ -69,11 +69,11 @@
   <text class="caption" x="698" y="318">Hosted or self-managed endpoint</text>
 
   <rect class="local" x="982" y="122" width="170" height="220" rx="16"/>
-  <text class="label" x="1012" y="164">Local resilience</text>
-  <text class="body" x="1012" y="202">Recall cache</text>
-  <text class="body" x="1012" y="230">Write outbox</text>
+  <text class="label" x="1012" y="164">Local fallback</text>
+  <text class="body" x="1012" y="202">Cached queries</text>
+  <text class="body" x="1012" y="230">Selected writes</text>
   <text class="body" x="1012" y="258">Retry backoff</text>
-  <text class="caption" x="1012" y="304">User-scoped data</text>
+  <text class="caption" x="1012" y="304">No local database</text>
 
   <path class="dashed" d="M280 170 H338"/>
   <path class="line" d="M280 270 H338"/>

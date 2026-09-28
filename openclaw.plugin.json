@@ -2,7 +2,7 @@
   "id": "xmemo-memory",
   "version": "1.0.18",
   "name": "XMemo for OpenClaw",
-  "description": "Native XMemo cloud-memory provider for OpenClaw agents: long-term memory, semantic recall, TODOs, snapshots, and audit tools. Pair with the XMemo Skill for recall-first workflow guidance.",
+  "description": "OpenClaw memory plugin for XMemo cloud: persistent memory, semantic recall, cross-agent sharing, TODOs, and restart snapshots.",
   "kind": "memory",
   "commandAliases": [
     {
@@ -247,7 +247,7 @@
     "apiKey": {
       "label": "XMemo API Key",
       "placeholder": "xmemo_...",
-      "help": "Register and obtain your API key at https://xmemo.dev. Alternatively, set XMEMO_KEY in environment, or run `openclaw xmemo login` in terminal for one-click browser authorization.",
+      "help": "Obtain an API key at https://xmemo.dev, use XMEMO_KEY, or run `openclaw xmemo login` and open the printed URL to confirm the device code in your browser.",
       "sensitive": true,
       "advanced": false
     },
@@ -261,7 +261,7 @@
     "authMode": {
       "label": "Header Transport",
       "placeholder": "api-key",
-      "help": "HTTP header format: api-key (X-API-Key header, recommended) or bearer (Authorization: Bearer). Default: api-key.",
+      "help": "HTTP header format: api-key (X-API-Key), bearer (Authorization: Bearer), or both. Explicit keys default to api-key; shared user credentials default to bearer unless overridden.",
       "advanced": true
     },
     "bucket": {
@@ -302,7 +302,7 @@
     },
     "autoCapture": {
       "label": "Auto-Capture",
-      "help": "Automatically extract facts and preferences from conversation ends into XMemo cloud without manual tool invocations.",
+      "help": "Opt in to capturing matching user messages into XMemo cloud after a conversation turn. Disabled by default; this does not archive every message.",
       "advanced": false
     },
     "captureMaxChars": {
@@ -326,7 +326,7 @@
       "label": "Recall Max Items",
       "help": "Maximum number of memories returned by XMemo recall.",
       "advanced": true,
-      "placeholder": "15"
+      "placeholder": "8"
     },
     "recallMaxTokens": {
       "label": "Recall Max Tokens",

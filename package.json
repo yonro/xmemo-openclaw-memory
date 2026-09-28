@@ -1,7 +1,7 @@
 {
   "name": "@xmemo/openclaw-memory",
   "version": "1.0.18",
-  "description": "Native XMemo cloud-memory provider for OpenClaw agents: long-term memory, semantic recall, TODOs, snapshots, and audit tools.",
+  "description": "OpenClaw memory plugin for XMemo cloud: persistent memory, semantic recall, cross-agent sharing, TODOs, and restart snapshots.",
   "homepage": "https://xmemo.dev",
   "bugs": {
     "url": "https://github.com/yonro/xmemo-openclaw-memory/issues"
@@ -12,9 +12,7 @@
     "openclaw",
     "clawhub",
     "mcp",
-    "mcp-server",
-    "skill",
-    "clawhub-skill",
+    "openclaw-plugin",
     "memory",
     "memory-provider",
     "long-term-memory",
@@ -26,8 +24,8 @@
     "ai-agent",
     "agent-memory",
     "openclaw-memory",
-    "identity-aware-memory",
-    "memory-control-plane"
+    "persistent-memory",
+    "memory-management"
   ],
   "xmemo": {
     "role": "openclaw_memory_provider",
@@ -69,6 +67,8 @@
     "openclaw.plugin.json",
     "README.md",
     "README_CN.md",
+    "docs/PRODUCT-FACTS.md",
+    "docs/TOOL-CATALOG.md",
     "package.json",
     "npm-shrinkwrap.json"
   ],

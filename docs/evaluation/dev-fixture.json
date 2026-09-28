@@ -1,0 +1,36 @@
+{
+  "dataset_version": "1",
+  "split": "dev",
+  "records": [
+    {
+      "record_id": "synthetic-en-001",
+      "query": "Which theme did the sample project choose?",
+      "language": "en",
+      "labels": { "synthetic-memory-theme": 3, "synthetic-memory-font": 1 },
+      "expected_ids": ["synthetic-memory-theme", "synthetic-memory-font"],
+      "scenario_tags": ["synthetic", "preference"],
+      "leakage_group": "synthetic-project-alpha",
+      "retrieved_ids": ["synthetic-memory-theme", "unrelated-synthetic-result"]
+    },
+    {
+      "record_id": "synthetic-zh-001",
+      "query": "示例项目选择了什么主题？",
+      "language": "zh",
+      "labels": { "synthetic-memory-theme": 3 },
+      "expected_ids": ["synthetic-memory-theme"],
+      "scenario_tags": ["synthetic", "cross-language"],
+      "leakage_group": "synthetic-project-beta",
+      "retrieved_ids": ["unrelated-synthetic-result", "synthetic-memory-theme"]
+    },
+    {
+      "record_id": "synthetic-ja-001",
+      "query": "サンプルの決定内容は何ですか？",
+      "language": "ja",
+      "labels": { "synthetic-memory-decision": 3, "synthetic-memory-date": 2 },
+      "expected_ids": ["synthetic-memory-decision", "synthetic-memory-date"],
+      "scenario_tags": ["synthetic", "decision"],
+      "leakage_group": "synthetic-project-gamma",
+      "retrieved_ids": ["synthetic-memory-decision", "synthetic-memory-date"]
+    }
+  ]
+}

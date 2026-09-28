@@ -17,7 +17,7 @@ import { registerXMemoTools } from "./src/tools.js";
 const plugin: OpenClawPluginDefinition = definePluginEntry({
   id: "xmemo-memory",
   name: "XMemo for OpenClaw",
-  description: "XMemo identity-aware memory control plane for OpenClaw.",
+  description: "OpenClaw memory plugin for XMemo cloud: persistent memory, semantic recall, cross-agent sharing, TODOs, and restart snapshots.",
   kind: "memory",
   register(api) {
     api.registerMemoryCapability({
