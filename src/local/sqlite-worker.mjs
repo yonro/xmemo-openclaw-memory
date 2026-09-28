@@ -956,7 +956,10 @@ function createRecord(payload) {
   const body = requireText(payload.body, "body", { preserveWhitespace: true });
   const title = requireText(payload.title ?? "", "title", { allowEmpty: true, preserveWhitespace: true, maxLength: 10_000 });
   const metadataJson = requireText(payload.metadataJson, "metadataJson", { preserveWhitespace: true });
-  const requestHash = digest({ operation: "create", recordId: recordIdHint ?? null, scope, body, title, metadataJson });
+  const origin = payload.imported === true ? "import" : "local";
+  const authority = "local";
+  const request = { operation: "create", recordId: recordIdHint ?? null, scope, body, title, metadataJson };
+  const requestHash = origin === "import" ? digest({ ...request, origin, authority }) : digest(request);
 
   return operationResult(operationId, requestHash, () => {
     const recordId = recordIdHint ?? randomUUID();
@@ -974,8 +977,8 @@ function createRecord(payload) {
         record_id, origin, authority, owner_ref, collection_ref, binding_id,
         local_revision, current_revision_id, current_title, current_body, metadata_json,
         created_at, updated_at, deleted_at
-      ) VALUES (?, 'local', 'local', ?, ?, NULL, 1, ?, ?, ?, ?, ?, ?, NULL)
-    `).run(recordId, scope.ownerRef, scope.collectionRef, revisionId, title, body, metadataJson, now, now);
+      ) VALUES (?, ?, ?, ?, ?, NULL, 1, ?, ?, ?, ?, ?, ?, NULL)
+    `).run(recordId, origin, authority, scope.ownerRef, scope.collectionRef, revisionId, title, body, metadataJson, now, now);
     database.prepare(`
       INSERT INTO revisions(
         revision_id, record_id, local_revision, parents_json, base_revision, operation_id,
@@ -1422,8 +1425,8 @@ function decodeRecord(row) {
   try {
     return {
       recordId: String(row.record_id),
-      origin: "local",
-      authority: "local",
+      origin: String(row.origin),
+      authority: String(row.authority),
       ownerRef: String(row.owner_ref),
       collectionRef: String(row.collection_ref),
       bindingId: null,
@@ -1491,6 +1494,30 @@ function searchRecords(payload) {
   return rows.map(row => ({ ...decodeRecord(row), rank: Number(row.rank ?? 0) }));
 }
 
+function exportCurrentRecords(payload) {
+  const scope = requireScope(payload.scope);
+  const rows = database.prepare(`
+    SELECT r.record_id, r.current_title, r.current_body, r.metadata_json
+    FROM records AS r
+    WHERE r.owner_ref = ? AND r.collection_ref = ? AND r.deleted_at IS NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM deletion_barriers AS b
+        WHERE b.record_id = r.record_id AND b.barrier_kind = 'redact'
+      )
+    ORDER BY r.created_at, r.record_id
+  `).all(scope.ownerRef, scope.collectionRef);
+  try {
+    return rows.map(row => ({
+      recordId: String(row.record_id),
+      title: String(row.current_title),
+      body: String(row.current_body),
+      metadata: JSON.parse(String(row.metadata_json)),
+    }));
+  } catch {
+    throw new DomainError("corrupt_store", safeMessage("corrupt_store"));
+  }
+}
+
 function handleRequest(operation, payload) {
   switch (operation) {
     case "create": return createRecord(payload);
@@ -1502,6 +1529,8 @@ function handleRequest(operation, payload) {
     case "hardDelete": return hardDeleteRecord(payload);
     case "redact": return redactRecord(payload);
     case "search": return searchRecords(payload);
+    case "exportRecords": return exportCurrentRecords(payload);
+    case "importRecord": return createRecord({ ...payload, imported: true });
     case "close":
       clearPhysicalCleanupRetry();
       database.close();

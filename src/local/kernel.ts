@@ -34,6 +34,14 @@ export type LocalRecordInput = {
   operationId?: string;
 };
 
+export type LocalRecordImportInput = {
+  recordId: string;
+  body: string;
+  title: string;
+  metadata: Record<string, unknown>;
+  operationId: string;
+};
+
 export type LocalUpdateInput = {
   body: string;
   title?: string;
@@ -134,8 +142,8 @@ export type LocalBackupRestoreReceipt = {
 
 export type LocalRecord = {
   recordId: string;
-  origin: "local";
-  authority: "local";
+  origin: "local" | "cloud" | "import";
+  authority: "local" | "cloud" | "shared";
   ownerRef: string;
   collectionRef: string;
   bindingId: null;
@@ -146,6 +154,13 @@ export type LocalRecord = {
   metadata: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
+};
+
+export type LocalExportRecord = {
+  recordId: string;
+  title: string;
+  body: string;
+  metadata: Record<string, unknown>;
 };
 
 export type LocalConflict = {
@@ -435,6 +450,29 @@ export class LocalMemoryKernel {
       title: input.title ?? "",
       metadataJson,
       scope,
+    });
+  }
+
+  /** Import a validated JSONL record as imported provenance; it never enters a cloud outbox. */
+  async importRecord(input: LocalRecordImportInput, identity: TrustedLocalIdentityContext): Promise<LocalWriteReceipt> {
+    await this.readyPromise;
+    const scope = deriveScope(this.vaultId, identity);
+    const metadataJson = serializeMetadata(input.metadata);
+    return await this.request<LocalWriteReceipt>("importRecord", {
+      operationId: input.operationId,
+      recordId: input.recordId,
+      body: input.body,
+      title: input.title,
+      metadataJson,
+      scope,
+    });
+  }
+
+  /** Return active, non-redacted records in one trusted local identity scope. */
+  async exportRecords(identity: TrustedLocalIdentityContext): Promise<LocalExportRecord[]> {
+    await this.readyPromise;
+    return await this.request<LocalExportRecord[]>("exportRecords", {
+      scope: deriveScope(this.vaultId, identity),
     });
   }
 
