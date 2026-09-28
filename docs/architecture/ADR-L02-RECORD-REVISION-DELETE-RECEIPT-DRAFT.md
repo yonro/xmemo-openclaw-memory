@@ -17,7 +17,7 @@ Recorded 2026-09-28 from the human decision in review-chat message `1db52b5a-7d2
 | `hard_delete` and backups | Immediately clear active local storage and all local projections. Immutable backups may retain data for at most 30 days; reapply deletion barriers before restoring a backup. Thirty days is the reviewer’s default and the human may change it. |
 | Server synchronization ownership | Use one accountable service owner with a security/privacy co-reviewer. The people remain unassigned. |
 | Sealed evaluation set | An independent human data owner writes and labels it. The person remains unassigned and must be named before any sealed evaluation run, no later than the P2b quality gate and before P7. |
-| CI and platform evidence | CI is not authorized. Linux and Windows remain unverified. |
+| CI and platform evidence | Human-authorized on 2026-09-28 in review chat `7b191229`, limited to branch `ci/sqlite-platform-probe`; no `master` or tag pushes, PRs, or releases. Run [36372400347](https://github.com/yonro/xmemo-openclaw-memory/actions/runs/36372400347) failed during pnpm setup before platform probes ran; see ADR-L01 for the recorded failure and subsequent results. |
 
 Only the local-vault semantics in this ADR are accepted. Remote revision/epoch formats, server conditional-write and idempotency behavior, tombstone feeds, remote deletion receipts, binding identity proof, key-change evidence, lease issuance/revocation service levels, and post-delete content-hash retention remain pending for P4a; P1b does not depend on those server decisions.
 

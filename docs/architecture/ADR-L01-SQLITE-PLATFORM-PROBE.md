@@ -18,9 +18,9 @@ Use a file-backed database in WAL mode only on a local filesystem. Do not place 
 | OS / architecture | Node versions | Status | Evidence boundary |
 |---|---|---|---|
 | macOS 26.5.2, arm64 (`Mac16,10`) | 22.19.0, 24.21.0, 26.9.0 | **Verified for probes below** | All runs used the same Apple Silicon host and local HFS+/APFS filesystems. This does not establish support on every macOS release or filesystem. |
-| Linux x64 | — | **Unverified** | No Docker or Linux host was available locally; no remote CI was triggered. |
-| Linux arm64 | — | **Unverified** | No native host or local container runtime was available; no remote CI was triggered. |
-| Windows x64 | — | **Unverified** | No Windows host was available; no remote CI was triggered. |
+| Linux x64 | 22.19.0, 24.x, 26.10.0 | **Unverified** | Initial CI run [36372400347](https://github.com/yonro/xmemo-openclaw-memory/actions/runs/36372400347) failed in pnpm setup before probes; retry evidence will be appended without replacing this failure. |
+| Linux arm64 | 22.19.0, 24.x, 26.10.0 | **Unverified** | Initial CI run [36372400347](https://github.com/yonro/xmemo-openclaw-memory/actions/runs/36372400347) failed in pnpm setup before probes; retry evidence will be appended without replacing this failure. |
+| Windows x64 | 22.19.0, 24.x, 26.10.0 | **Unverified** | Initial CI run [36372400347](https://github.com/yonro/xmemo-openclaw-memory/actions/runs/36372400347) failed in pnpm setup before probes; retry evidence will be appended without replacing this failure. |
 | Other OS / architectures | — | **Unverified** | No support claim. |
 
 The macOS runtime results were:
@@ -32,6 +32,8 @@ The macOS runtime results were:
 | 26.9.0 | 3.53.4 | No flag; no warning | `COMPILER=clang-17.0.0`, `ENABLE_FTS5`, `THREADSAFE=1`, `DEFAULT_WAL_AUTOCHECKPOINT=1000`, `DEFAULT_WAL_SYNCHRONOUS=2`; JSON functions passed | Passed |
 
 `PRAGMA compile_options` is printed in full by the probe so future runs can compare the complete build configuration. WAL is verified by setting and reading `PRAGMA journal_mode=WAL` on a file-backed database; WAL is not inferred from a compile option.
+
+The first authorized CI attempt, run [36372400347](https://github.com/yonro/xmemo-openclaw-memory/actions/runs/36372400347), failed in `pnpm/action-setup` on all 12 OS × Node jobs before dependency installation, SQLite probes, disk-full probes, or tests. The action received `version: 10.33.0` while `package.json` already pinned `pnpm@10.33.0+sha512...` in `packageManager`, so setup rejected the duplicate version declarations. Every matrix pair is therefore **failed before platform evidence**, not a probe failure: Ubuntu x64, Ubuntu arm64, Windows x64, and macOS arm64 each failed for Node 22.19.0, 24.x, and 26.10.0. No SQLite version or compile options were collected by that run. The workflow now relies on the repository's pinned `packageManager` field; later run results will be recorded alongside this failed attempt.
 
 ## Probe results
 
@@ -46,7 +48,7 @@ The repeatable harness is in [`probes/sqlite/`](../../probes/sqlite/README.md). 
 - **FTS5:** `ENABLE_FTS5` was present; `unicode61` and `trigram` tables both created. The selected two-character Chinese, Japanese, and Korean queries returned 0 matches with `unicode61`; the corresponding three-character trigram substring queries returned 1 each. This is an observed tokenizer behavior, not a quality acceptance result. No language-specific tokenization fix is included.
 - **No-compile install and package:** requiring `node:sqlite` from a fresh empty directory passed on all three versions. `npm pack --dry-run --ignore-scripts --json` reported 45 files, 126,644 packed bytes, and 409,387 unpacked bytes; it included no `probes/` file. This slice adds no runtime dependency, and the package file allowlist excludes all probe scripts and this ADR.
 
-The main command exited successfully on all three runtimes. The disk-full command exited successfully on macOS. No CI workflow was added, no CI was triggered, and no push was made.
+The original local probe commands passed on all three macOS runtimes, and the disk-full command passed on macOS. The first authorized CI attempt is recorded above and failed at package-manager setup. The workflow's first attempt did not reach SQLite probe or test execution.
 
 ## Driver, packaging, and failure model
 
@@ -56,8 +58,8 @@ The observed errors are explicit but should be mapped into product-level outcome
 
 ## Open gates and next review
 
-1. Linux x64/arm64 and Windows x64 remain unverified. Run the same harness on native hosts or locally authorized disposable containers before describing those platforms as supported. Remote CI requires human authorization and was not used here.
+1. Linux x64/arm64 and Windows x64 remain unverified until a complete CI run records the probe, SQLite build details, and test results for every matrix pair. The human authorized the branch-limited CI run in review chat `7b191229`; only `ci/sqlite-platform-probe` may be pushed for this evidence, with no `master` or tag push, PR, or release.
 2. The `SIGKILL` test does not test a hard reset or power loss. Those require a separate controlled reliability experiment.
 3. CJK tokenizer quality remains open; the measured `unicode61` misses must inform FTS design and evaluation, but this ADR does not choose a tokenizer or alter product behavior.
-4. No Local database integration, migration, package change, CI workflow, or product runtime change is part of this slice.
+4. No Local database integration, migration, package change, or product runtime change is part of this slice. The CI workflow is evidence-only and restricted to the authorized branch.
 5. P1b must first freeze ADR-L02/H01 as specified by the plan. This P1a result is submitted for review; no later slice is started here.
