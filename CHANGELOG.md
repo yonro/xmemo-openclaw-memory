@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.19] - 2026-10-12
+
+### Fixed
+
+- Remove `contracts.tools` from the plugin manifest to address the reported ClawHub `manifest-unknown-contracts` finding. Tools remain registered at runtime.
+- Update manifest auth metadata tests to use `toolMetadata`.
+
 ## [1.0.18] - 2026-09-23
 
 ### Security

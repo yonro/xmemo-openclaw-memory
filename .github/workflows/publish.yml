@@ -113,15 +113,15 @@ jobs:
         run: pnpm test
 
       - name: Validate ClawHub package
-        run: npx --yes clawhub@0.22.0 package validate .
+        run: npx --yes clawhub@0.23.3 package validate . --openclaw-version 2026.10.1
 
       - name: Log in to ClawHub
-        run: npx --yes clawhub@0.22.0 login --token "$CLAWHUB_TOKEN" --no-input --no-browser
+        run: npx --yes clawhub@0.23.3 login --token "$CLAWHUB_TOKEN" --no-input --no-browser
         env:
           CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
 
       - name: Publish to ClawHub
-        run: npx --yes clawhub@0.22.0 package publish . --json
+        run: npx --yes clawhub@0.23.3 package publish . --json
         env:
           CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
 

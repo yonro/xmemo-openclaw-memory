@@ -10,7 +10,6 @@ const manifest = JSON.parse(
   fs.readFileSync(new URL("../openclaw.plugin.json", import.meta.url), "utf-8"),
 ) as {
   configSchema: JsonSchemaObject;
-  contracts?: { tools?: string[] };
   setup?: {
     providers?: Array<{ id?: string; authMethods?: string[]; envVars?: string[] }>;
     requiresRuntime?: boolean;
@@ -194,7 +193,7 @@ describe("xmemo-memory public discovery metadata", () => {
   });
 
   it("declares XMemo auth availability for every plugin tool", () => {
-    const tools = manifest.contracts?.tools ?? [];
+    const tools = Object.keys(manifest.toolMetadata ?? {});
     expect(tools.length).toBeGreaterThan(0);
     for (const toolName of tools) {
       expect(manifest.toolMetadata?.[toolName]).toMatchObject({
