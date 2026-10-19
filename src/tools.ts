@@ -304,16 +304,37 @@ function parseTemporal(raw: Record<string, unknown>): XMemoTemporalFields {
       try { new Intl.DateTimeFormat("en", { timeZone: value }); }
       catch { throw new Error("owner_timezone must be an IANA timezone name."); }
       result[key] = value;
+    } else if (key === "query_mode") {
+      if (value !== "topic" && value !== "activity_log") throw new Error("query_mode must be exactly topic or activity_log.");
+      result[key] = value;
+    } else if (key === "temporal_axis_mode") {
+      if (value !== "created_at" && value !== "updated_at" && value !== "split_filter_created_order_updated") {
+        throw new Error("temporal_axis_mode must be exactly created_at, updated_at, or split_filter_created_order_updated.");
+      }
+      result[key] = value;
     } else {
       if (!temporalInstant(value)) throw new Error(`${key} must be a valid RFC3339 timestamp with a timezone offset.`);
       result[key] = value as string;
     }
   }
+  if (result.query_mode === "activity_log" && (!Object.hasOwn(result, "since") || !Object.hasOwn(result, "until"))) {
+    throw new Error("query_mode activity_log requires both since and until bounds.");
+  }
   if (result.since && result.until) {
     const a = temporalInstant(result.since)!, b = temporalInstant(result.until)!;
     const width = Math.max(a.fraction.length, b.fraction.length);
-    if (a.seconds > b.seconds || (a.seconds === b.seconds && a.fraction.padEnd(width, "0") >= b.fraction.padEnd(width, "0"))) {
+    const startFraction = a.fraction.padEnd(width, "0");
+    const endFraction = b.fraction.padEnd(width, "0");
+    const fractionOrder = startFraction < endFraction ? -1 : startFraction > endFraction ? 1 : 0;
+    if (a.seconds > b.seconds || (a.seconds === b.seconds && fractionOrder >= 0)) {
       throw new Error("since must precede until; the time window is [since, until).");
+    }
+    if (result.query_mode === "activity_log") {
+      const elapsedWholeSeconds = b.seconds - a.seconds;
+      if (elapsedWholeSeconds > 90 * 86400 ||
+          (elapsedWholeSeconds === 90 * 86400 && fractionOrder < 0)) {
+        throw new Error("activity_log windows cannot exceed 90 days (90 * 86400 seconds).");
+      }
     }
   }
   return result;
@@ -336,12 +357,15 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
         owner_timezone: Type.Optional(Type.String({ description: "IANA timezone, e.g. Asia/Tokyo" })),
         reference_time: Type.Optional(Type.String({ description: "RFC3339 reference time with timezone offset" })),
         time_order: Type.Optional(Type.Union([Type.Literal("asc"), Type.Literal("desc")], { description: "Preserve server chronological order" })),
+        query_mode: Type.Optional(Type.Union([Type.Literal("topic"), Type.Literal("activity_log")], { description: "Recall intent; activity_log requires since and until" })),
+        temporal_axis_mode: Type.Optional(Type.Union([
+          Type.Literal("created_at"),
+          Type.Literal("updated_at"),
+          Type.Literal("split_filter_created_order_updated"),
+        ], { description: "Server temporal-axis policy" })),
       }),
       async execute(_toolCallId, params, signal) {
         const raw = asToolParamsRecord(params);
-        if (Object.hasOwn(raw, "query_mode") || Object.hasOwn(raw, "temporal_axis_mode")) {
-          return { content: [{ type: "text", text: "query_mode and temporal_axis_mode are unsupported by this plugin's REST temporal path." }], details: { error: "unsupported_parameter" } };
-        }
         let temporal: XMemoTemporalFields;
         try { temporal = parseTemporal(raw); }
         catch (error) {
@@ -458,7 +482,7 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           });
         } catch (error: any) {
           if (temporalActive && error instanceof XMemoClientError && error.status !== undefined && error.status >= 400 && error.status < 500) {
-            return { content: [{ type: "text", text: `Temporal request rejected (HTTP ${error.status}): parameters may be invalid or the server may not support temporal parameters; check authorization for 401/403. No unconstrained search or cached result was used.` }], details: { error: "temporal_request_rejected", status: error.status } };
+            return { content: [{ type: "text", text: `Temporal request rejected (HTTP ${error.status}): parameters may be invalid, or the server may not support or may reject advanced temporal parameters; check authorization for 401/403. No unconstrained search or cached result was used.` }], details: { error: "temporal_request_rejected", status: error.status } };
           }
           return buildUnavailableResult(error);
         }
@@ -554,7 +578,9 @@ export function registerXMemoTools(api: OpenClawPluginApi): void {
           finalItems = dedupeAndRank(combined, query, pathHint);
         } else {
           // If we had enough in L1, still dedupe and rank
-          finalItems = temporal.time_order ? dedupeInServerOrder(finalItems) : dedupeAndRank(finalItems, query, pathHint);
+          finalItems = temporal.time_order || temporal.query_mode || temporal.temporal_axis_mode
+            ? dedupeInServerOrder(finalItems)
+            : dedupeAndRank(finalItems, query, pathHint);
         }
 
         const usedL2 = finalItems.some(item => item.strategy === "L2_search");

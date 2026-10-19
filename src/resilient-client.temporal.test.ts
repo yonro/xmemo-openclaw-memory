@@ -56,6 +56,8 @@ describe("temporal recall persistent cache boundaries", () => {
   it.each([
     { since: "2026-10-01T01:00:00+09:00" }, { until: "2026-10-03T00:00:00+09:00" },
     { owner_timezone: "America/New_York" }, { reference_time: "2026-10-03T12:00:00+09:00" }, { time_order: "desc" as const },
+    { query_mode: "topic" as const }, { query_mode: "activity_log" as const },
+    { temporal_axis_mode: "updated_at" as const }, { temporal_axis_mode: "split_filter_created_order_updated" as const },
     { bucket: "other" }, { scope: "private" }, { teamId: "other-team" }, { preferWorking: false },
   ])("isolates query-identical requests with different parameters: %j", async change => {
     const { recall, resilient } = client(); await resilient.recallContext("q", fields);
@@ -63,10 +65,22 @@ describe("temporal recall persistent cache boundaries", () => {
     await expect(resilient.recallContext("q", { ...fields, ...change })).rejects.toBe(error);
     await expect(resilient.recallContext("q", {})).rejects.toBe(error);
   });
+  it.each([
+    [{ query_mode: "topic" as const }, { query_mode: "activity_log" as const }],
+    [{ temporal_axis_mode: "created_at" as const }, { temporal_axis_mode: "updated_at" as const }],
+    [{ temporal_axis_mode: "updated_at" as const }, { temporal_axis_mode: "split_filter_created_order_updated" as const }],
+  ])("separates cache entries across advanced field values: %j -> %j", async (firstMode, nextMode) => {
+    const { recall, resilient } = client();
+    await resilient.recallContext("q", { ...fields, ...firstMode });
+    const error = new TypeError("fetch failed"); recall.mockRejectedValue(error);
+    await expect(resilient.recallContext("q", { ...fields, ...nextMode })).rejects.toBe(error);
+    await expect(resilient.recallContext("q", { ...fields, ...firstMode })).resolves.toMatchObject({ result: cached, fromCache: true });
+  });
   it.each([{ apiKey: "synthetic-b" }, { baseUrl: "https://second.invalid" }, { agentId: "other" }, { agentInstanceId: "other-instance" }])("isolates identities and base URLs across restarts: %j", async overrides => {
-    const first = client(); await first.resilient.recallContext("q", fields);
+    const advancedFields: XMemoTemporalFields = { ...fields, query_mode: "topic", temporal_axis_mode: "created_at" };
+    const first = client(); await first.resilient.recallContext("q", advancedFields);
     const second = client(overrides), error = new TypeError("fetch failed"); second.recall.mockRejectedValue(error);
-    await expect(second.resilient.recallContext("q", fields)).rejects.toBe(error);
+    await expect(second.resilient.recallContext("q", advancedFields)).rejects.toBe(error);
   });
   it("never borrows the legacy recall or keyword-search cache", async () => {
     const cache = new XMemoLocalCache(join(dir, "shared"));

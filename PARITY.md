@@ -231,10 +231,10 @@
   - `xmemo_todo_list` 扩展支持 `limit`、`due_before` 及 `item_status` 参数别名。
   - 补充对应工具级测试。
 
-## 时序检索补充（S1，生产能力未验证）
+## 时序检索补充（S1/S2，生产行为未验证）
 
-基础五字段 `since/until/owner_timezone/reference_time/time_order` 仅接入 `memory_search` 的 L1 POST 路径。显式时序请求禁止 L2 GET 回退；4xx/鉴权/取消不使用 stale，网络或 5xx 仅允许同时间参数、同身份和范围的缓存。无时序参数时保留既有行为；指定排序时保留服务端顺序并返回时间元数据。
+七字段 `since/until/owner_timezone/reference_time/time_order/query_mode/temporal_axis_mode` 仅接入 `memory_search` 的 L1 POST 路径。`query_mode` 仅接受 `topic` 或 `activity_log`；后者必须有 `since` 与 `until`，窗口为 `[since,until)`，绝对跨度最多 90 × 86,400 秒。`temporal_axis_mode` 仅接受 `created_at`、`updated_at`、`split_filter_created_order_updated`；客户端不定义或推断其服务端语义。枚举精确匹配，非法值在请求前拒绝。显式时序请求禁止 L2 GET 回退；4xx/鉴权/取消不使用 stale，网络或 5xx 仅允许同参数、同身份和范围的缓存。无时序参数时保留既有行为；传入 `time_order`、`query_mode` 或 `temporal_axis_mode` 时保留服务端顺序并返回时间元数据。
 
-这不表示时序能力已全面对齐或生产可用：`xmemo_memory_list`、原生 MemorySearchManager 未扩展；`query_mode/temporal_axis_mode` 未接入；生产端过滤及轴语义仍待验证。UTC+9/DST 的测试使用合成服务端边界样例，仅证明参数传递与结果处理，不证明生产检索语义。
+这不表示生产端到端时序过滤可用。上游精确命中 L0 窗口/校验修复（`b2e8857dd`）仅在分支，尚未合并或部署；已部署旧版本可能让精确命中越窗或跳过校验。省略 `query_mode` 可能走启发式路径，显式 `topic` 用于关闭时序绕过；这些路径和时间轴语义未在生产验证。客户端不做响应窗口兜底；合成 UTC+9/DST 测试只证明本地校验、参数传递与结果处理。`xmemo_memory_list` 与原生 MemorySearchManager 仍未扩展。
 
-S3 原生边界证据：已安装 OpenClaw SDK 2026.6.9，`node_modules/openclaw/dist/plugin-sdk/packages/memory-host-sdk/src/host/types.d.ts:101` 的 search opts 为 `maxResults/minScore/sessionKey/qmdSearchModeOverride/onDebug/sources/signal`，无结构化时序字段。`src/runtime.ts:21` 创建原始 client 和 manager；`src/search-manager.ts:54` 的 REST body 仅含 `query/bucket/scope/team_id/max_items/max_tokens/prefer_working`。因此原生 manager 不支持时序过滤；S1 五字段能力仅属于插件自行注册的 `memory_search` 工具，不代表宿主原生 memory_search 全量对齐。S3 未修改 manager 行为，仅用请求体和结果映射回归锁定此边界。
+S3 原生边界证据：已安装 OpenClaw SDK 2026.6.9，`node_modules/openclaw/dist/plugin-sdk/packages/memory-host-sdk/src/host/types.d.ts:101` 的 search opts 为 `maxResults/minScore/sessionKey/qmdSearchModeOverride/onDebug/sources/signal`，无结构化时序字段。`src/runtime.ts:21` 创建原始 client 和 manager；`src/search-manager.ts:54` 的 REST body 仅含 `query/bucket/scope/team_id/max_items/max_tokens/prefer_working`。因此原生 manager 不支持时序过滤；上文描述的时序能力仅属于插件自行注册的 `memory_search` 工具，不代表宿主原生 memory_search 全量对齐。S3 未修改 manager 行为，仅用请求体和结果映射回归锁定此边界。
