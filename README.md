@@ -490,3 +490,11 @@ XMemo integration.
 - [GitHub Repository](https://github.com/yonro/xmemo-openclaw-memory)
 - [Issues](https://github.com/yonro/xmemo-openclaw-memory/issues)
 - [Releases](https://github.com/yonro/xmemo-openclaw-memory/releases)
+
+### Temporal retrieval limits
+
+`memory_search` optionally accepts `since`, `until`, `owner_timezone`, `reference_time`, and `time_order` (`asc` or `desc`). Timestamps must be valid RFC3339 values with a timezone offset; timezone names must be IANA names. When both bounds are supplied, `since < until`; the requested interval is `[since, until)`. For example: `{"query":"project decisions","since":"2026-10-01T00:00:00+09:00","until":"2026-10-02T00:00:00+09:00","owner_timezone":"Asia/Tokyo","time_order":"asc"}`.
+
+Supplying any temporal field uses only POST `/v1/recall/context`. It never falls back to the keyword GET endpoint. HTTP 4xx errors (including unsupported parameters), authorization errors, and cancellation never return cached results. Network/5xx failures may use a cache entry only for the same temporal parameters and identity/scope. `time_order` preserves server order after ID deduplication; returned `created_at`/`updated_at` metadata is exposed in `details.results`. Calls without temporal fields retain their existing behavior.
+
+Production temporal capability has not been verified. Filtering and timestamp-axis semantics remain server responsibilities; client tests do not establish production support or full temporal parity. `xmemo_memory_list` and the native MemorySearchManager do not gain temporal filtering in this slice. `query_mode` and `temporal_axis_mode` are unsupported and are not sent by `memory_search`.

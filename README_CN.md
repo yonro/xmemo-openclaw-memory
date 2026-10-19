@@ -402,3 +402,11 @@ node scripts/verify-plugin.mjs <解压后的包目录>
 - [GitHub 源代码仓库](https://github.com/yonro/xmemo-openclaw-memory)
 - [问题反馈 (Issues)](https://github.com/yonro/xmemo-openclaw-memory/issues)
 - [版本发布记录 (Releases)](https://github.com/yonro/xmemo-openclaw-memory/releases)
+
+### 时序检索限制
+
+`memory_search` 可选接收 `since`、`until`、`owner_timezone`、`reference_time`、`time_order`（`asc` 或 `desc`）。时间戳必须是合法且带时区偏移的 RFC3339；时区必须是 IANA 名称。同时指定上下界时必须 `since < until`，请求区间为 `[since, until)`。例如：`{"query":"项目决策","since":"2026-10-01T00:00:00+09:00","until":"2026-10-02T00:00:00+09:00","owner_timezone":"Asia/Tokyo","time_order":"asc"}`。
+
+显式传入任一时序字段后，仅调用 POST `/v1/recall/context`，不回退到关键词 GET 端点。HTTP 4xx（包括参数不受支持）、鉴权失败、取消均不使用缓存；网络或 5xx 错误只允许使用时序参数及身份/范围完全相同的缓存。指定 `time_order` 时按 ID 去重并保留服务端顺序，服务端返回的 `created_at`/`updated_at` 放入 `details.results`。不带时序字段的调用保持原有行为。
+
+生产端时序能力尚未验证；过滤及时间轴语义由服务端负责，本地测试不能证明生产支持或完整时序对齐。本片不为 `xmemo_memory_list` 或原生 MemorySearchManager 增加时序过滤。`memory_search` 不支持且不发送 `query_mode`、`temporal_axis_mode`。

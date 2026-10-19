@@ -230,3 +230,9 @@
   - `xmemo_ledger_monthly_summary` 扩展支持 `months`（保持 `month`/`year` 向后兼容）。
   - `xmemo_todo_list` 扩展支持 `limit`、`due_before` 及 `item_status` 参数别名。
   - 补充对应工具级测试。
+
+## 时序检索补充（S1，生产能力未验证）
+
+基础五字段 `since/until/owner_timezone/reference_time/time_order` 仅接入 `memory_search` 的 L1 POST 路径。显式时序请求禁止 L2 GET 回退；4xx/鉴权/取消不使用 stale，网络或 5xx 仅允许同时间参数、同身份和范围的缓存。无时序参数时保留既有行为；指定排序时保留服务端顺序并返回时间元数据。
+
+这不表示时序能力已全面对齐或生产可用：`xmemo_memory_list`、原生 MemorySearchManager 未扩展；`query_mode/temporal_axis_mode` 未接入；生产端过滤及轴语义仍待验证。UTC+9/DST 的测试使用合成服务端边界样例，仅证明参数传递与结果处理，不证明生产检索语义。
