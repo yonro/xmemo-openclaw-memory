@@ -62,6 +62,23 @@ function createConfig(
 }
 
 describe("XMemoSearchManager", () => {
+  it("keeps the native manager REST request non-temporal and preserves result mapping", async () => {
+    fetchMock.mockResolvedValue(mockResponse({ items: [{ id: "native", content: "synthetic", score: 0.7 }] }));
+    const client = new XMemoClient("https://xmemo.dev", "key", "openclaw", "instance");
+    const manager = new XMemoSearchManager(client, createConfig());
+    const results = await manager.search("synthetic", { maxResults: 2, sessionKey: "session", sources: ["memory"] });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(requestUrl(0, fetchMock.mock.calls)).toBe("https://xmemo.dev/v1/recall/context");
+    const init = requestInit(0, fetchMock.mock.calls);
+    expect(init.method).toBe("POST");
+    const body = JSON.parse(String(init.body));
+    expect(body).toEqual({ query: "synthetic", bucket: "%", scope: null, team_id: null, max_items: 2, max_tokens: 1500, prefer_working: true });
+    for (const key of ["since", "until", "owner_timezone", "reference_time", "time_order", "query_mode", "temporal_axis_mode"]) {
+      expect(body).not.toHaveProperty(key);
+    }
+    expect(results).toEqual([{ path: "openclaw/native", startLine: 1, endLine: 1, score: 0.7, snippet: "synthetic", source: "memory" }]);
+  });
+
   it("returns empty results when client is not configured", async () => {
     const client = new XMemoClient("https://xmemo.dev", "", "openclaw", "instance");
     const manager = new XMemoSearchManager(client, createConfig());

@@ -410,3 +410,5 @@ node scripts/verify-plugin.mjs <解压后的包目录>
 显式传入任一时序字段后，仅调用 POST `/v1/recall/context`，不回退到关键词 GET 端点。HTTP 4xx（包括参数不受支持）、鉴权失败、取消均不使用缓存；网络或 5xx 错误只允许使用时序参数及身份/范围完全相同的缓存。指定 `time_order` 时按 ID 去重并保留服务端顺序，服务端返回的 `created_at`/`updated_at` 放入 `details.results`。不带时序字段的调用保持原有行为。
 
 生产端时序能力尚未验证；过滤及时间轴语义由服务端负责，本地测试不能证明生产支持或完整时序对齐。本片不为 `xmemo_memory_list` 或原生 MemorySearchManager 增加时序过滤。`memory_search` 不支持且不发送 `query_mode`、`temporal_axis_mode`。
+
+**原生 manager 路径不支持结构化时序过滤。** 已安装 OpenClaw SDK **2026.6.9** 的 `node_modules/openclaw/dist/plugin-sdk/packages/memory-host-sdk/src/host/types.d.ts:101` 定义 `MemorySearchManager.search` 选项为 `maxResults`、`minScore`、`sessionKey`、`qmdSearchModeOverride`、`onDebug`、`sources`、`signal`，没有时序字段。`src/runtime.ts:21` 构造原始 XMemo client 和 manager；`src/search-manager.ts:54` 只向 REST 发送 `query/bucket/scope/team_id/max_items/max_tokens/prefer_working`。上面的五字段能力仅属于插件自行注册的 `memory_search` 工具（`src/tools.ts`），不能据此宣称所有宿主原生 memory search 调用都具备时序能力。这些证据限定于该 SDK 版本及所列源码位置。
