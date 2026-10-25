@@ -29,6 +29,7 @@ jobs:
         run: pnpm add --save-dev --save-exact "openclaw@${{ matrix.openclaw-version }}" --lockfile=false
       - run: pnpm typecheck
       - run: pnpm lint
+      - run: python3 scripts/test-publish-workflow.py
       - run: pnpm test
       - run: pnpm build
       - run: npm pack --dry-run
