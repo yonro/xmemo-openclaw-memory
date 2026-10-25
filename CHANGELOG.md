@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.0] - 2026-10-25
+
+### Added
+
+- Seven optional temporal controls on `memory_search`: `since`, `until`, `owner_timezone`, `reference_time`, `time_order`, `query_mode`, and `temporal_axis_mode`.
+- Local validation of timestamps, timezones, enums, and activity-log windows of at most 90 elapsed days, including fractional-second and DST boundaries.
+- Independent Ubuntu compatibility CI for OpenClaw 2026.6.9 and 2026.7.1-2.
+
+### Safety and compatibility
+
+- Temporal queries use only L1 POST recall; HTTP 4xx and cancellation cannot fall back to stale results or unconstrained keyword search. Transient failures may reuse only matching temporal and identity cache entries.
+- Advanced ordering preserves server order while deduplicating IDs; calls without temporal parameters retain the existing request and cache behavior.
+- Exclude project-local DevFlow state, agent adapters, and workflow documents from source control; release packages retain an explicit product-file allowlist.
+
+### Limitations
+
+- Temporal controls apply to `memory_search`; `xmemo_memory_list` and native MemorySearchManager do not have equivalent coverage.
+- Upstream L0 fix `b2e8857dd` is included in deployment-time SHA `03ec4c375d7ca33aeb061be5aa86561eeb85bfcc`. Current backend SHA attestation and isolated production temporal negative tests (B2) remain **UNVERIFIED**. Client tests do not establish production end-to-end filtering. Historical S3 test provenance is supported by independent re-inspection on 2026-10-25, not equality to the original reviewed byte hash.
+
 ## [1.0.19] - 2026-10-12
 
 ### Fixed

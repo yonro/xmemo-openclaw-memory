@@ -100,6 +100,16 @@ jobs:
           echo "Release version: ${package_version}"
           echo "Release tag: ${expected_tag}"
 
+      - name: Preflight npm version
+        run: |
+          set -euo pipefail
+          package_spec="$(node -p "const p=require('./package.json'); p.name+'@'+p.version")"
+          if npm view "$package_spec" version --json > npm-version-check.json 2> npm-version-check.stderr; then
+            echo "::error::${package_spec} already exists; refusing duplicate publication. Verify the existing artifact before any recovery."
+            exit 1
+          fi
+          node --input-type=module -e 'import fs from "node:fs"; const result=JSON.parse(fs.readFileSync("npm-version-check.json","utf8")); if(result.error?.code!=="E404") { console.error("npm registry preflight failed; publication blocked"); process.exit(1); }'
+
       - name: Build
         run: pnpm build
 
@@ -127,6 +137,7 @@ jobs:
 
       - name: Publish to npm
         run: |
-          npm publish --provenance --access public --tag latest || echo "::warning::npm publish skipped or failed (check NPM_TOKEN secret permissions)"
+          set -euo pipefail
+          npm publish --provenance --access public --tag latest
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -10,6 +10,20 @@ dist/
 reports/
 .claude/
 
+# DevFlow project-local runtime state and generated workflow files
+/.progress/
+/.agents/
+/.codex/hooks.json
+/.github/agents/
+/.github/copilot-instructions.md
+/.github/hooks/devflow-lifecycle.json
+/.github/instructions/progress-files.instructions.md
+/docs/architecture/DESIGN_CANVAS_PACKAGE_EXTRACTION_PLAN.md
+/docs/architecture/DEVFLOW_4AGENT_AUTONOMOUS_FLYWHEEL.md
+/docs/architecture/DEVFLOW_WEBUI_CONTROL_PANEL_PLAN.md
+/docs/operations/CODEX_EVENT_DRIVEN_STANDBY_PROTOCOL.md
+/xmemo-openclaw-memory.code-workspace
+
 # Local planning documents
 plans/
 

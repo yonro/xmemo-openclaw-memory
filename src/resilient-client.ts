@@ -10,7 +10,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { XMemoClient, XMemoClientError, globalBreaker } from "./client.js";
+import { XMemoClient, XMemoClientError, globalBreaker, TEMPORAL_FIELDS, type XMemoTemporalFields } from "./client.js";
 import { XMemoLocalCache } from "./local-cache.js";
 import type { XMemoMemoryConfig } from "./config.js";
 
@@ -104,9 +104,12 @@ export class ResilientXMemoClient {
       maxItems?: number;
       maxTokens?: number;
       preferWorking?: boolean;
-    },
+    } & XMemoTemporalFields,
     signal?: AbortSignal,
   ): Promise<{ result: unknown; fromCache: boolean; isFresh: boolean }> {
+    const temporal = Object.fromEntries(TEMPORAL_FIELDS
+      .filter(key => Object.hasOwn(params, key)).map(key => [key, params[key]])) as XMemoTemporalFields;
+    const temporalActive = Object.keys(temporal).length > 0;
     const cacheParams: Record<string, unknown> = {
       query,
       bucket: params.bucket ?? this.config.readBucket,
@@ -114,6 +117,14 @@ export class ResilientXMemoClient {
       teamId: params.teamId !== undefined ? params.teamId : (this.config.teamId ?? null),
       maxItems: params.maxItems ?? this.config.recallMaxItems,
       maxTokens: params.maxTokens ?? this.config.recallMaxTokens,
+      ...temporal,
+      ...(temporalActive ? {
+        endpoint: "/v1/recall/context",
+        agentId: this.config.agentId,
+        agentInstanceId: this.config.agentInstanceId,
+        authMode: this.config.authMode,
+        preferWorking: params.preferWorking ?? true,
+      } : {}),
     };
 
     // Keep cache available only as a fallback. Recall results can be partial, so
@@ -131,6 +142,7 @@ export class ResilientXMemoClient {
           max_items: params.maxItems ?? this.config.recallMaxItems,
           max_tokens: params.maxTokens ?? this.config.recallMaxTokens,
           prefer_working: params.preferWorking ?? true,
+          ...temporal,
         },
         signal,
       );
@@ -149,7 +161,9 @@ export class ResilientXMemoClient {
 
       // Only allow fallback to stale cache on explicit transient failures (network error, 5xx, timeout).
       // 401/403 (auth), 404 (deterministic miss), and cancellation MUST NOT return cache fallback.
-      if (cached && isTransientError(error)) {
+      const temporalDenied = temporalActive && (signal?.aborted ||
+        (error instanceof XMemoClientError && error.status !== undefined && error.status >= 400 && error.status < 500));
+      if (cached && !temporalDenied && isTransientError(error)) {
         return { result: cached.response, fromCache: true, isFresh: cached.isFresh };
       }
 

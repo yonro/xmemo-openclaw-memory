@@ -24,7 +24,19 @@ export type XMemoRememberResponse = {
   status?: string;
 };
 
-export type XMemoRecallContextRequest = {
+export type XMemoTemporalFields = {
+  since?: string;
+  until?: string;
+  owner_timezone?: string;
+  reference_time?: string;
+  time_order?: "asc" | "desc";
+  query_mode?: "topic" | "activity_log";
+  temporal_axis_mode?: "created_at" | "updated_at" | "split_filter_created_order_updated";
+};
+
+export const TEMPORAL_FIELDS = ["since", "until", "owner_timezone", "reference_time", "time_order", "query_mode", "temporal_axis_mode"] as const;
+
+export type XMemoRecallContextRequest = XMemoTemporalFields & {
   query: string;
   path?: string;
   bucket?: string;
@@ -48,6 +60,7 @@ export type XMemoRecallContextItem = {
   score?: number;
   memory_type?: string;
   updated_at?: string;
+  created_at?: string;
 };
 
 export type XMemoRecallContextResponse = {

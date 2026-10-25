@@ -402,3 +402,13 @@ node scripts/verify-plugin.mjs <解压后的包目录>
 - [GitHub 源代码仓库](https://github.com/yonro/xmemo-openclaw-memory)
 - [问题反馈 (Issues)](https://github.com/yonro/xmemo-openclaw-memory/issues)
 - [版本发布记录 (Releases)](https://github.com/yonro/xmemo-openclaw-memory/releases)
+
+### 时序检索限制
+
+`memory_search` 可选接收 `since`、`until`、`owner_timezone`、`reference_time`、`time_order`（`asc` 或 `desc`）、`query_mode`（`topic` 或 `activity_log`）和 `temporal_axis_mode`（`created_at`、`updated_at` 或 `split_filter_created_order_updated`）。枚举值必须精确匹配；别名、大小写变体、空白、空值、null 和非字符串都会在本地拒绝。`activity_log` 必须同时提供 `since` 与 `until`，且 `since < until`，绝对时长最多为 90 × 86,400 秒。时间窗口为左闭右开 `[since, until)`。例如：`{"query":"项目决策","since":"2026-10-01T00:00:00+09:00","until":"2026-10-02T00:00:00+09:00","owner_timezone":"Asia/Tokyo","time_order":"asc","query_mode":"activity_log","temporal_axis_mode":"created_at"}`。
+
+显式传入七个字段中的任意一个后，仅调用 POST `/v1/recall/context`，不回退到关键词 GET 端点。HTTP 4xx（包括不支持或拒绝参数）、鉴权失败、取消均不使用缓存；网络或 5xx 错误只允许使用时序参数及身份/范围完全相同的缓存。只要传入 `time_order`、`query_mode` 或 `temporal_axis_mode`，结果按 ID 去重并保留服务端顺序；服务端返回的 `created_at`/`updated_at` 放入 `details.results`。不带时序字段的调用保持原有行为。
+
+生产端时序行为尚未验证。上游精确命中 L0 窗口/校验修复（`b2e8857dd`）已于 2026-10-25 核实为上游 master `7fcb20e9ac0bc025b163f97d5e8ef29b36482504` 的祖先；生产部署工作流于 2026-10-23 记录了 `DEPLOY_VERIFIED 03ec4c375d7ca33aeb061be5aa86561eeb85bfcc`，该提交也包含此修复（[部署证据](https://github.com/yunze7373/memory-os/actions/runs/39883964112)）。这是部署时证据，不代表当前运行实例 SHA 或隔离环境端到端时序验证；已部署的旧版本可能让精确命中结果越过请求窗口或跳过校验。省略 `query_mode` 可能进入上游启发式路径；显式 `topic` 是用于关闭时序绕过的模式。这些服务端行为（包括时间轴语义）仍未在生产验证。本地测试只证明客户端校验与请求处理，不证明生产端到端过滤；客户端没有响应窗口兜底。本片不为 `xmemo_memory_list` 或原生 MemorySearchManager 增加时序过滤。
+
+**原生 manager 路径不支持结构化时序过滤。** 已安装 OpenClaw SDK **2026.6.9** 的 `node_modules/openclaw/dist/plugin-sdk/packages/memory-host-sdk/src/host/types.d.ts:101` 定义 `MemorySearchManager.search` 选项为 `maxResults`、`minScore`、`sessionKey`、`qmdSearchModeOverride`、`onDebug`、`sources`、`signal`，没有时序字段。`src/runtime.ts:21` 构造原始 XMemo client 和 manager；`src/search-manager.ts:54` 只向 REST 发送 `query/bucket/scope/team_id/max_items/max_tokens/prefer_working`。上面的时序过滤能力仅属于插件自行注册的 `memory_search` 工具（`src/tools.ts`），不能据此宣称所有宿主原生 memory search 调用都具备时序能力。这些证据限定于该 SDK 版本及所列源码位置。
