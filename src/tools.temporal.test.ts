@@ -86,10 +86,22 @@ describe("memory_search temporal contract", () => {
     });
     expect(result.details.error).toBe("invalid_argument"); expect(fetchMock).not.toHaveBeenCalled();
   });
+  it.each([
+    ["2026-02-01T00:00:00-05:00", "2026-05-02T01:00:00.0000001-04:00"],
+    ["2026-08-03T00:00:00-04:00", "2026-11-01T00:00:00.001-04:00"],
+    ["2026-08-04T00:00:00-04:00", "2026-11-02T00:00:00-05:00"],
+  ])("rejects activity_log windows over 90 elapsed days around DST: %s -> %s", async (since, until) => {
+    const result = await apiTools().get("memory_search").execute("t", {
+      query: "synthetic", query_mode: "activity_log", since, until,
+      owner_timezone: "America/New_York",
+    });
+    expect(result.details.error).toBe("invalid_argument");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
   it.each([400, 422, 401, 403, 408, 429])("does not use warm cache or L2 for HTTP %s", async status => {
     const tool = apiTools().get("memory_search");
     fetchMock.mockResolvedValueOnce(response([{ id: "secret-cache", content: "synthetic" }]));
-    await tool.execute("warm", { query: "synthetic", ...temporal });
+    await tool.execute("warm", { query: "synthetic", ...temporal, query_mode: "topic" });
     fetchMock.mockClear(); globalBreaker.recordSuccess(); fetchMock.mockImplementation(async () => response([], status));
     const result = await tool.execute("fail", { query: "synthetic", ...temporal, query_mode: "topic" });
     expect(result.details.status).toBe(status);
