@@ -242,7 +242,6 @@ export async function requestDeviceLoginStart(
     "memory:read",
     "memory:write",
     "memory:restore",
-    "ledger:write",
     "ledger:read",
   ],
   fetchFn: typeof fetch = fetch,
@@ -330,6 +329,12 @@ export async function runDeviceLoginCommand(
   const baseUrl = opts.baseUrl || cfg.baseUrl || "https://xmemo.dev";
   const fetchFn = opts.fetchFn ?? fetch;
 
+  if (!opts.dryRun) {
+    console.log("Successful login replaces the shared XMemo credential used by other clients.");
+    if (!opts.scopes?.includes("ledger:write")) {
+      console.log("Ledger writes are not requested. If other clients use this credential for expenses, use --scopes with ledger:write and all other required scopes before authorizing.");
+    }
+  }
   console.log(`Requesting authorization from ${baseUrl}...`);
   const start = await requestDeviceLoginStart(baseUrl, opts.scopes, fetchFn);
 
@@ -406,7 +411,7 @@ export function registerXMemoCli(api: OpenClawPluginApi): void {
         .option("--stdin", "Read the XMemo API key from stdin")
         .option("--env <name>", "Use an environment SecretRef instead of storing a plaintext key")
         .option("--no-open", "Do not automatically launch the browser (deprecated)")
-        .option("--scopes <scopes>", "Comma-separated scopes")
+        .option("--scopes <scopes>", "Comma-separated scopes replacing the defaults; include all required scopes")
         .option("--base-url <url>", "XMemo service URL override")
         .option("--dry-run", "Show what would change without writing config")
         .action(
