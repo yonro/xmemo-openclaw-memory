@@ -226,6 +226,23 @@ openclaw xmemo status
 
 注意：Shell `export` 仅在当前会话生效。若作为守护进程（Daemon）或网关服务运行，请在 systemd、Docker 或服务启动环境中注入。
 
+### 浏览器登录权限与共享凭据
+
+`openclaw xmemo login` 默认申请 `memory:read`、`memory:write`、
+`memory:restore` 和 `ledger:read`。原生账本工具查询月度汇总，不提供新增支出操作。
+升级插件本身不会撤销或收窄已有凭据的权限。
+
+浏览器登录成功后会替换用户级共享凭据。其他读取该文件的客户端，可能因此失去新凭据未包含的权限。
+如果还通过 XMemo Skill 或 MCP 复用这份凭据记录支出，请明确申请写账权限：
+
+```bash
+openclaw xmemo login --scopes "memory:read,memory:write,memory:restore,ledger:read,ledger:write"
+```
+
+`--scopes` 会替换整份默认权限列表，不是追加；请同时包含其他客户端需要的权限。
+审计工具仍和以前一样需要单独的审计权限。实际授权受服务端策略约束。
+如需保留已有共享登录并独立配置插件，请使用 `openclaw xmemo setup --env XMEMO_KEY` 引用插件专用凭据。
+
 ### 凭据解析优先级
 
 插件按以下顺序查找可用凭据：

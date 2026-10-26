@@ -253,6 +253,28 @@ openclaw xmemo status
 A shell `export` affects only that shell. Daemon or gateway deployments must set
 the variable in the service environment.
 
+### Browser login permissions and shared credentials
+
+Browser authorization with `openclaw xmemo login` requests `memory:read`,
+`memory:write`, `memory:restore`, and `ledger:read` by default. The native ledger
+tool reads monthly summaries; it does not add expenses. Existing credentials
+are not revoked or narrowed by upgrading the plugin.
+
+A successful browser login replaces the shared user credential. Other clients
+using that file may therefore lose permissions absent from the new token.
+If you also use the XMemo Skill or MCP to record expenses with this credential,
+explicitly request ledger writes:
+
+```bash
+openclaw xmemo login --scopes "memory:read,memory:write,memory:restore,ledger:read,ledger:write"
+```
+
+`--scopes` replaces the complete default list; it does not append to it. Include
+any additional scopes your other clients require. Audit tools still require
+separate audit permission, as before. Requested permissions are subject to the
+server's authorization policy. To keep an existing shared login separate, configure
+a plugin-specific credential with `openclaw xmemo setup --env XMEMO_KEY`.
+
 ### Credential resolution
 
 The plugin resolves credentials in this order:

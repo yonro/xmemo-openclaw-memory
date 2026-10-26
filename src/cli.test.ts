@@ -161,6 +161,88 @@ describe("xmemo CLI key config helpers", () => {
   });
 
   describe("device code browser authorization", () => {
+    it("does not request ledger:write in the default authorization scopes", async () => {
+      let requestedScopes: string[] = [];
+      const mockFetch = async (_input: unknown, init?: unknown) => {
+        const body = JSON.parse((init as { body?: string })?.body || "{}");
+        requestedScopes = body.scopes;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            device_code: "dev_123",
+            user_code: "USER-456",
+            verification_uri: "https://xmemo.dev/device-login",
+            expires_in: 300,
+            interval: 2,
+          }),
+        } as Response;
+      };
+
+      await requestDeviceLoginStart(
+        "https://xmemo.dev",
+        undefined,
+        mockFetch as unknown as typeof fetch,
+      );
+
+      expect(requestedScopes).toContain("ledger:read");
+      expect(requestedScopes).not.toContain("ledger:write");
+      expect(requestedScopes).toEqual([
+        "memory:read", "memory:write", "memory:restore", "ledger:read",
+      ]);
+    });
+
+    it.each([false, true])("persists a usable shared login with explicit ledger writes=%s", async (withLedgerWrites) => {
+      const root = mkdtempSync(join(tmpdir(), "xmemo-login-scopes-"));
+      vi.stubEnv("XMEMO_CONFIG_HOME", root);
+      const logs: string[] = [];
+      const logSpy = vi.spyOn(console, "log").mockImplementation((...args) => {
+        logs.push(args.map(String).join(" "));
+      });
+      const scopes = ["memory:read", "memory:write", "memory:restore", "ledger:read", "ledger:write"];
+      const draft = {} as OpenClawConfig;
+      let requestedScopes: string[] = [];
+      const token = "xmemo_synthetic_scope_login";
+      const api = {
+        config: {},
+        runtime: { config: { async mutateConfigFile(params: {
+          mutate: (draft: OpenClawConfig, context: unknown) => void;
+        }) {
+          params.mutate(draft, {});
+        } } },
+      } as unknown as Parameters<typeof runDeviceLoginCommand>[0];
+      const fetchFn = vi.fn(async (input: unknown, init?: RequestInit) => {
+        if (String(input).endsWith("/device/start")) {
+          requestedScopes = JSON.parse(String(init?.body)).scopes;
+          return new Response(JSON.stringify({
+            device_code: "synthetic-device", user_code: "SYNTHETIC",
+            verification_uri: "https://xmemo.dev/device-login", interval: 1,
+          }));
+        }
+        expect(String(input)).toBe("https://xmemo.dev/api/v1/auth/device/token");
+        return new Response(JSON.stringify({ access_token: token }));
+      });
+      try {
+        await saveXMemoSharedCredential("xmemo_synthetic_previous", { XMEMO_CONFIG_HOME: root });
+        await runDeviceLoginCommand(api, {
+          scopes: withLedgerWrites ? scopes : undefined,
+          fetchFn: fetchFn as typeof fetch, sleepFn: async () => {},
+        });
+        expect(requestedScopes).toEqual(withLedgerWrites ? scopes : scopes.slice(0, -1));
+        expect(xmemoEntry(draft).config?.apiKey).toBe(token);
+        expect(draft.plugins?.slots?.memory).toBe("xmemo-memory");
+        expect(resolveXMemoMemoryConfig({}, { XMEMO_CONFIG_HOME: root }).apiKey).toBe(token);
+        expect(logs.join("\n")).toContain("replaces the shared XMemo credential");
+        expect(logs.join("\n").includes("Ledger writes are not requested")).toBe(!withLedgerWrites);
+        expect(logs.join("\n")).not.toContain(token);
+        expect(fetchFn).toHaveBeenCalledTimes(2);
+      } finally {
+        logSpy.mockRestore();
+        vi.unstubAllEnvs();
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
     it("requests device login start and parses returned endpoints", async () => {
       const mockFetch = async (input: unknown, init?: unknown) => {
         expect(String(input)).toBe("https://xmemo.dev/api/v1/auth/device/start");

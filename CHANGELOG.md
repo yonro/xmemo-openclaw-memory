@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.1] - 2026-10-26
+
+### Security
+
+- Remove `ledger:write` from default browser-login scopes. Keep `memory:read`, `memory:write`, `memory:restore`, and `ledger:read`; native memory operations and ledger summaries remain available with the required server permissions.
+- Preserve explicit `--scopes` overrides for clients that need ledger writes. The option replaces the entire default list, so include every required permission.
+
+### Changed
+
+- Explain before browser authorization that successful login replaces the shared XMemo credential, and flag when ledger writes are not requested.
+- Add English and Chinese instructions for shared-credential users who also record expenses through XMemo Skill or MCP, plus login and credential-persistence regression coverage.
+
+### Upgrade notes
+
+- Upgrading does not revoke existing tokens or remove their granted permissions. To drop a previously granted `ledger:write`, obtain a narrower credential and revoke the old token through account controls.
+- Re-login replaces the shared credential: clients using that file may lose permissions omitted from the new token. For expense recording, explicitly include `ledger:write` along with the memory and ledger-read scopes described in the README. Server policy determines the actual grant.
+- The production temporal-filtering verification limitation (B2 **UNVERIFIED**) documented in 1.1.0 remains unchanged. Local and CI tests do not establish live server authorization or production end-to-end filtering.
+
 ## [1.1.0] - 2026-10-25
 
 ### Added
